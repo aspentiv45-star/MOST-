@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# MOST — удаление моста с российского сервера.
+# MOST — удаление бота и AmneziaWG. Ключи и конфиги сохраняются в /root/most-backup.
 set -euo pipefail
 
 [[ $EUID -eq 0 ]] || { echo "Запустите через sudo" >&2; exit 1; }
 
-systemctl stop xray 2>/dev/null || true
-bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge
-rm -f /root/most-client.txt /etc/sysctl.d/99-most.conf
-echo "Мост удалён."
+BACKUP=/root/most-backup-$(date +%s)
+mkdir -p "$BACKUP"
+cp -a /etc/amnezia/amneziawg /var/lib/most /etc/most "$BACKUP"/ 2>/dev/null || true
+
+systemctl disable --now most-bot awg-quick@awg0 2>/dev/null || true
+rm -rf /opt/most /etc/most /var/lib/most /etc/systemd/system/most-bot.service /etc/sysctl.d/99-most.conf
+rm -f /etc/amnezia/amneziawg/awg0.conf
+systemctl daemon-reload
+echo "Удалено. Резервная копия ключей и конфигов: $BACKUP"
