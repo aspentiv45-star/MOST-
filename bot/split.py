@@ -181,4 +181,19 @@ def _report():
 
 
 if __name__ == "__main__":
-    _report()
+    import sys
+
+    if "--ru" in sys.argv:
+        # Для ru-route.sh: российские сети, по одной на строку.
+        print("\n".join(map(str, ipaddress.collapse_addresses(fetch_ru_networks()))))
+    elif "--force" in sys.argv:
+        # Для ru-route.sh: сети «всегда через Нидерланды», включая /etc/most/force_vpn.txt.
+        extra = []
+        try:
+            with open("/etc/most/force_vpn.txt") as f:
+                extra = [line.split("#")[0].strip() for line in f if line.split("#")[0].strip()]
+        except FileNotFoundError:
+            pass
+        print("\n".join([*FORCE_VPN, *extra]))
+    else:
+        _report()

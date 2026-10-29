@@ -79,6 +79,7 @@ if [[ -f "$ENV_FILE" ]]; then
   [[ -n "$DAYS" ]] || DAYS="$(old DAYS)"
   [[ -n "$MAX_PEERS" ]] || MAX_PEERS="$(old MAX_PEERS)"
   [[ -n "$RELAY" ]] || RELAY="$(old RELAY_HOST)"
+  SPLIT="$(old SPLIT_RU)"
 fi
 PRICE="${PRICE:-200}"
 DAYS="${DAYS:-30}"
@@ -191,6 +192,8 @@ STATE_FILE=/var/lib/most/state.json
 MAX_PEERS=$MAX_PEERS
 RELAY_HOST=$RELAY
 EOF
+# SPLIT_RU=0 ставит ru-route.sh — сохраняем его при переустановке.
+[[ -n "${SPLIT:-}" ]] && echo "SPLIT_RU=$SPLIT" >>"$ENV_FILE"
 if [[ -n "$PAY" ]]; then
   printf '%s\n' "$PAY" >/etc/most/pay.txt
 elif [[ ! -f /etc/most/pay.txt ]]; then
