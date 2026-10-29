@@ -62,6 +62,24 @@ sudo bash install.sh --link 'vless://...' --sni www.vk.com
 - Транспорт: `tcp` (raw), `ws`, `grpc`, `xhttp`, `httpupgrade`
 - Безопасность: `reality`, `tls`, `none`
 
+## AmneziaWG через Нидерланды
+
+Если на RU-сервере уже стоит AmneziaWG (интерфейс `awg0`), его клиентов можно пустить
+в Нидерланды через тот же мост. Конфиги AmneziaWG на телефонах менять не нужно.
+
+```
+Телефон (AmneziaWG) ──► RU-сервер ──► Xray ──► NL-сервер ──► Интернет
+```
+
+```bash
+sudo bash awg.sh on       # включить
+sudo bash awg.sh status   # состояние
+sudo bash awg.sh off      # выключить — AmneziaWG снова выходит из России
+```
+
+Российские сайты по-прежнему открываются напрямую. После повторного запуска
+`install.sh` выполните `sudo bash awg.sh on` ещё раз.
+
 ## Проверка и обслуживание
 
 ```bash
