@@ -18,6 +18,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -360,7 +361,7 @@ async def new_config(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         params = server_params()
-        names = {p["name"] for p in mine}
+        names = {p["name"] for p in mine.values()}
         old_state = json.loads(json.dumps(state))
         n = next(i for i in range(1, 1000) if f"vpn{i}" not in names)
         priv = run(["awg", "genkey"])
@@ -723,6 +724,10 @@ async def expiry_loop():
 async def report_error(title, exc):
     """Пишет ошибку в лог и присылает её администраторам в админ-бот."""
     detail = exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else repr(exc)
+    # Последние строки трассировки — чтобы по сообщению было видно, где именно упало.
+    frames = traceback.extract_tb(exc.__traceback__)[-3:]
+    if frames:
+        detail += "\n" + "\n".join(f"{os.path.basename(f.filename)}:{f.lineno} {f.name}: {f.line}" for f in frames)
     log.error("%s: %s", title, detail, exc_info=exc)
     for admin in ADMINS:
         try:
