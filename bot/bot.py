@@ -51,6 +51,7 @@ SEND_DIRECT = os.environ.get("SEND_DIRECT", "0") == "1"
 CLIENT_DNS = os.environ.get("CLIENT_DNS", "1.1.1.1, 1.0.0.1")
 MAX_PEERS = int(os.environ.get("MAX_PEERS", "5"))
 PRICE = int(os.environ.get("PRICE", "200"))
+ROUTER_PRICE = int(os.environ.get("ROUTER_PRICE", "500"))
 DAYS = int(os.environ.get("DAYS", "30"))
 PAY_FILE = os.environ.get("PAY_FILE", "/etc/most/pay.txt")
 # approve — купить может только тот, кого администратор пустил; open — любой.
@@ -65,13 +66,15 @@ FORCE_FILE = os.environ.get("FORCE_FILE", "/etc/most/force_vpn.txt")
 FULL_TUNNEL = "0.0.0.0/0, ::/0"
 
 DAY = 86400
-NEW = "new"  # цель оплаты «новый конфиг»; иначе цель — публичный ключ продлеваемого конфига
+# Цель оплаты: новый конфиг для устройства или для роутера; иначе — публичный ключ продлеваемого конфига.
+NEW = "new"
+NEW_ROUTER = "new-router"
 
 # Параметры обфускации AmneziaWG: клиенту они нужны точно такими же, как у сервера.
 OBFS_KEYS = ("Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
              "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5")
 
-BTN_BUY = f"➕ Купить конфиг — {PRICE} ₽"
+BTN_BUY = "➕ Купить конфиг"
 BTN_LIST = "📄 Мои конфиги"
 BTN_HELP = "❓ Как подключить"
 KEYBOARD = ReplyKeyboardMarkup([[BTN_BUY], [BTN_LIST, BTN_HELP]], resize_keyboard=True)
@@ -86,7 +89,8 @@ HELP_TEXT = (
     + ("Российские сайты и приложения работают напрямую, VPN выключать не нужно.\n\n" if SPLIT_RU else "")
     + ("Если конфиг с «-nl» в названии не подключается — пользуйтесь основным.\n\n"
        if RELAY_HOST and SEND_DIRECT else "")
-    + f"Один конфиг — одно устройство, {DAYS} дней — {PRICE} ₽. Для второго устройства купите ещё один конфиг.\n"
+    + f"Цены на {DAYS} дней: конфиг для себя (одно устройство) — {PRICE} ₽, для роутера (весь дом) — {ROUTER_PRICE} ₽.\n"
+    "Для второго устройства купите ещё один конфиг.\n"
     f"Продлить конфиг: «{BTN_LIST}» → «🔄 Продлить»."
 )
 
@@ -247,13 +251,24 @@ def next_free_ip(state, params):
     raise RuntimeError("в подсети закончились адреса")
 
 
-def create_peer(state, uid, until):
+def is_router(state, target):
+    if target == NEW_ROUTER:
+        return True
+    return state["peers"].get(target, {}).get("kind") == "router"
+
+
+def price_for(state, target):
+    return ROUTER_PRICE if is_router(state, target) else PRICE
+
+
+def create_peer(state, uid, until, kind="device"):
     """Добавляет конфиг в state (без применения на сервере). Возвращает его ключ и данные."""
+    prefix = "rtr" if kind == "router" else "vpn"
     names = {p["name"] for p in user_peers(state, uid).values()}
-    n = next(i for i in range(1, 1000) if f"vpn{i}" not in names)
+    n = next(i for i in range(1, 1000) if f"{prefix}{i}" not in names)
     priv = run(["awg", "genkey"])
     pub = run(["awg", "pubkey"], priv + "\n")
-    peer = {"user": str(uid), "name": f"vpn{n}", "ip": next_free_ip(state, server_params()),
+    peer = {"user": str(uid), "name": f"{prefix}{n}", "kind": kind, "ip": next_free_ip(state, server_params()),
             "priv": priv, "created": fmt_date(time.time()), "until": until, "warned": 0}
     state["peers"][pub] = peer
     return pub, peer
@@ -333,12 +348,42 @@ async def send_peer(chat_id, peer):
         text = client_conf(peer, params, host)
         await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()), filename=filename,
                                      caption=f"{filename} — {peer_status(peer)}")
+        if peer.get("kind") == "router":
+            continue
         # Конфиг с раздельным туннелем не помещается в QR-код — тогда только файл.
         if len(text) < 2000:
             png = io.BytesIO()
             qrcode.make(text).save(png, format="PNG")
             png.seek(0)
             await USER_BOT.send_photo(chat_id, photo=png, caption=f"QR-код: {filename}")
+    if peer.get("kind") == "router":
+        await USER_BOT.send_message(chat_id, router_help(peer, params))
+
+
+ROUTER_REQUIREMENTS = (
+    "Подходят только роутеры с поддержкой AmneziaWG:\n"
+    "• Keenetic с KeeneticOS 4.2 или новее;\n"
+    "• роутеры с прошивкой OpenWrt и пакетом amneziawg.\n"
+    "Обычный WireGuard (TP-Link, Asus, MikroTik, роутеры провайдеров) не подойдёт — подключение не заработает."
+)
+
+
+def router_help(peer, params):
+    asc = " ".join(params.get(k, "0") for k in ("Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"))
+    return (
+        f"📡 Настройка роутера Keenetic для {peer['name']}\n\n"
+        "1. Откройте my.keenetic.net → «Интернет» → «Другие подключения» → «WireGuard» → "
+        f"«Загрузить из файла» и выберите файл {peer['name']}.conf.\n"
+        "2. В настройках подключения включите «Использовать для выхода в интернет».\n"
+        "3. Откройте my.keenetic.net/a (командная строка) и выполните по очереди, "
+        "заменив Wireguard0 на имя вашего подключения, если оно другое:\n\n"
+        f"interface Wireguard0 wireguard asc {asc}\n"
+        "system configuration save\n\n"
+        "4. Выключите и включите подключение. Проверьте с любого устройства дома: на ipinfo.io должны быть Нидерланды.\n\n"
+        "OpenWrt: установите пакеты kmod-amneziawg, amneziawg-tools, luci-proto-amneziawg "
+        "и импортируйте файл в «Network → Interfaces → Add new interface → AmneziaWG».\n\n"
+        "Один конфиг — один роутер. Торренты через VPN заблокированы."
+    )
 
 
 def pay_text():
@@ -352,7 +397,9 @@ def pay_text():
 
 def target_label(state, target):
     if target == NEW:
-        return "новый конфиг"
+        return "новый конфиг для себя"
+    if target == NEW_ROUTER:
+        return "новый конфиг для роутера"
     peer = state["peers"].get(target)
     return f"продление {peer['name']} ({peer_status(peer)})" if peer else "продление удалённого конфига"
 
@@ -386,7 +433,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mine = user_peers(state, update.effective_user.id)
     active = sum(1 for p in mine.values() if peer_active(p))
     await update.message.reply_text(
-        f"Привет! Это VPN на AmneziaWG.\nОдин конфиг (одно устройство) — {PRICE} ₽ за {DAYS} дней.\n\n"
+        f"Привет! Это VPN на AmneziaWG.\nНа {DAYS} дней: для себя (одно устройство) — {PRICE} ₽, "
+        f"для роутера (весь дом) — {ROUTER_PRICE} ₽.\n\n"
         + (f"Ваших конфигов: {len(mine)}, активных: {active}. Подробнее — «{BTN_LIST}»." if mine
            else f"Чтобы подключиться, нажмите «{BTN_BUY}»."),
         reply_markup=KEYBOARD)
@@ -394,8 +442,10 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def ask_payment(message, ctx, target, state):
     ctx.user_data["pay_for"] = target
+    warning = f"{ROUTER_REQUIREMENTS}\n\n" if target == NEW_ROUTER else ""
     await message.reply_text(
-        f"Оплата: {target_label(state, target)} — {PRICE} ₽ за {DAYS} дней.\n\n{pay_text()}\n\n"
+        f"Оплата: {target_label(state, target)} — {price_for(state, target)} ₽ за {DAYS} дней.\n\n"
+        f"{warning}{pay_text()}\n\n"
         "После оплаты пришлите сюда скриншот перевода одним фото. "
         "Администратор проверит его, и бот сразу пришлёт результат.")
 
@@ -410,7 +460,12 @@ async def buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"У вас уже {MAX_PEERS} конфигов — это максимум. Продлите или удалите ненужный в «{BTN_LIST}».")
         return
-    await ask_payment(update.message, ctx, NEW, state)
+    await update.message.reply_text(
+        f"Что подключаем? Срок — {DAYS} дней.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"📱 Для себя (телефон, ПК) — {PRICE} ₽", callback_data=f"buy:{NEW}")],
+            [InlineKeyboardButton(f"📡 Для роутера (весь дом) — {ROUTER_PRICE} ₽", callback_data=f"buy:{NEW_ROUTER}")],
+        ]))
 
 
 async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -436,7 +491,8 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if target is None:
         # Непонятно, за что оплата — спрашиваем, картинку держим до ответа.
         ctx.user_data["pending_photo"] = (data, msg.caption)
-        rows = [[InlineKeyboardButton(f"➕ Новый конфиг — {PRICE} ₽", callback_data=f"payfor:{NEW}")]]
+        rows = [[InlineKeyboardButton(f"📱 Новый для себя — {PRICE} ₽", callback_data=f"payfor:{NEW}")],
+                [InlineKeyboardButton(f"📡 Новый для роутера — {ROUTER_PRICE} ₽", callback_data=f"payfor:{NEW_ROUTER}")]]
         rows += [[InlineKeyboardButton(f"🔄 Продлить {p['name']}", callback_data=f"payfor:{pub}")]
                  for pub, p in mine.items()]
         await msg.reply_text("За что эта оплата?", reply_markup=InlineKeyboardMarkup(rows))
@@ -450,11 +506,12 @@ async def submit_payment(user, target, data, comment, reply_to):
         u = get_user(state, user)
         pid = str(state["next_payment"])
         state["next_payment"] += 1
+        price = price_for(state, target)
         state["payments"][pid] = {"user": str(user.id), "target": target, "status": "pending",
-                                  "created": int(time.time())}
+                                  "price": price, "created": int(time.time())}
         save_state(state)
 
-    caption = (f"Оплата №{pid} — {PRICE} ₽\n{u['name']}\nID {user.id}\n"
+    caption = (f"Оплата №{pid} — {price} ₽\n{u['name']}\nID {user.id}\n"
                f"За: {target_label(state, target)}")
     if comment:
         caption += f"\nКомментарий: {comment}"
@@ -485,9 +542,10 @@ async def list_configs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for pub, p in mine.items():
         row = [InlineKeyboardButton("⬇️ Скачать", callback_data=f"get:{pub}")]
         if not is_admin(p["user"]):
-            row.append(InlineKeyboardButton(f"🔄 Продлить — {PRICE} ₽", callback_data=f"renew:{pub}"))
+            row.append(InlineKeyboardButton(f"🔄 Продлить — {price_for(state, pub)} ₽", callback_data=f"renew:{pub}"))
         buttons = InlineKeyboardMarkup([row, [InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}")]])
-        await update.message.reply_text(f"{p['name']} — {peer_status(p)}", reply_markup=buttons)
+        icon = "📡" if p.get("kind") == "router" else "📱"
+        await update.message.reply_text(f"{icon} {p['name']} — {peer_status(p)}", reply_markup=buttons)
 
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -499,6 +557,15 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = query.from_user.id
     action, _, arg = query.data.partition(":")
     await query.answer()
+
+    if action == "buy":
+        state = load_state()
+        if not is_approved(state, uid):
+            await query.edit_message_text(closed_text(state, uid))
+            return
+        await query.edit_message_text(f"Выбрано: {target_label(state, arg)}.")
+        await ask_payment(query.message, ctx, arg, state)
+        return
 
     if action == "payfor":
         pending = ctx.user_data.pop("pending_photo", None)
@@ -585,8 +652,9 @@ async def grant(uid, target, days, paid=True):
         state = load_state()
         old_state = json.loads(json.dumps(state))
         state["users"].setdefault(str(uid), {"name": str(uid)})["approved"] = True
-        if target == NEW:
-            pub, peer = create_peer(state, uid, time.time() + days * DAY)
+        if target in (NEW, NEW_ROUTER):
+            kind = "router" if target == NEW_ROUTER else "device"
+            pub, peer = create_peer(state, uid, time.time() + days * DAY, kind)
         else:
             pub, peer = target, state["peers"].get(target)
             if not peer:
@@ -598,7 +666,7 @@ async def grant(uid, target, days, paid=True):
 
     head = "Оплата подтверждена!" if paid else "Подарок от администратора!"
     try:
-        if target == NEW:
+        if target in (NEW, NEW_ROUTER):
             await USER_BOT.send_message(uid, f"{head} Ваш новый конфиг {peer['name']} "
                                              f"активен до {fmt_date(peer['until'])}:", reply_markup=KEYBOARD)
             await send_peer(uid, peer)
@@ -684,7 +752,8 @@ async def admin_give_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["await"] = "give"
     await update.message.reply_text(
         f"Пришлите ID клиента и, через пробел, число дней (по умолчанию {DAYS}).\n"
-        f"Например: 123456789 {DAYS}\n\n"
+        f"Например: 123456789 {DAYS}\n"
+        f"Для роутера добавьте слово «роутер»: 123456789 {DAYS} роутер\n\n"
         "Клиент получит новый конфиг бесплатно. ID видно в его оплатах и в «👥 Клиенты». "
         "Клиент должен хотя бы раз нажать /start в клиентском боте.")
 
@@ -698,13 +767,15 @@ async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if waiting != "give":
         await update.message.reply_text("Выберите действие на кнопках ниже.", reply_markup=ADMIN_KEYBOARD)
         return
-    parts = update.message.text.split()
+    words = update.message.text.lower().split()
+    router = any(w.startswith(("роут", "router")) for w in words)
+    parts = [w for w in words if not w.startswith(("роут", "router"))]
     if not parts or not parts[0].isdigit() or (len(parts) > 1 and not parts[1].isdigit()):
         ctx.user_data["await"] = "give"
         await update.message.reply_text(f"Нужно число — ID клиента. Например: 123456789 {DAYS}")
         return
     uid, days = int(parts[0]), int(parts[1]) if len(parts) > 1 else DAYS
-    result = await grant(uid, NEW, days, paid=False)
+    result = await grant(uid, NEW_ROUTER if router else NEW, days, paid=False)
     await update.message.reply_text(f"Готово: выдан конфиг.\n{result}", reply_markup=ADMIN_KEYBOARD)
 
 
@@ -859,9 +930,10 @@ async def admin_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         rows.append(f"{names.get(pub, pub[:8])}: вход {ago}, ↓{rx / 2**20:.0f} МБ ↑{tx / 2**20:.0f} МБ")
     active = sum(1 for p in state["peers"].values() if peer_active(p) and not is_admin(p["user"]))
     approved = sum(1 for p in state["payments"].values() if p["status"] == "approved")
+    revenue = sum(p.get("price", PRICE) for p in state["payments"].values() if p["status"] == "approved")
     await update.message.reply_text(
         f"Оплаченных конфигов сейчас: {active}\nОдобренных оплат всего: {approved} "
-        f"(≈ {approved * PRICE} ₽)\n\n" + ("\n".join(rows) or "Подключений нет."),
+        f"(≈ {revenue} ₽)\n\n" + ("\n".join(rows) or "Подключений нет."),
         reply_markup=ADMIN_KEYBOARD)
 
 

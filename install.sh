@@ -22,6 +22,7 @@ ADMIN_TOKEN=""
 ADMIN=""
 PAY=""
 PRICE=""
+ROUTER_PRICE=""
 DAYS=""
 RELAY=""
 PORT=""
@@ -39,7 +40,8 @@ usage() {
   --admin-token ТОКЕН  токен второго бота — для администратора (оплаты, клиенты)
   --admin ID           ваш Telegram ID (узнать: @userinfobot); несколько — через запятую
   --pay 'ТЕКСТ'        реквизиты для оплаты, их увидит клиент
-  --price N            цена подписки в рублях (по умолчанию 200)
+  --price N            цена конфига для устройства в рублях (по умолчанию 200)
+  --router-price N     цена конфига для роутера в рублях (по умолчанию 500)
   --days N             срок подписки в днях (по умолчанию 30)
   --relay IP           IP сервера-входа для белых списков (см. relay.sh); --relay off — убрать
   --access approve|open  approve (по умолчанию) — новые люди могут купить только после вашего одобрения
@@ -59,6 +61,7 @@ while [[ $# -gt 0 ]]; do
     --admin) ADMIN="$2"; shift 2 ;;
     --pay) PAY="$2"; shift 2 ;;
     --price) PRICE="$2"; shift 2 ;;
+    --router-price) ROUTER_PRICE="$2"; shift 2 ;;
     --days) DAYS="$2"; shift 2 ;;
     --relay) RELAY="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
@@ -79,6 +82,7 @@ if [[ -f "$ENV_FILE" ]]; then
   [[ -n "$ADMIN_TOKEN" ]] || ADMIN_TOKEN="$(old ADMIN_BOT_TOKEN)"
   [[ -n "$ADMIN" ]] || ADMIN="$(old ADMIN_IDS)"
   [[ -n "$PRICE" ]] || PRICE="$(old PRICE)"
+  [[ -n "$ROUTER_PRICE" ]] || ROUTER_PRICE="$(old ROUTER_PRICE)"
   [[ -n "$DAYS" ]] || DAYS="$(old DAYS)"
   [[ -n "$MAX_PEERS" ]] || MAX_PEERS="$(old MAX_PEERS)"
   [[ -n "$RELAY" ]] || RELAY="$(old RELAY_HOST)"
@@ -86,6 +90,7 @@ if [[ -f "$ENV_FILE" ]]; then
   SPLIT="$(old SPLIT_RU)"
 fi
 PRICE="${PRICE:-200}"
+ROUTER_PRICE="${ROUTER_PRICE:-500}"
 DAYS="${DAYS:-30}"
 MAX_PEERS="${MAX_PEERS:-3}"
 ACCESS="${ACCESS:-approve}"
@@ -211,6 +216,7 @@ BOT_TOKEN=$TOKEN
 ADMIN_BOT_TOKEN=$ADMIN_TOKEN
 ADMIN_IDS=$ADMIN
 PRICE=$PRICE
+ROUTER_PRICE=$ROUTER_PRICE
 DAYS=$DAYS
 PAY_FILE=/etc/most/pay.txt
 ENDPOINT_HOST=$PUBLIC_IP
