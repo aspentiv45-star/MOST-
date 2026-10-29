@@ -24,6 +24,8 @@ PAY=""
 PRICE=""
 ROUTER_PRICE=""
 TRIAL=""
+AUTOPAY=""
+BANK_PORT=8787
 DAYS=""
 RELAY=""
 PORT=""
@@ -44,6 +46,7 @@ usage() {
   --price N            цена конфига для устройства в рублях (по умолчанию 200)
   --router-price N     цена конфига для роутера в рублях (по умолчанию 500)
   --trial N            бесплатный пробный период в днях для новых клиентов (по умолчанию 3, 0 — выключить)
+  --autopay on|off     автоматическое подтверждение оплат по уведомлениям банка (телефон + MacroDroid)
   --days N             срок подписки в днях (по умолчанию 30)
   --relay IP           IP сервера-входа для белых списков (см. relay.sh); --relay off — убрать
   --access approve|open  approve (по умолчанию) — новые люди могут купить только после вашего одобрения
@@ -65,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --price) PRICE="$2"; shift 2 ;;
     --router-price) ROUTER_PRICE="$2"; shift 2 ;;
     --trial) TRIAL="$2"; shift 2 ;;
+    --autopay) AUTOPAY="$2"; shift 2 ;;
     --days) DAYS="$2"; shift 2 ;;
     --relay) RELAY="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
@@ -87,6 +91,7 @@ if [[ -f "$ENV_FILE" ]]; then
   [[ -n "$PRICE" ]] || PRICE="$(old PRICE)"
   [[ -n "$ROUTER_PRICE" ]] || ROUTER_PRICE="$(old ROUTER_PRICE)"
   [[ -n "$TRIAL" ]] || TRIAL="$(old TRIAL_DAYS)"
+  BANK_SECRET="$(old BANK_SECRET)"
   [[ -n "$DAYS" ]] || DAYS="$(old DAYS)"
   [[ -n "$MAX_PEERS" ]] || MAX_PEERS="$(old MAX_PEERS)"
   [[ -n "$RELAY" ]] || RELAY="$(old RELAY_HOST)"
@@ -96,6 +101,13 @@ fi
 PRICE="${PRICE:-200}"
 ROUTER_PRICE="${ROUTER_PRICE:-500}"
 TRIAL="${TRIAL:-3}"
+BANK_SECRET="${BANK_SECRET:-}"
+case "$AUTOPAY" in
+  on) [[ -n "$BANK_SECRET" ]] || BANK_SECRET="$(head -c 18 /dev/urandom | base64 | tr -d '/+=')" ;;
+  off) BANK_SECRET="" ;;
+  "") ;;
+  *) die "--autopay: on или off" ;;
+esac
 DAYS="${DAYS:-30}"
 MAX_PEERS="${MAX_PEERS:-3}"
 ACCESS="${ACCESS:-approve}"
@@ -212,6 +224,10 @@ if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow "$R_PORT"/udp comment "MOST routers" >/dev/null
 fi
 
+if [[ -n "$BANK_SECRET" ]] && command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+  ufw allow "$BANK_PORT"/tcp comment "MOST autopay" >/dev/null
+fi
+
 echo "==> Блокирую торренты и спам (защита от жалоб хостинга)"
 install -m 755 "$SCRIPT_DIR/abuse-rules.sh" /usr/local/sbin/most-abuse
 cat >/etc/systemd/system/most-abuse.service <<EOF
@@ -249,6 +265,8 @@ ADMIN_IDS=$ADMIN
 PRICE=$PRICE
 ROUTER_PRICE=$ROUTER_PRICE
 TRIAL_DAYS=$TRIAL
+BANK_SECRET=$BANK_SECRET
+BANK_PORT=$BANK_PORT
 DAYS=$DAYS
 PAY_FILE=/etc/most/pay.txt
 ENDPOINT_HOST=$PUBLIC_IP
@@ -302,6 +320,10 @@ cat <<EOF
   Реквизиты для оплаты: /etc/most/pay.txt (можно менять без перезапуска)
 
 Если у хостинга есть свой файрвол — откройте в нём UDP-порт $PORT.
+$([[ -n "$BANK_SECRET" ]] && printf '%s\n%s\n%s\n\n' \
+  "Автооплата включена. Адрес для MacroDroid на телефоне с Т-Банком:" \
+  "  http://$PUBLIC_IP:$BANK_PORT/bank?key=$BANK_SECRET" \
+  "  (если у хостинга свой файрвол — откройте TCP-порт $BANK_PORT; проверка: /bank в админ-боте)")
 Логи бота:  journalctl -u most-bot -f
 Клиенты:    awg show
 EOF
