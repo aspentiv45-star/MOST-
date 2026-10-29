@@ -747,6 +747,10 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("await")
         await create_ticket(update, ctx, text=msg.caption or "(скриншот без описания)", photo=data)
         return
+    if (ctx.user_data.get("await") or "").startswith("ticket_more:"):
+        tid = ctx.user_data.pop("await").partition(":")[2]
+        await ticket_followup(update, tid, msg.caption or "(скриншот без описания)", photo=data)
+        return
 
     state = load_state()
     if not is_approved(state, update.effective_user.id):
@@ -833,6 +837,11 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = query.from_user.id
     action, _, arg = query.data.partition(":")
     await query.answer()
+
+    if action == "tku":
+        kind, _, tid = arg.partition(":")
+        await on_client_ticket_button(query, ctx, kind, tid)
+        return
 
     if action == "menu":
         if arg == "root":
@@ -1324,7 +1333,8 @@ async def admin_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # refund_ready — реквизиты есть, ждём перевода; closed — закрыто.
 
 TICKET_STATUS = {
-    "open": "🟡 открыто",
+    "open": "🟡 открыто — ждёт вашего ответа",
+    "answered": "💬 вы ответили, ждём клиента",
     "refund_wait": "💸 возврат: ждём реквизиты клиента",
     "refund_ready": "💸 возврат: реквизиты получены, нужно перевести",
     "closed": "✅ закрыто",
@@ -1332,7 +1342,7 @@ TICKET_STATUS = {
 
 
 def ticket_buttons(tid, status):
-    if status == "open":
+    if status in ("open", "answered"):
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("💬 Ответить", callback_data=f"tk:reply:{tid}"),
              InlineKeyboardButton("🎁 Дать конфиг", callback_data=f"tk:give:{tid}")],
@@ -1349,6 +1359,21 @@ def ticket_buttons(tid, status):
     return None
 
 
+def ticket_dialog(t):
+    """Переписка по обращению: первое сообщение клиента, ответы и дополнительные вопросы."""
+    msgs = t.get("messages") or [{"from": "client", "text": t["text"]}]
+    who = {"client": "👤 Клиент", "admin": "💬 Вы"}
+    return "\n\n".join(f"{who[m['from']]}: {m['text']}" for m in msgs[-8:])
+
+
+def client_ticket_buttons(tid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Вопрос решён", callback_data=f"tku:ok:{tid}")],
+        [InlineKeyboardButton("❓ Задать ещё вопрос", callback_data=f"tku:more:{tid}"),
+         InlineKeyboardButton("🏠 В меню", callback_data=f"tku:menu:{tid}")],
+    ])
+
+
 def ticket_text(state, tid):
     t = state["tickets"][tid]
     peers = user_peers(state, t["user"])
@@ -1356,7 +1381,7 @@ def ticket_text(state, tid):
     text = (f"📨 Обращение №{tid} от {fmt_date(t['created'])}\n"
             f"{user_name(state, t['user'])} · ID {t['user']}\n"
             f"Статус: {TICKET_STATUS[t['status']]}\n\n"
-            f"«{t['text']}»\n\nКонфиги клиента:\n{configs}")
+            f"{ticket_dialog(t)}\n\nКонфиги клиента:\n{configs}")
     if t.get("requisites"):
         text += f"\n\n💳 Реквизиты для возврата:\n{t['requisites']}"
     if t.get("result"):
@@ -1389,7 +1414,8 @@ async def create_ticket(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text=Non
         tid = str(state["next_ticket"])
         state["next_ticket"] += 1
         state["tickets"][tid] = {"user": str(update.effective_user.id), "text": text[:2000],
-                                 "status": "open", "created": int(time.time())}
+                                 "status": "open", "created": int(time.time()),
+                                 "messages": [{"from": "client", "text": text[:2000]}]}
         save_state(state)
     await update.message.reply_text(f"Обращение №{tid} принято. Администратор ответит здесь, в боте.",
                                     reply_markup=KEYBOARD)
@@ -1427,8 +1453,64 @@ async def save_requisites(update: Update, ctx: ContextTypes.DEFAULT_TYPE, tid):
     await notify_admins(f"💳 Реквизиты для возврата\n\n{ticket_text(state, tid)}", ticket_buttons(tid, "refund_ready"))
 
 
+async def ticket_followup(update, tid, text, photo=None):
+    """Дополнительный вопрос клиента: обращение снова ждёт ответа администратора."""
+    async with lock:
+        state = load_state()
+        t = state["tickets"].get(tid)
+        if not t or t["status"] == "closed":
+            save_state(state)
+            await update.message.reply_text("Это обращение уже закрыто. Чтобы задать новый вопрос — "
+                                            f"«{BTN_SUPPORT}».", reply_markup=KEYBOARD)
+            return
+        t.setdefault("messages", [{"from": "client", "text": t["text"]}]).append({"from": "client", "text": text[:2000]})
+        if t["status"] == "answered":
+            t["status"] = "open"
+        save_state(state)
+    await update.message.reply_text(f"Вопрос добавлен к обращению №{tid}. Администратор ответит здесь.",
+                                    reply_markup=KEYBOARD)
+    if photo:
+        for admin in ADMINS:
+            try:
+                await ADMIN_BOT.send_photo(admin, photo=io.BytesIO(photo), caption=f"📎 Скриншот к обращению №{tid}")
+            except Exception:
+                pass
+    await notify_admins(f"❓ Клиент задал ещё вопрос\n\n{ticket_text(state, tid)}",
+                        ticket_buttons(tid, state["tickets"][tid]["status"]))
+
+
+async def on_client_ticket_button(query, ctx, action, tid):
+    state = load_state()
+    t = state["tickets"].get(tid)
+    if not t or t["user"] != str(query.from_user.id):
+        await query.edit_message_reply_markup(reply_markup=None)
+        return
+    await query.edit_message_reply_markup(reply_markup=None)
+    if action == "ok":
+        if t["status"] != "closed":
+            await close_ticket(tid, "решено (подтвердил клиент)", f"✅ Обращение №{tid} закрыто. Спасибо!")
+            await notify_admins(f"✅ Клиент отметил обращение №{tid} решённым.")
+    elif action == "more":
+        if t["status"] == "closed":
+            await query.message.reply_text(f"Обращение закрыто. Чтобы задать новый вопрос — «{BTN_SUPPORT}».",
+                                           reply_markup=KEYBOARD)
+            return
+        ctx.user_data["await"] = f"ticket_more:{tid}"
+        await query.message.reply_text("Напишите ваш вопрос (можно со скриншотом). Передумали — напишите «отмена».")
+    else:
+        await query.message.reply_text("Главное меню 👇", reply_markup=KEYBOARD)
+
+
 async def user_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Свободный текст клиента: обращение, реквизиты для возврата или просто возврат в меню."""
+    waiting = ctx.user_data.get("await") or ""
+    if waiting.startswith("ticket_more:"):
+        ctx.user_data.pop("await")
+        if update.message.text.strip().lower() in ("отмена", "отменить", "cancel"):
+            await update.message.reply_text("Хорошо, вопрос не отправлен.", reply_markup=KEYBOARD)
+            return
+        await ticket_followup(update, waiting.partition(":")[2], update.message.text.strip())
+        return
     if ctx.user_data.pop("await", None) == "ticket":
         if update.message.text.strip().lower() in ("отмена", "отменить", "cancel"):
             await update.message.reply_text("Хорошо, обращение не отправлено.", reply_markup=KEYBOARD)
@@ -1446,7 +1528,8 @@ async def user_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def admin_tickets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    active = [tid for tid, t in state["tickets"].items() if t["status"] != "closed"]
+    # Только то, что ждёт действия администратора: отвеченные и ожидающие реквизитов — не здесь.
+    active = [tid for tid, t in state["tickets"].items() if t["status"] in ("open", "refund_ready")]
     if not active:
         await update.message.reply_text("Открытых обращений нет.", reply_markup=ADMIN_KEYBOARD)
         return
@@ -1523,11 +1606,21 @@ async def admin_ticket_text(update, ctx, waiting):
     text = update.message.text.strip()
     if kind == "tk_reply":
         try:
-            await USER_BOT.send_message(int(t["user"]), f"💬 Ответ по обращению №{tid}:\n\n{text}", reply_markup=KEYBOARD)
-            await update.message.reply_text("Ответ отправлен. Обращение остаётся открытым — закройте его, когда вопрос решён.",
-                                            reply_markup=ticket_buttons(tid, t["status"]))
+            await USER_BOT.send_message(int(t["user"]), f"💬 Ответ по обращению №{tid}:\n\n{text}",
+                                        reply_markup=client_ticket_buttons(tid))
         except Exception:
             await update.message.reply_text("Клиенту написать не удалось.", reply_markup=ADMIN_KEYBOARD)
+            return
+        async with lock:
+            state = load_state()
+            t = state["tickets"][tid]
+            t.setdefault("messages", [{"from": "client", "text": t["text"]}]).append({"from": "admin", "text": text[:2000]})
+            if t["status"] == "open":
+                t["status"] = "answered"
+            save_state(state)
+        await update.message.reply_text(
+            "Ответ отправлен. Обращение убрано из «Жалоб»: если клиент задаст ещё вопрос, оно вернётся, "
+            "а вам придёт уведомление.", reply_markup=ADMIN_KEYBOARD)
         return
     if not text.isdigit() or int(text) <= 0:
         ctx.user_data["await"] = waiting
