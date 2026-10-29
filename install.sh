@@ -21,11 +21,12 @@ TOKEN=""
 ADMIN_TOKEN=""
 ADMIN=""
 PAY=""
-PRICE=200
-DAYS=30
+PRICE=""
+DAYS=""
+RELAY=""
 PORT=""
 PUBLIC_IP=""
-MAX_PEERS=3
+MAX_PEERS=""
 
 die() { echo "Ошибка: $*" >&2; exit 1; }
 
@@ -39,6 +40,9 @@ usage() {
   --pay 'ТЕКСТ'        реквизиты для оплаты, их увидит клиент
   --price N            цена подписки в рублях (по умолчанию 200)
   --days N             срок подписки в днях (по умолчанию 30)
+  --relay IP           IP сервера-входа для белых списков (см. relay.sh); --relay off — убрать
+
+При повторном запуске всё, что не указано, берётся из прошлой установки.
   --port N         UDP-порт AmneziaWG (по умолчанию случайный 40000–60000)
   --ip АДРЕС       внешний IP сервера (по умолчанию определяется сам)
   --max N          сколько конфигов может взять один человек (по умолчанию 3)
@@ -54,6 +58,7 @@ while [[ $# -gt 0 ]]; do
     --pay) PAY="$2"; shift 2 ;;
     --price) PRICE="$2"; shift 2 ;;
     --days) DAYS="$2"; shift 2 ;;
+    --relay) RELAY="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --ip) PUBLIC_IP="$2"; shift 2 ;;
     --max) MAX_PEERS="$2"; shift 2 ;;
@@ -63,6 +68,23 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ $EUID -eq 0 ]] || die "запустите через sudo"
+
+# Повторная установка: недостающие параметры берём из прошлой.
+if [[ -f "$ENV_FILE" ]]; then
+  old() { sed -n "s/^$1=//p" "$ENV_FILE" | head -n 1; }
+  [[ -n "$TOKEN" ]] || TOKEN="$(old BOT_TOKEN)"
+  [[ -n "$ADMIN_TOKEN" ]] || ADMIN_TOKEN="$(old ADMIN_BOT_TOKEN)"
+  [[ -n "$ADMIN" ]] || ADMIN="$(old ADMIN_IDS)"
+  [[ -n "$PRICE" ]] || PRICE="$(old PRICE)"
+  [[ -n "$DAYS" ]] || DAYS="$(old DAYS)"
+  [[ -n "$MAX_PEERS" ]] || MAX_PEERS="$(old MAX_PEERS)"
+  [[ -n "$RELAY" ]] || RELAY="$(old RELAY_HOST)"
+fi
+PRICE="${PRICE:-200}"
+DAYS="${DAYS:-30}"
+MAX_PEERS="${MAX_PEERS:-3}"
+[[ "$RELAY" == "off" ]] && RELAY=""
+
 [[ -n "$TOKEN" ]] || read -rp "Токен клиентского бота от @BotFather: " TOKEN
 [[ -n "$ADMIN_TOKEN" ]] || read -rp "Токен админ-бота от @BotFather: " ADMIN_TOKEN
 [[ -n "$ADMIN" ]] || read -rp "Ваш Telegram ID (узнать у @userinfobot): " ADMIN
@@ -167,6 +189,7 @@ AWG_IFACE=$IFACE
 AWG_CONF=$AWG_CONF
 STATE_FILE=/var/lib/most/state.json
 MAX_PEERS=$MAX_PEERS
+RELAY_HOST=$RELAY
 EOF
 if [[ -n "$PAY" ]]; then
   printf '%s\n' "$PAY" >/etc/most/pay.txt
@@ -200,6 +223,7 @@ cat <<EOF
 
 Готово.
   AmneziaWG: $PUBLIC_IP:$PORT/udp
+  Вход для белых списков: ${RELAY:-не настроен (см. relay.sh)}
   Боты запущены. Нажмите /start в обоих: в клиентском и в админском.
   Реквизиты для оплаты: /etc/most/pay.txt (можно менять без перезапуска)
 
