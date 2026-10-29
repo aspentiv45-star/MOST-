@@ -96,7 +96,7 @@ fi
 
 echo "==> Генерирую конфиг"
 [[ -f "$CONFIG" ]] && cp "$CONFIG" "$CONFIG.bak.$(date +%s)"
-TMP_CONFIG="$(mktemp)"
+TMP_CONFIG="$(mktemp --suffix=.json)"
 CLIENT_LINK="$(python3 "$SCRIPT_DIR/gen_config.py" \
   --link "$LINK" --mode "$MODE" --port "$PORT" --public-ip "$PUBLIC_IP" \
   --out "$TMP_CONFIG" "${KEY_ARGS[@]}" "${EXTRA[@]}")"
