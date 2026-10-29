@@ -15,7 +15,7 @@ die() { echo "Ошибка: $*" >&2; exit 1; }
 systemctl is-active --quiet xray || die "xray не запущен: journalctl -u xray -n 30"
 
 TMP_DIR="$(mktemp -d)"
-trap 'kill "$CLIENT_PID" 2>/dev/null || true; rm -rf "$TMP_DIR"' EXIT
+trap 'kill "${CLIENT_PID:-}" 2>/dev/null || true; rm -rf "$TMP_DIR"' EXIT
 
 python3 - "$(cat "$CLIENT_FILE")" "$SOCKS_PORT" >"$TMP_DIR/client.json" <<'EOF'
 import json, sys
@@ -51,7 +51,7 @@ EOF2
 CLIENT_PID=$!
 "$XRAY" run -c "$TMP_DIR/direct.json" >"$TMP_DIR/direct.log" 2>&1 &
 DIRECT_PID=$!
-trap 'kill "$CLIENT_PID" "$DIRECT_PID" 2>/dev/null || true; rm -rf "$TMP_DIR"' EXIT
+trap 'kill "${CLIENT_PID:-}" "${DIRECT_PID:-}" 2>/dev/null || true; rm -rf "$TMP_DIR"' EXIT
 sleep 2
 
 NL_HOST="$(python3 -c 'import json;c=json.load(open("/usr/local/etc/xray/config.json"));o=next(o for o in c["outbounds"] if o.get("tag")=="to-nl");v=o["settings"]["vnext"][0] if "vnext" in o["settings"] else o["settings"]["servers"][0];print(v["address"],v["port"])')"
