@@ -60,6 +60,7 @@ def parse_link(link):
             "mode": "",
             "scy": j.get("scy", "auto"),
             "pbk": "", "sid": "", "spx": "", "flow": "",
+            "encryption": "none", "extra": "",
         }
 
     if not (link.startswith("vless://") or link.startswith("trojan://")):
@@ -88,6 +89,9 @@ def parse_link(link):
         "spx": first(q, "spx"),
         "flow": first(q, "flow"),
         "scy": "auto",
+        # VLESS Encryption (mlkem768x25519plus...) из новых версий 3X-UI.
+        "encryption": first(q, "encryption", "none"),
+        "extra": first(q, "extra"),
     }
 
 
@@ -122,6 +126,11 @@ def stream_settings(p):
         s["grpcSettings"] = {"serviceName": p["serviceName"]}
     elif net == "xhttp":
         s["xhttpSettings"] = {"path": p["path"] or "/", "host": p["hosthdr"], "mode": p["mode"] or "auto"}
+        if p["extra"]:
+            try:
+                s["xhttpSettings"]["extra"] = json.loads(p["extra"])
+            except ValueError:
+                die("не удалось разобрать параметр extra в ссылке")
     elif net == "httpupgrade":
         s["httpupgradeSettings"] = {"path": p["path"] or "/", "host": p["hosthdr"]}
     elif net != "tcp":
@@ -131,7 +140,7 @@ def stream_settings(p):
 
 def outbound_to_nl(p):
     if p["protocol"] == "vless":
-        user = {"id": p["id"], "encryption": "none"}
+        user = {"id": p["id"], "encryption": p["encryption"]}
         if p["flow"]:
             user["flow"] = p["flow"]
         settings = {"vnext": [{"address": p["host"], "port": p["port"], "users": [user]}]}

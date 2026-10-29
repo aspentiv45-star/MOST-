@@ -58,7 +58,7 @@ sudo bash install.sh --link 'vless://...' --sni www.vk.com
 
 ## Поддерживаемые ссылки из 3X-UI
 
-- Протоколы: `vless://`, `vmess://`, `trojan://`
+- Протоколы: `vless://` (в том числе с VLESS Encryption `mlkem768x25519plus`), `vmess://`, `trojan://`
 - Транспорт: `tcp` (raw), `ws`, `grpc`, `xhttp`, `httpupgrade`
 - Безопасность: `reality`, `tls`, `none`
 
