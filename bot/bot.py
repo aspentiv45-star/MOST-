@@ -39,7 +39,6 @@ IFACE = os.environ.get("AWG_IFACE", "awg0")
 CONF = os.environ.get("AWG_CONF", f"/etc/amnezia/amneziawg/{IFACE}.conf")
 STATE_FILE = os.environ.get("STATE_FILE", "/var/lib/most/state.json")
 ENDPOINT_HOST = os.environ["ENDPOINT_HOST"]
-RELAY_HOST = os.environ.get("RELAY_HOST", "")
 CLIENT_DNS = os.environ.get("CLIENT_DNS", "1.1.1.1, 1.0.0.1")
 MAX_PEERS = int(os.environ.get("MAX_PEERS", "3"))
 PRICE = int(os.environ.get("PRICE", "200"))
@@ -67,7 +66,6 @@ HELP_TEXT = (
     f"3. После подтверждения нажмите «{BTN_NEW}» — бот пришлёт файл и QR-код.\n"
     "4. В приложении: «+» → импорт файла или сканирование QR-кода.\n"
     "5. Включите туннель и проверьте на ipinfo.io.\n\n"
-    "Российские сайты и приложения работают, не выключая VPN.\n"
     "Один конфиг — одно устройство. Не пересылайте конфиги другим людям."
 )
 
@@ -190,7 +188,7 @@ def next_free_ip(state, params):
     raise RuntimeError("в подсети закончились адреса")
 
 
-def client_conf(peer, params, host):
+def client_conf(peer, params):
     lines = [
         "[Interface]",
         f"PrivateKey = {peer['priv']}",
@@ -203,7 +201,7 @@ def client_conf(peer, params, host):
         "",
         "[Peer]",
         f"PublicKey = {run(['awg', 'pubkey'], params['PrivateKey'] + chr(10))}",
-        f"Endpoint = {host}:{params['ListenPort']}",
+        f"Endpoint = {ENDPOINT_HOST}:{params['ListenPort']}",
         "AllowedIPs = 0.0.0.0/0, ::/0",
         "PersistentKeepalive = 25",
     ]
@@ -214,19 +212,15 @@ def client_conf(peer, params, host):
 
 async def send_peer(chat, peer):
     params = server_params()
+    text = client_conf(peer, params)
     # Имя файла становится именем туннеля; на iOS оно не длиннее 15 символов.
-    variants = [(f"{peer['name']}.conf", ENDPOINT_HOST, "обычное подключение")]
-    if RELAY_HOST:
-        variants.append((f"{peer['name']}-ru.conf", RELAY_HOST,
-                         "через Россию — если обычное не работает (мобильный интернет, белые списки)"))
-    for filename, host, note in variants:
-        text = client_conf(peer, params, host)
-        await chat.send_document(document=io.BytesIO(text.encode()), filename=filename,
-                                 caption=f"{filename}: {note}")
-        png = io.BytesIO()
-        qrcode.make(text).save(png, format="PNG")
-        png.seek(0)
-        await chat.send_photo(photo=png, caption=f"QR-код: {filename}")
+    filename = f"{peer['name']}.conf"
+    await chat.send_document(document=io.BytesIO(text.encode()), filename=filename,
+                             caption=f"Конфиг {peer['name']}. Импортируйте файл или QR-код ниже.")
+    png = io.BytesIO()
+    qrcode.make(text).save(png, format="PNG")
+    png.seek(0)
+    await chat.send_photo(photo=png, caption=f"QR-код: {filename}")
 
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):

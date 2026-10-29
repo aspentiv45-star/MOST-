@@ -154,7 +154,6 @@ install -m 644 "$SCRIPT_DIR/bot/bot.py" "$SCRIPT_DIR/bot/requirements.txt" "$BOT
 "$BOT_DIR/venv/bin/pip" install -q --upgrade pip
 "$BOT_DIR/venv/bin/pip" install -q -r "$BOT_DIR/requirements.txt"
 
-OLD_RELAY="$(sed -n 's/^RELAY_HOST=//p' "$ENV_FILE" 2>/dev/null || true)"
 umask 077
 cat >"$ENV_FILE" <<EOF
 BOT_TOKEN=$TOKEN
@@ -169,8 +168,6 @@ AWG_CONF=$AWG_CONF
 STATE_FILE=/var/lib/most/state.json
 MAX_PEERS=$MAX_PEERS
 EOF
-# RELAY_HOST дописывает ru-route.sh — сохраняем его при переустановке.
-[[ -n "$OLD_RELAY" ]] && echo "RELAY_HOST=$OLD_RELAY" >>"$ENV_FILE"
 if [[ -n "$PAY" ]]; then
   printf '%s\n' "$PAY" >/etc/most/pay.txt
 elif [[ ! -f /etc/most/pay.txt ]]; then
