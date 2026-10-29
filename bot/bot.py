@@ -738,27 +738,31 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif msg.document and (msg.document.mime_type or "").startswith("image/"):
         file = await msg.document.get_file()
     else:
-        await msg.reply_text("Пришлите скриншот оплаты картинкой.")
+        await msg.reply_text("Пришлите картинку.")
         return
+    data = bytes(await file.download_as_bytearray())
+
+    # Скриншот проблемы в «Нужна помощь» — вложение к обращению, а не оплата.
+    if ctx.user_data.get("await") == "ticket":
+        ctx.user_data.pop("await")
+        await create_ticket(update, ctx, text=msg.caption or "(скриншот без описания)", photo=data)
+        return
+
     state = load_state()
     if not is_approved(state, update.effective_user.id):
         await request_access(update.effective_user)
         await msg.reply_text(closed_text(state, update.effective_user.id))
         return
-    data = bytes(await file.download_as_bytearray())
-
     target = ctx.user_data.pop("pay_for", None)
-    mine = user_peers(state, update.effective_user.id)
-    if target is None and not mine:
-        target = NEW
     if target is None:
-        # Непонятно, за что оплата — спрашиваем, картинку держим до ответа.
-        ctx.user_data["pending_photo"] = (data, msg.caption)
-        rows = [[InlineKeyboardButton(f"📱 Новый для себя — {PRICE} ₽", callback_data=f"payfor:{NEW}")],
-                [InlineKeyboardButton(f"📡 Роутер AmneziaWG — {ROUTER_PRICE} ₽", callback_data=f"payfor:{NEW_ROUTER_AWG}")]]
-        rows += [[InlineKeyboardButton(f"🔄 Продлить {p['name']}", callback_data=f"payfor:{pub}")]
-                 for pub, p in mine.items()]
-        await msg.reply_text("За что эта оплата?", reply_markup=InlineKeyboardMarkup(rows))
+        # Оплату принимаем только после выбора, за что она.
+        await msg.reply_text(
+            "Чтобы оплатить, сначала выберите, за что платите:\n"
+            f"• новый конфиг — «{BTN_BUY}» → выберите устройство → «💳 Купить»;\n"
+            f"• продление — «{BTN_LIST}» → нужный конфиг → «🔄 Продлить».\n"
+            "После этого пришлите скриншот перевода.\n\n"
+            f"Если это скриншот проблемы — нажмите «{BTN_SUPPORT}» и пришлите его там.",
+            reply_markup=KEYBOARD)
         return
     await submit_payment(update.effective_user, target, data, msg.caption, msg)
 
@@ -1372,12 +1376,13 @@ async def support_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["await"] = "ticket"
     await update.message.reply_text(
         "🆘 Опишите проблему одним сообщением: что не работает, на каком устройстве, "
-        "через Wi-Fi или мобильный интернет. Администратор ответит здесь.\n\n"
+        "через Wi-Fi или мобильный интернет. Можно прислать скриншот ошибки с подписью. "
+        "Администратор ответит здесь.\n\n"
         "Если передумали — напишите «отмена».")
 
 
-async def create_ticket(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+async def create_ticket(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text=None, photo=None):
+    text = (text if text is not None else update.message.text).strip()
     async with lock:
         state = load_state()
         get_user(state, update.effective_user)
@@ -1388,6 +1393,20 @@ async def create_ticket(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_state(state)
     await update.message.reply_text(f"Обращение №{tid} принято. Администратор ответит здесь, в боте.",
                                     reply_markup=KEYBOARD)
+    if photo:
+        # file_id одного бота не годится для другого — пересылаем картинку и запоминаем file_id админ-бота.
+        photo_id = None
+        for admin in ADMINS:
+            try:
+                sent = await ADMIN_BOT.send_photo(admin, photo=io.BytesIO(photo), caption=f"📎 Скриншот к обращению №{tid}")
+                photo_id = photo_id or sent.photo[-1].file_id
+            except Exception:
+                log.exception("не удалось отправить скриншот админу %s", admin)
+        if photo_id:
+            async with lock:
+                state = load_state()
+                state["tickets"][tid]["photo"] = photo_id
+                save_state(state)
     await notify_admins(f"🆘 Новое обращение\n\n{ticket_text(state, tid)}", ticket_buttons(tid, "open"))
 
 
@@ -1433,6 +1452,8 @@ async def admin_tickets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(f"Открытых обращений: {len(active)}.", reply_markup=ADMIN_KEYBOARD)
     for tid in active[-20:]:
+        if state["tickets"][tid].get("photo"):
+            await update.message.reply_photo(state["tickets"][tid]["photo"], caption=f"📎 Скриншот к обращению №{tid}")
         await update.message.reply_text(ticket_text(state, tid),
                                         reply_markup=ticket_buttons(tid, state["tickets"][tid]["status"]))
 
