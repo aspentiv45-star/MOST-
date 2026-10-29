@@ -686,7 +686,11 @@ async def admin_give_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if ctx.user_data.pop("await", None) != "give":
+    waiting = ctx.user_data.pop("await", None)
+    if waiting == "resend":
+        await resend_confirm(update, ctx)
+        return
+    if waiting != "give":
         await update.message.reply_text("Выберите действие на кнопках ниже.", reply_markup=ADMIN_KEYBOARD)
         return
     parts = update.message.text.split()
@@ -724,9 +728,12 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "resend":
         await query.answer()
-        if arg == "yes":
+        text = ctx.user_data.pop("resend_text", None)
+        if arg == "yes" and text:
             await query.edit_message_text("📤 Рассылаю…")
-            await resend_all(query)
+            await resend_all(query, text)
+        elif arg == "yes":
+            await query.edit_message_text(f"Текст рассылки потерялся — нажмите «{ABTN_RESEND}» ещё раз.")
         else:
             await query.edit_message_text("Рассылка отменена.")
         return
@@ -783,19 +790,32 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def admin_resend_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["await"] = "resend"
+    await update.message.reply_text(
+        "Напишите, что поменялось в конфиге — это увидят клиенты.\n"
+        "Например: «теперь работают российские сайты с включённым VPN».")
+
+
+async def resend_confirm(update, ctx):
+    text = update.message.text.strip()
+    ctx.user_data["resend_text"] = text
     state = load_state()
     peers = [p for p in state["peers"].values() if peer_active(p)]
     users = {p["user"] for p in peers}
     await update.message.reply_text(
-        f"Отправить актуальные файлы {len(peers)} активных конфигов {len(users)} клиентам?\n"
-        "Каждый получит свои конфиги и инструкцию заменить старые. Сроки не меняются.",
+        f"Клиенты получат:\n\n{resend_message(text)}\n\n…и свои файлы конфигов.\n\n"
+        f"Разослать {len(peers)} активных конфигов {len(users)} клиентам? Сроки не меняются.",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("📤 Да, разослать", callback_data="resend:yes"),
             InlineKeyboardButton("Отмена", callback_data="resend:no"),
         ]]))
 
 
-async def resend_all(query):
+def resend_message(text):
+    return f"🔄 Обновление конфига — {text}"
+
+
+async def resend_all(query, text):
     state = load_state()
     by_user = {}
     for p in state["peers"].values():
@@ -805,7 +825,7 @@ async def resend_all(query):
     for uid, peers in by_user.items():
         try:
             await USER_BOT.send_message(
-                int(uid), "🔄 Обновление конфига. Старые можно удалить.", reply_markup=KEYBOARD)
+                int(uid), resend_message(text), reply_markup=KEYBOARD)
             for p in peers:
                 await send_peer(int(uid), p)
                 await asyncio.sleep(0.1)
