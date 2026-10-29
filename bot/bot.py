@@ -608,16 +608,44 @@ async def buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"У вас уже {MAX_PEERS} конфигов — это максимум. Продлите или удалите ненужный в «{BTN_LIST}».")
         return
-    await update.message.reply_text(
-        f"Что подключаем? Срок — {DAYS} дней.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"📱 Для себя (телефон, ПК) — {PRICE} ₽", callback_data=f"buy:{NEW}")],
-            [InlineKeyboardButton(f"📡 Роутер AmneziaWG (Keenetic, OpenWrt) — {ROUTER_PRICE} ₽",
-                                  callback_data=f"buy:{NEW_ROUTER_AWG}")],
-            [InlineKeyboardButton(f"📡 Роутер WireGuard (другие роутеры) — {ROUTER_PRICE} ₽",
-                                  callback_data=f"buy:{NEW_ROUTER}")],
-            [InlineKeyboardButton("🛒 Что выбрать?", callback_data="help:what")],
-        ]))
+    text, buttons = BUY_MENU["root"]
+    await update.message.reply_text(text, reply_markup=buttons)
+
+
+def _buy_screen(guide, target, price, back):
+    """Экран «инструкция + купить»: подробные шаги для выбранного устройства и кнопка оплаты."""
+    return (GUIDES[guide], InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💳 Купить — {price} ₽ за {DAYS} дней", callback_data=f"buy:{target}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"menu:{back}")],
+    ]))
+
+
+# Меню покупки по шагам: устройство или роутер → конкретный вариант → инструкция и «Купить».
+BUY_MENU = {
+    "root": (f"Что подключаем? Срок — {DAYS} дней.", InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"📱 Для устройства — {PRICE} ₽", callback_data="menu:device")],
+        [InlineKeyboardButton(f"📡 Для роутера (весь дом) — {ROUTER_PRICE} ₽", callback_data="menu:router")],
+        [InlineKeyboardButton("🛒 Что выбрать?", callback_data="menu:what")],
+    ])),
+    "device": ("📱 Какое устройство? Один конфиг — одно устройство.", InlineKeyboardMarkup([
+        [InlineKeyboardButton("🍏 iPhone / iPad", callback_data="menu:ios"),
+         InlineKeyboardButton("🤖 Android", callback_data="menu:android")],
+        [InlineKeyboardButton("💻 Компьютер (Windows, macOS, Linux)", callback_data="menu:pc")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:root")],
+    ])),
+    "router": ("📡 Какой у вас роутер?\n\n"
+               "Посмотрите название на наклейке снизу роутера или в его веб-интерфейсе.", InlineKeyboardMarkup([
+        [InlineKeyboardButton("Keenetic или OpenWrt (AmneziaWG)", callback_data="menu:router-awg")],
+        [InlineKeyboardButton("Другой роутер с WireGuard", callback_data="menu:router-wg")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:root")],
+    ])),
+    "what": (GUIDES["what"], InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:root")]])),
+    "ios": _buy_screen("ios", NEW, PRICE, "device"),
+    "android": _buy_screen("android", NEW, PRICE, "device"),
+    "pc": _buy_screen("pc", NEW, PRICE, "device"),
+    "router-awg": _buy_screen("router-awg", NEW_ROUTER_AWG, ROUTER_PRICE, "router"),
+    "router-wg": _buy_screen("router-wg", NEW_ROUTER, ROUTER_PRICE, "router"),
+}
 
 
 async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -711,6 +739,11 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     action, _, arg = query.data.partition(":")
     await query.answer()
 
+    if action == "menu":
+        text, buttons = BUY_MENU.get(arg, BUY_MENU["root"])
+        await query.edit_message_text(text, reply_markup=buttons)
+        return
+
     if action == "help":
         await query.message.reply_text(GUIDES.get(arg, HELP_TEXT), reply_markup=HELP_BUTTONS)
         return
@@ -720,7 +753,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not is_approved(state, uid):
             await query.edit_message_text(closed_text(state, uid))
             return
-        await query.edit_message_text(f"Выбрано: {target_label(state, arg)}.")
+        await query.edit_message_reply_markup(reply_markup=None)  # инструкция остаётся на экране
         await ask_payment(query.message, ctx, arg, state)
         return
 
