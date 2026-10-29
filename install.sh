@@ -171,7 +171,7 @@ fi
 
 echo "==> Устанавливаю бота"
 mkdir -p "$BOT_DIR" /etc/most /var/lib/most
-install -m 644 "$SCRIPT_DIR/bot/bot.py" "$SCRIPT_DIR/bot/requirements.txt" "$BOT_DIR/"
+install -m 644 "$SCRIPT_DIR"/bot/*.py "$SCRIPT_DIR/bot/requirements.txt" "$BOT_DIR/"
 [[ -d "$BOT_DIR/venv" ]] || python3 -m venv "$BOT_DIR/venv"
 "$BOT_DIR/venv/bin/pip" install -q --upgrade pip
 "$BOT_DIR/venv/bin/pip" install -q -r "$BOT_DIR/requirements.txt"
