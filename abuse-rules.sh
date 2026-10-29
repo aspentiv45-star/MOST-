@@ -6,7 +6,7 @@
 # Зашифрованный торрент-трафик так не поймать полностью, но обычные клиенты
 # (qBittorrent, µTorrent, Transmission) с настройками по умолчанию блокируются.
 
-IFACE="${MOST_AWG_IFACE:-awg0}"
+IFACES="${MOST_AWG_IFACES:-awg0 wgr0}"
 CHAIN=MOST_ABUSE
 
 # Строки, которые встречаются только в протоколе BitTorrent, трекерах и DHT.
@@ -24,7 +24,9 @@ SIGNATURES=(
 )
 
 down() {
-  iptables -D FORWARD -i "$IFACE" -j "$CHAIN" 2>/dev/null
+  for iface in $IFACES awg0; do
+    while iptables -D FORWARD -i "$iface" -j "$CHAIN" 2>/dev/null; do :; done
+  done
   iptables -F "$CHAIN" 2>/dev/null
   iptables -X "$CHAIN" 2>/dev/null
   return 0
@@ -37,7 +39,9 @@ up() {
   for sig in "${SIGNATURES[@]}"; do
     iptables -A "$CHAIN" -m string --algo bm --string "$sig" -j DROP
   done
-  iptables -I FORWARD 1 -i "$IFACE" -j "$CHAIN"
+  for iface in $IFACES; do
+    iptables -I FORWARD 1 -i "$iface" -j "$CHAIN"
+  done
 }
 
 case "${1:-}" in

@@ -181,18 +181,44 @@ if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow "$PORT"/udp comment "MOST AmneziaWG" >/dev/null
 fi
 
+echo "==> Вход для обычных роутеров (чистый WireGuard, без маскировки)"
+R_IFACE=wgr0
+R_CONF="$AWG_DIR/$R_IFACE.conf"
+R_SUBNET=10.10.0
+if [[ ! -f "$R_CONF" ]]; then
+  R_WAN="$(ip -4 route show default | awk '{print $5; exit}')"
+  umask 077
+  cat >"$R_CONF" <<EOF
+[Interface]
+PrivateKey = $(awg genkey)
+Address = $R_SUBNET.1/24
+ListenPort = $((PORT + 1))
+PostUp = iptables -I FORWARD -i %i -j ACCEPT; iptables -I FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s $R_SUBNET.0/24 -o $R_WAN -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -s $R_SUBNET.0/24 -o $R_WAN -j MASQUERADE
+EOF
+  umask 022
+fi
+R_PORT="$(awk -F' *= *' '$1=="ListenPort"{print $2; exit}' "$R_CONF")"
+systemctl enable "awg-quick@$R_IFACE" >/dev/null 2>&1
+systemctl restart "awg-quick@$R_IFACE"
+systemctl is-active --quiet "awg-quick@$R_IFACE" \
+  || { journalctl -u "awg-quick@$R_IFACE" -n 20 --no-pager; die "вход для роутеров не запустился"; }
+if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+  ufw allow "$R_PORT"/udp comment "MOST routers" >/dev/null
+fi
+
 echo "==> Блокирую торренты и спам (защита от жалоб хостинга)"
 install -m 755 "$SCRIPT_DIR/abuse-rules.sh" /usr/local/sbin/most-abuse
 cat >/etc/systemd/system/most-abuse.service <<EOF
 [Unit]
 Description=MOST: запрет торрентов и спама для клиентов
-After=awg-quick@$IFACE.service
+After=awg-quick@$IFACE.service awg-quick@$R_IFACE.service
 PartOf=awg-quick@$IFACE.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-Environment=MOST_AWG_IFACE=$IFACE
+Environment="MOST_AWG_IFACES=$IFACE $R_IFACE"
 ExecStart=/usr/local/sbin/most-abuse up
 ExecStop=/usr/local/sbin/most-abuse down
 
@@ -261,7 +287,9 @@ cat <<EOF
 
 Готово.
   AmneziaWG: $PUBLIC_IP:$PORT/udp
-  Вход для белых списков: ${RELAY:-не настроен (см. relay.sh)}
+  Для обычных роутеров (WireGuard): $PUBLIC_IP:$R_PORT/udp
+  Вход для белых списков: ${RELAY:-не настроен (см. relay.sh)}${RELAY:+
+    на сервере-входе должны пересылаться оба порта: sudo bash relay.sh --to $PUBLIC_IP:$PORT,$R_PORT}
   Доступ: $([[ $ACCESS == approve ]] && echo "только после вашего одобрения в админ-боте" || echo "открыт для всех")
   Торренты и порт 25 для клиентов заблокированы
   Боты запущены. Нажмите /start в обоих: в клиентском и в админском.

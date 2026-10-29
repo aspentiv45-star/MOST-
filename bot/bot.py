@@ -42,6 +42,10 @@ ADMIN_TOKEN = os.environ["ADMIN_BOT_TOKEN"]
 ADMINS = {int(x) for x in os.environ.get("ADMIN_IDS", "").replace(" ", "").split(",") if x}
 IFACE = os.environ.get("AWG_IFACE", "awg0")
 CONF = os.environ.get("AWG_CONF", f"/etc/amnezia/amneziawg/{IFACE}.conf")
+# Отдельный интерфейс с чистым WireGuard (без маскировки) — для обычных роутеров.
+# Если его конфига нет, роутеры подключаются к основному AmneziaWG.
+ROUTER_IFACE = os.environ.get("ROUTER_IFACE", "wgr0")
+ROUTER_CONF = os.environ.get("ROUTER_CONF", f"/etc/amnezia/amneziawg/{ROUTER_IFACE}.conf")
 STATE_FILE = os.environ.get("STATE_FILE", "/var/lib/most/state.json")
 ENDPOINT_HOST = os.environ["ENDPOINT_HOST"]
 RELAY_HOST = os.environ.get("RELAY_HOST", "")
@@ -188,9 +192,9 @@ def peer_status(peer):
 
 # ---------- конфиг сервера ----------
 
-def interface_section():
-    """Часть awg0.conf до первого [Peer] — её бот никогда не меняет."""
-    with open(CONF) as f:
+def interface_section(conf=CONF):
+    """Часть конфига интерфейса до первого [Peer] — её бот никогда не меняет."""
+    with open(conf) as f:
         lines = f.read().splitlines()
     head = []
     for line in lines:
@@ -202,32 +206,51 @@ def interface_section():
     return head
 
 
-def server_params():
+def server_params(conf=CONF):
     params = {}
-    for line in interface_section():
+    for line in interface_section(conf):
         if "=" in line and not line.lstrip().startswith("#"):
             key, value = line.split("=", 1)
             params[key.strip()] = value.strip()
     return params
 
 
-def write_server_conf(state):
-    """Пересобирает awg0.conf: в нём только оплаченные конфиги."""
-    out = interface_section()
-    for pub, p in state["peers"].items():
-        if peer_active(p):
-            out += ["", "[Peer]", f"# {p['user']} {p['name']}", f"PublicKey = {pub}", f"AllowedIPs = {p['ip']}/32"]
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(CONF))
-    with os.fdopen(fd, "w") as f:
-        f.write("\n".join(out) + "\n")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, CONF)
+def plain_routers():
+    return os.path.exists(ROUTER_CONF)
 
-    stripped = run(["awg-quick", "strip", IFACE])
-    with tempfile.NamedTemporaryFile("w", suffix=".conf") as f:
-        f.write(stripped + "\n")
-        f.flush()
-        run(["awg", "syncconf", IFACE, f.name])
+
+def peer_iface(peer):
+    """Интерфейс и его конфиг, к которому подключается этот конфиг клиента."""
+    if peer.get("kind") == "router" and plain_routers():
+        return ROUTER_IFACE, ROUTER_CONF
+    return IFACE, CONF
+
+
+def write_server_conf(state):
+    """Пересобирает конфиги интерфейсов: в них только оплаченные конфиги."""
+    ifaces = [(IFACE, CONF)] + ([(ROUTER_IFACE, ROUTER_CONF)] if plain_routers() else [])
+    # Роутеры, выданные до появления отдельного интерфейса, переезжают в его подсеть.
+    for p in state["peers"].values():
+        conf = peer_iface(p)[1]
+        net = ipaddress.ip_interface(server_params(conf)["Address"].split(",")[0].strip()).network
+        if ipaddress.ip_address(p["ip"]) not in net:
+            p["ip"] = next_free_ip(state, server_params(conf))
+    for iface, conf in ifaces:
+        out = interface_section(conf)
+        for pub, p in state["peers"].items():
+            if peer_active(p) and peer_iface(p)[0] == iface:
+                out += ["", "[Peer]", f"# {p['user']} {p['name']}", f"PublicKey = {pub}", f"AllowedIPs = {p['ip']}/32"]
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(conf))
+        with os.fdopen(fd, "w") as f:
+            f.write("\n".join(out) + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, conf)
+
+        stripped = run(["awg-quick", "strip", iface])
+        with tempfile.NamedTemporaryFile("w", suffix=".conf") as f:
+            f.write(stripped + "\n")
+            f.flush()
+            run(["awg", "syncconf", iface, f.name])
 
 
 def apply_or_rollback(state, old_state):
@@ -268,8 +291,9 @@ def create_peer(state, uid, until, kind="device"):
     n = next(i for i in range(1, 1000) if f"{prefix}{i}" not in names)
     priv = run(["awg", "genkey"])
     pub = run(["awg", "pubkey"], priv + "\n")
-    peer = {"user": str(uid), "name": f"{prefix}{n}", "kind": kind, "ip": next_free_ip(state, server_params()),
+    peer = {"user": str(uid), "name": f"{prefix}{n}", "kind": kind,
             "priv": priv, "created": fmt_date(time.time()), "until": until, "warned": 0}
+    peer["ip"] = next_free_ip(state, server_params(peer_iface(peer)[1]))
     state["peers"][pub] = peer
     return pub, peer
 
@@ -288,7 +312,8 @@ def client_conf(peer, params, host):
         "[Peer]",
         f"PublicKey = {run(['awg', 'pubkey'], params['PrivateKey'] + chr(10))}",
         f"Endpoint = {host}:{params['ListenPort']}",
-        f"AllowedIPs = {allowed_ips()}",
+        # Роутеры часто не принимают IPv6 в этом поле — им только IPv4.
+        f"AllowedIPs = {'0.0.0.0/0' if peer.get('kind') == 'router' else allowed_ips()}",
         "PersistentKeepalive = 25",
     ]
     return "\n".join(lines) + "\n"
@@ -336,7 +361,7 @@ async def split_loop():
 # ---------- клиентский бот ----------
 
 async def send_peer(chat_id, peer):
-    params = server_params()
+    params = server_params(peer_iface(peer)[1])
     # Имя файла становится именем туннеля; на iOS оно не длиннее 15 символов.
     if RELAY_HOST:
         variants = [(f"{peer['name']}.conf", RELAY_HOST)]
@@ -360,15 +385,39 @@ async def send_peer(chat_id, peer):
         await USER_BOT.send_message(chat_id, router_help(peer, params))
 
 
-ROUTER_REQUIREMENTS = (
-    "Подходят только роутеры с поддержкой AmneziaWG:\n"
-    "• Keenetic с KeeneticOS 4.2 или новее;\n"
-    "• роутеры с прошивкой OpenWrt и пакетом amneziawg.\n"
-    "Обычный WireGuard (TP-Link, Asus, MikroTik, роутеры провайдеров) не подойдёт — подключение не заработает."
-)
+def router_requirements():
+    if plain_routers():
+        return ("Подходит роутер с VPN-клиентом WireGuard: Keenetic, TP-Link, Asus, Xiaomi, MikroTik, OpenWrt и другие. "
+                "Проверьте, что в настройках роутера есть раздел «VPN-клиент» → «WireGuard».")
+    return ("Подходят только роутеры с поддержкой AmneziaWG:\n"
+            "• Keenetic с KeeneticOS 4.2 или новее;\n"
+            "• роутеры с прошивкой OpenWrt и пакетом amneziawg.\n"
+            "Обычный WireGuard (TP-Link, Asus, MikroTik, роутеры провайдеров) не подойдёт — подключение не заработает.")
 
 
 def router_help(peer, params):
+    if plain_routers():
+        text = client_conf(peer, params, RELAY_HOST or ENDPOINT_HOST)
+        fields = dict(line.split(" = ", 1) for line in text.splitlines() if " = " in line)
+        host, _, port = fields["Endpoint"].rpartition(":")
+        return (
+            f"📡 Настройка роутера для {peer['name']}\n\n"
+            "1. Откройте настройки роутера → «VPN-клиент» (или «VPN», «Другие подключения») → «WireGuard».\n"
+            f"2. Загрузите файл {peer['name']}.conf. Если роутер не умеет загружать файл, впишите поля вручную:\n\n"
+            f"Закрытый ключ: {fields['PrivateKey']}\n"
+            f"IP-адрес: {fields['Address']}\n"
+            f"DNS: {fields['DNS']}\n"
+            f"MTU: {fields['MTU']}\n"
+            f"Открытый ключ узла: {fields['PublicKey']}\n"
+            f"Адрес конечной точки: {host}\n"
+            f"Порт: {port}\n"
+            "Разрешённые IP-адреса: 0.0.0.0/0\n"
+            "Keepalive: 25\n"
+            "Ключ PSK: оставьте пустым\n\n"
+            "3. Сохраните и включите подключение, выберите его для выхода в интернет.\n"
+            "4. Проверьте с любого устройства дома: на ipinfo.io должны быть Нидерланды.\n\n"
+            "Один конфиг — один роутер. Торренты через VPN заблокированы."
+        )
     asc = " ".join(params.get(k, "0") for k in ("Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"))
     return (
         f"📡 Настройка роутера Keenetic для {peer['name']}\n\n"
@@ -442,7 +491,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def ask_payment(message, ctx, target, state):
     ctx.user_data["pay_for"] = target
-    warning = f"{ROUTER_REQUIREMENTS}\n\n" if target == NEW_ROUTER else ""
+    warning = f"{router_requirements()}\n\n" if target == NEW_ROUTER else ""
     await message.reply_text(
         f"Оплата: {target_label(state, target)} — {price_for(state, target)} ₽ за {DAYS} дней.\n\n"
         f"{warning}{pay_text()}\n\n"
@@ -923,7 +972,10 @@ async def admin_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     names = {pub: f"{user_name(state, p['user'])} / {p['name']}" for pub, p in state["peers"].items()}
     now = time.time()
     rows = []
-    for line in run(["awg", "show", IFACE, "dump"]).splitlines()[1:]:
+    dumps = [run(["awg", "show", IFACE, "dump"])]
+    if plain_routers():
+        dumps.append(run(["awg", "show", ROUTER_IFACE, "dump"]))
+    for line in [line for dump in dumps for line in dump.splitlines()[1:]]:
         f = line.split("\t")
         pub, handshake, rx, tx = f[0], int(f[4]), int(f[5]), int(f[6])
         ago = "никогда" if not handshake else f"{int(now - handshake) // 60} мин назад"

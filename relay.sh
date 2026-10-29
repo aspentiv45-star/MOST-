@@ -6,6 +6,7 @@
 # на AmneziaWG основного сервера. Ключей и конфигов здесь нет.
 #
 #   sudo bash relay.sh --to 185.121.13.60:51234
+#   sudo bash relay.sh --to 185.121.13.60:51234,51235   — несколько портов (телефоны и роутеры)
 #   sudo bash relay.sh off
 set -euo pipefail
 
@@ -23,37 +24,43 @@ if [[ "${1:-}" == "off" ]]; then
   exit 0
 fi
 
-[[ "${1:-}" == "--to" && -n "${2:-}" ]] || die "использование: sudo bash relay.sh --to IP_ОСНОВНОГО_СЕРВЕРА:ПОРТ"
+[[ "${1:-}" == "--to" && -n "${2:-}" ]] || die "использование: sudo bash relay.sh --to IP_ОСНОВНОГО_СЕРВЕРА:ПОРТ[,ПОРТ2]"
 TARGET="$2"
 DEST_IP="${TARGET%:*}"
-PORT="${TARGET##*:}"
-[[ "$DEST_IP" =~ ^[0-9.]+$ && "$PORT" =~ ^[0-9]+$ ]] || die "формат: --to 185.121.13.60:51234"
+PORTS="${TARGET##*:}"
+[[ "$DEST_IP" =~ ^[0-9.]+$ && "$PORTS" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "формат: --to 185.121.13.60:51234 или 185.121.13.60:51234,51235"
 
 WAN="$(ip -4 route show default | awk '{print $5; exit}')"
 [[ -n "$WAN" ]] || die "не нашёл сетевой интерфейс с выходом в интернет"
 
-echo "==> Включаю пересылку UDP $PORT -> $DEST_IP:$PORT"
+echo "==> Включаю пересылку UDP $PORTS -> $DEST_IP"
 echo "net.ipv4.ip_forward=1" >/etc/sysctl.d/99-most-relay.conf
 sysctl -q --system || true
 
+# Снимаем правила прошлой установки, прежде чем записать новые.
+systemctl stop most-relay 2>/dev/null || true
+[[ -x "$RULES" ]] && "$RULES" down 2>/dev/null || true
+
 cat >"$RULES" <<EOF
 #!/bin/bash
-# MOST: клиенты -> этот сервер:$PORT/udp -> $DEST_IP:$PORT
+# MOST: клиенты -> этот сервер:ПОРТ/udp -> $DEST_IP:ПОРТ, порты: $PORTS
 case "\$1" in
   up)   OP=-A; OPI=-I ;;
   down) OP=-D; OPI=-D ;;
   *) exit 1 ;;
 esac
-iptables -t nat \$OP PREROUTING -i $WAN -p udp --dport $PORT -j DNAT --to-destination $DEST_IP:$PORT
-iptables -t nat \$OP POSTROUTING -o $WAN -d $DEST_IP -p udp --dport $PORT -j MASQUERADE
-iptables \$OPI FORWARD -d $DEST_IP -p udp --dport $PORT -j ACCEPT
-iptables \$OPI FORWARD -s $DEST_IP -p udp --sport $PORT -j ACCEPT
+for P in ${PORTS//,/ }; do
+  iptables -t nat \$OP PREROUTING -i $WAN -p udp --dport \$P -j DNAT --to-destination $DEST_IP:\$P
+  iptables -t nat \$OP POSTROUTING -o $WAN -d $DEST_IP -p udp --dport \$P -j MASQUERADE
+  iptables \$OPI FORWARD -d $DEST_IP -p udp --dport \$P -j ACCEPT
+  iptables \$OPI FORWARD -s $DEST_IP -p udp --sport \$P -j ACCEPT
+done
 EOF
 chmod 755 "$RULES"
 
 cat >"$UNIT" <<EOF
 [Unit]
-Description=MOST: вход для клиентов -> $DEST_IP:$PORT
+Description=MOST: вход для клиентов -> $DEST_IP ($PORTS)
 After=network-online.target
 Wants=network-online.target
 
@@ -71,16 +78,18 @@ systemctl enable most-relay >/dev/null 2>&1
 systemctl restart most-relay
 
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-  ufw allow "$PORT"/udp comment "MOST relay" >/dev/null
+  for P in ${PORTS//,/ }; do
+    ufw allow "$P"/udp comment "MOST relay" >/dev/null
+  done
 fi
 
 PUBLIC_IP="$(curl -4 -fsS --max-time 10 https://api.ipify.org || echo "IP_ЭТОГО_СЕРВЕРА")"
 cat <<EOF
 
-Готово. Вход: $PUBLIC_IP:$PORT/udp -> $DEST_IP:$PORT
+Готово. Вход: $PUBLIC_IP -> $DEST_IP, UDP-порты $PORTS
 
 Если это Yandex Cloud или другое облако с группами безопасности —
-разрешите в них входящий UDP-порт $PORT.
+разрешите в них входящие UDP-порты $PORTS.
 
 Теперь на ОСНОВНОМ сервере, в папке MOST-, выполните:
 
