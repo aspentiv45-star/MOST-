@@ -91,7 +91,7 @@ def _cidrs(start, end):
     return list(ipaddress.summarize_address_range(ipaddress.IPv4Address(start), ipaddress.IPv4Address(end)))
 
 
-def tunnel_networks(ru_nets, limit=500):
+def tunnel_networks(ru_nets, limit=2000):
     """Сети, которые идут через VPN: всё, кроме российских и локальных.
 
     Российские сети никогда не попадают в туннель. Чтобы список уложился
