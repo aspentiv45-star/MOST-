@@ -728,9 +728,7 @@ async def resend_all(query):
     for uid, peers in by_user.items():
         try:
             await USER_BOT.send_message(
-                int(uid), "🔄 Обновление VPN: теперь российские сайты и приложения работают с включённым VPN.\n\n"
-                          "Ниже ваши обновлённые конфиги. В приложении удалите старые и импортируйте эти. "
-                          "Срок подписки не меняется.", reply_markup=KEYBOARD)
+                int(uid), "🔄 Обновление конфига. Старые можно удалить.", reply_markup=KEYBOARD)
             for p in peers:
                 await send_peer(int(uid), p)
                 await asyncio.sleep(0.1)
