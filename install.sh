@@ -23,6 +23,7 @@ ADMIN=""
 PAY=""
 PRICE=""
 ROUTER_PRICE=""
+TRIAL=""
 DAYS=""
 RELAY=""
 PORT=""
@@ -42,6 +43,7 @@ usage() {
   --pay 'ТЕКСТ'        реквизиты для оплаты, их увидит клиент
   --price N            цена конфига для устройства в рублях (по умолчанию 200)
   --router-price N     цена конфига для роутера в рублях (по умолчанию 500)
+  --trial N            бесплатный пробный период в днях для новых клиентов (по умолчанию 3, 0 — выключить)
   --days N             срок подписки в днях (по умолчанию 30)
   --relay IP           IP сервера-входа для белых списков (см. relay.sh); --relay off — убрать
   --access approve|open  approve (по умолчанию) — новые люди могут купить только после вашего одобрения
@@ -62,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --pay) PAY="$2"; shift 2 ;;
     --price) PRICE="$2"; shift 2 ;;
     --router-price) ROUTER_PRICE="$2"; shift 2 ;;
+    --trial) TRIAL="$2"; shift 2 ;;
     --days) DAYS="$2"; shift 2 ;;
     --relay) RELAY="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
@@ -83,6 +86,7 @@ if [[ -f "$ENV_FILE" ]]; then
   [[ -n "$ADMIN" ]] || ADMIN="$(old ADMIN_IDS)"
   [[ -n "$PRICE" ]] || PRICE="$(old PRICE)"
   [[ -n "$ROUTER_PRICE" ]] || ROUTER_PRICE="$(old ROUTER_PRICE)"
+  [[ -n "$TRIAL" ]] || TRIAL="$(old TRIAL_DAYS)"
   [[ -n "$DAYS" ]] || DAYS="$(old DAYS)"
   [[ -n "$MAX_PEERS" ]] || MAX_PEERS="$(old MAX_PEERS)"
   [[ -n "$RELAY" ]] || RELAY="$(old RELAY_HOST)"
@@ -91,6 +95,7 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 PRICE="${PRICE:-200}"
 ROUTER_PRICE="${ROUTER_PRICE:-500}"
+TRIAL="${TRIAL:-3}"
 DAYS="${DAYS:-30}"
 MAX_PEERS="${MAX_PEERS:-3}"
 ACCESS="${ACCESS:-approve}"
@@ -243,6 +248,7 @@ ADMIN_BOT_TOKEN=$ADMIN_TOKEN
 ADMIN_IDS=$ADMIN
 PRICE=$PRICE
 ROUTER_PRICE=$ROUTER_PRICE
+TRIAL_DAYS=$TRIAL
 DAYS=$DAYS
 PAY_FILE=/etc/most/pay.txt
 ENDPOINT_HOST=$PUBLIC_IP

@@ -56,6 +56,8 @@ CLIENT_DNS = os.environ.get("CLIENT_DNS", "1.1.1.1, 1.0.0.1")
 MAX_PEERS = int(os.environ.get("MAX_PEERS", "5"))
 PRICE = int(os.environ.get("PRICE", "200"))
 ROUTER_PRICE = int(os.environ.get("ROUTER_PRICE", "500"))
+# Бесплатный пробный период для нового клиента (один раз на аккаунт); 0 — выключить.
+TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "3"))
 DAYS = int(os.environ.get("DAYS", "30"))
 PAY_FILE = os.environ.get("PAY_FILE", "/etc/most/pay.txt")
 # approve — купить может только тот, кого администратор пустил; open — любой.
@@ -290,7 +292,8 @@ def peer_status(peer):
     if is_admin(peer["user"]):
         return "🟢 без срока (администратор)"
     if peer["until"] > time.time():
-        return f"🟢 до {fmt_date(peer['until'])}"
+        trial = " (пробный период)" if peer.get("trial") and not peer.get("paid") else ""
+        return f"🟢 до {fmt_date(peer['until'])}{trial}"
     if peer["until"]:
         return f"⚪️ закончился {fmt_date(peer['until'])}"
     return "⚪️ не оплачен"
@@ -607,6 +610,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Привет! Это VPN на AmneziaWG.\nНа {DAYS} дней: для себя (одно устройство) — {PRICE} ₽, "
         f"для роутера (весь дом) — {ROUTER_PRICE} ₽.\n\n"
         + (f"Ваших конфигов: {len(mine)}, активных: {active}. Подробнее — «{BTN_LIST}»." if mine
+           else f"🎁 Попробуйте бесплатно {TRIAL_DAYS} дня: «{BTN_BUY}» → «Попробовать бесплатно»."
+           if trial_available(state, update.effective_user.id)
            else f"Чтобы подключиться, нажмите «{BTN_BUY}»."),
         reply_markup=KEYBOARD)
 
@@ -631,8 +636,58 @@ async def buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"У вас уже {MAX_PEERS} конфигов — это максимум. Продлите или удалите ненужный в «{BTN_LIST}».")
         return
-    text, buttons = BUY_MENU["root"]
+    text, buttons = root_menu(state, update.effective_user.id)
     await update.message.reply_text(text, reply_markup=buttons)
+
+
+def trial_available(state, uid):
+    return TRIAL_DAYS > 0 and not state["users"].get(str(uid), {}).get("trial_used")
+
+
+def root_menu(state, uid):
+    """Первый экран покупки; новым клиентам — с кнопкой пробного периода."""
+    text, buttons = BUY_MENU["root"]
+    if not trial_available(state, uid):
+        return text, buttons
+    trial = [InlineKeyboardButton(f"🎁 Попробовать бесплатно {TRIAL_DAYS} дня", callback_data="trial:start")]
+    return (f"{text}\n\n🎁 Новым клиентам — {TRIAL_DAYS} дня бесплатно на одно устройство. "
+            "Понравится — продлите этот же конфиг, переустанавливать ничего не нужно.",
+            InlineKeyboardMarkup([trial, *buttons.inline_keyboard]))
+
+
+async def start_trial(query, ctx):
+    user = query.from_user
+    async with lock:
+        state = load_state()
+        u = get_user(state, user)
+        if not is_approved(state, user.id):
+            save_state(state)
+            await query.edit_message_text(closed_text(state, user.id))
+            return
+        if not trial_available(state, user.id):
+            await query.edit_message_text("Пробный период уже использован. Чтобы продолжить — оплатите конфиг.")
+            return
+        old_state = json.loads(json.dumps(state))
+        pub, peer = create_peer(state, user.id, time.time() + TRIAL_DAYS * DAY)
+        peer["trial"] = True
+        peer["warned"] = 1  # напоминание «за 3 дня» для пробного не нужно
+        u["trial_used"] = int(time.time())
+        apply_or_rollback(state, old_state)
+        save_state(state)
+
+    await query.edit_message_reply_markup(reply_markup=None)
+    await USER_BOT.send_message(
+        user.id, f"🎁 Пробный период на {TRIAL_DAYS} дня: ваш конфиг {peer['name']} работает до "
+                 f"{fmt_date(peer['until'])}.\n\nКак подключить — «{BTN_HELP}».\n"
+                 f"Понравится — «{BTN_LIST}» → «🔄 Продлить» ({PRICE} ₽ за {DAYS} дней), "
+                 "этот же конфиг продолжит работать.", reply_markup=KEYBOARD)
+    await send_peer(user.id, peer)
+    for admin in ADMINS:
+        try:
+            await ADMIN_BOT.send_message(admin, f"🎁 Пробный период: {u['name']}, ID {user.id}, "
+                                                f"{peer['name']} до {fmt_date(peer['until'])}")
+        except Exception:
+            pass
 
 
 def _buy_screen(guide, target, price, back):
@@ -773,8 +828,15 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if action == "menu":
-        text, buttons = BUY_MENU.get(arg, BUY_MENU["root"])
+        if arg == "root":
+            text, buttons = root_menu(load_state(), uid)
+        else:
+            text, buttons = BUY_MENU.get(arg, BUY_MENU["root"])
         await query.edit_message_text(text, reply_markup=buttons)
+        return
+
+    if action == "trial":
+        await start_trial(query, ctx)
         return
 
     if action == "help":
@@ -884,6 +946,8 @@ async def grant(uid, target, days, paid=True):
                 return "Конфиг уже удалён клиентом — продлевать нечего."
             peer["until"] = max(peer["until"], time.time()) + days * DAY
             peer["warned"] = 0
+            if paid:
+                peer["paid"] = True  # после оплаты пометка «пробный период» уходит
         apply_or_rollback(state, old_state)
         save_state(state)
 
