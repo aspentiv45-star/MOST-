@@ -45,6 +45,9 @@ CONF = os.environ.get("AWG_CONF", f"/etc/amnezia/amneziawg/{IFACE}.conf")
 STATE_FILE = os.environ.get("STATE_FILE", "/var/lib/most/state.json")
 ENDPOINT_HOST = os.environ["ENDPOINT_HOST"]
 RELAY_HOST = os.environ.get("RELAY_HOST", "")
+# Со входом в РФ клиенты получают один конфиг через него: прямое подключение к
+# зарубежному серверу российские провайдеры часто режут. SEND_DIRECT=1 — выдавать и прямой.
+SEND_DIRECT = os.environ.get("SEND_DIRECT", "0") == "1"
 CLIENT_DNS = os.environ.get("CLIENT_DNS", "1.1.1.1, 1.0.0.1")
 MAX_PEERS = int(os.environ.get("MAX_PEERS", "5"))
 PRICE = int(os.environ.get("PRICE", "200"))
@@ -81,8 +84,8 @@ HELP_TEXT = (
     "4. В приложении: «+» → импорт из файла (на iPhone: нажмите на файл → «Поделиться» → Amnezia).\n"
     "5. Включите туннель и проверьте на ipinfo.io — должны быть Нидерланды.\n\n"
     + ("Российские сайты и приложения работают напрямую, VPN выключать не нужно.\n\n" if SPLIT_RU else "")
-    + ("Если на мобильном интернете обычный конфиг не подключается — "
-       "включите второй, с «-wl» в названии.\n\n" if RELAY_HOST else "")
+    + ("Если конфиг с «-nl» в названии не подключается — пользуйтесь основным.\n\n"
+       if RELAY_HOST and SEND_DIRECT else "")
     + f"Один конфиг — одно устройство, {DAYS} дней — {PRICE} ₽. Для второго устройства купите ещё один конфиг.\n"
     f"Продлить конфиг: «{BTN_LIST}» → «🔄 Продлить»."
 )
@@ -320,14 +323,16 @@ async def split_loop():
 async def send_peer(chat_id, peer):
     params = server_params()
     # Имя файла становится именем туннеля; на iOS оно не длиннее 15 символов.
-    variants = [(f"{peer['name']}.conf", ENDPOINT_HOST, "обычное подключение")]
     if RELAY_HOST:
-        variants.append((f"{peer['name']}-wl.conf", RELAY_HOST,
-                         "через вход в РФ — для мобильного интернета с белыми списками"))
-    for filename, host, note in variants:
+        variants = [(f"{peer['name']}.conf", RELAY_HOST)]
+        if SEND_DIRECT:
+            variants.append((f"{peer['name']}-nl.conf", ENDPOINT_HOST))
+    else:
+        variants = [(f"{peer['name']}.conf", ENDPOINT_HOST)]
+    for filename, host in variants:
         text = client_conf(peer, params, host)
         await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()), filename=filename,
-                                     caption=f"{filename}: {note}\n{peer_status(peer)}")
+                                     caption=f"{filename} — {peer_status(peer)}")
         # Конфиг с раздельным туннелем не помещается в QR-код — тогда только файл.
         if len(text) < 2000:
             png = io.BytesIO()
