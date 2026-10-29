@@ -55,6 +55,8 @@ TZ = ZoneInfo(os.environ.get("TZ_NAME", "Europe/Moscow"))
 SPLIT_RU = os.environ.get("SPLIT_RU", "1") == "1"
 SPLIT_FILE = os.environ.get("SPLIT_FILE", "/var/lib/most/split.txt")
 SPLIT_LIMIT = int(os.environ.get("SPLIT_LIMIT", "2000"))
+# Свои сети «всегда через VPN»: по одной на строку, например 1.2.3.0/24.
+FORCE_FILE = os.environ.get("FORCE_FILE", "/etc/most/force_vpn.txt")
 FULL_TUNNEL = "0.0.0.0/0, ::/0"
 
 DAY = 86400
@@ -268,7 +270,13 @@ def allowed_ips():
 async def refresh_split():
     """Пересчитывает список сетей для туннеля по свежему списку российских сетей."""
     nets = await asyncio.to_thread(split.fetch_ru_networks)
-    tunnel = await asyncio.to_thread(split.tunnel_networks, nets, SPLIT_LIMIT)
+    force = []
+    try:
+        with open(FORCE_FILE) as f:
+            force = [line.split("#")[0].strip() for line in f if line.split("#")[0].strip()]
+    except FileNotFoundError:
+        pass
+    tunnel = await asyncio.to_thread(split.tunnel_networks, nets, SPLIT_LIMIT, force)
     text = ", ".join(map(str, tunnel)) + ", ::/0"
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(SPLIT_FILE))
     with os.fdopen(fd, "w") as f:

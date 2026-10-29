@@ -18,6 +18,24 @@ SOURCES = (
 LOCAL = ("0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
          "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/3")
 
+# Сети сервисов, которые в России блокируют или замедляют: всегда через VPN,
+# даже если по базам они числятся российскими или попали в мелкий промежуток.
+FORCE_VPN = (
+    # Telegram
+    "91.105.192.0/23", "91.108.4.0/22", "91.108.8.0/21", "91.108.16.0/21", "91.108.56.0/22",
+    "95.161.64.0/20", "149.154.160.0/20", "185.76.151.0/24",
+    # Meta: WhatsApp, Instagram, Facebook
+    "31.13.24.0/21", "31.13.64.0/18", "57.144.0.0/14", "66.220.144.0/20", "69.63.176.0/20",
+    "69.171.224.0/19", "102.132.96.0/20", "129.134.0.0/16", "157.240.0.0/16", "163.70.128.0/17",
+    "173.252.64.0/18", "179.60.192.0/22", "185.60.216.0/22",
+    # Google и YouTube
+    "64.233.160.0/19", "66.102.0.0/20", "66.249.64.0/19", "72.14.192.0/18", "74.125.0.0/16",
+    "108.177.0.0/17", "142.250.0.0/15", "172.217.0.0/16", "173.194.0.0/16", "209.85.128.0/17",
+    "216.58.192.0/19", "216.239.32.0/19",
+    # X (Twitter)
+    "104.244.40.0/21",
+)
+
 MAX_ADDR = 2**32 - 1
 
 
@@ -91,12 +109,13 @@ def _cidrs(start, end):
     return list(ipaddress.summarize_address_range(ipaddress.IPv4Address(start), ipaddress.IPv4Address(end)))
 
 
-def tunnel_networks(ru_nets, limit=2000):
+def tunnel_networks(ru_nets, limit=2000, force=()):
     """Сети, которые идут через VPN: всё, кроме российских и локальных.
 
     Российские сети никогда не попадают в туннель. Чтобы список уложился
     в limit префиксов, самые мелкие зарубежные промежутки между российскими
     сетями отдаются «напрямую» — это доли процента адресного пространства.
+    Сети из FORCE_VPN и force идут через VPN всегда.
     """
     local = [ipaddress.IPv4Network(n) for n in LOCAL]
     gaps = [(s, e, len(_cidrs(s, e))) for s, e in _gaps(list(ru_nets) + local)]
@@ -110,7 +129,9 @@ def tunnel_networks(ru_nets, limit=2000):
         else:
             lo = mid + 1
     keep = [(s, e) for s, e, _ in gaps if e - s + 1 >= sizes[lo]]
-    return [net for s, e in keep for net in _cidrs(s, e)]
+    tunnel = [net for s, e in keep for net in _cidrs(s, e)]
+    forced = [ipaddress.IPv4Network(n, strict=False) for n in (*FORCE_VPN, *force)]
+    return list(ipaddress.collapse_addresses(tunnel + forced))
 
 
 def _report():
@@ -128,7 +149,7 @@ def _report():
         i = bisect.bisect_right(ru_starts, ip) - 1
         return i >= 0 and ip <= int(ru[i].broadcast_address)
 
-    sites = ["youtube.com", "instagram.com", "web.telegram.org", "x.com", "discord.com", "chatgpt.com",
+    sites = ["youtube.com", "instagram.com", "web.telegram.org", "telegram.org", "whatsapp.com", "x.com", "discord.com", "chatgpt.com",
              "facebook.com", "linkedin.com", "gosuslugi.ru", "sberbank.ru", "vk.com", "ya.ru",
              "ozon.ru", "wildberries.ru", "tbank.ru", "avito.ru", "mail.ru", "kinopoisk.ru"]
     ips = {}
@@ -137,6 +158,11 @@ def _report():
             ips[site] = int(ipaddress.IPv4Address(socket.gethostbyname(site)))
         except OSError:
             pass
+    # Серверы Telegram, к которым подключается приложение (по IP, без DNS).
+    for name, ip in (("Telegram DC1", "149.154.175.53"), ("Telegram DC2", "149.154.167.51"),
+                     ("Telegram DC4", "149.154.167.91"), ("Telegram DC5", "91.108.56.130"),
+                     ("Telegram медиа", "91.108.8.1")):
+        ips[name] = int(ipaddress.IPv4Address(ip))
 
     for limit in (500, 1000, 2000):
         tun = list(ipaddress.collapse_addresses(tunnel_networks(ru, limit)))
