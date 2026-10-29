@@ -1069,7 +1069,7 @@ async def admin_give_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     waiting = ctx.user_data.pop("await", None)
-    if waiting and waiting.startswith(("tk_reply:", "tk_give:")):
+    if waiting and waiting.startswith(("tk_reply:", "tk_give:", "tk_spam:")):
         await admin_ticket_text(update, ctx, waiting)
         return
     if waiting == "news":
@@ -1348,6 +1348,7 @@ def ticket_buttons(tid, status):
              InlineKeyboardButton("🎁 Дать конфиг", callback_data=f"tk:give:{tid}")],
             [InlineKeyboardButton("💸 Вернуть деньги", callback_data=f"tk:refund:{tid}"),
              InlineKeyboardButton("❌ Отклонить", callback_data=f"tk:reject:{tid}")],
+            [InlineKeyboardButton("🚫 Спам", callback_data=f"tk:spam:{tid}")],
         ])
     if status == "refund_ready":
         return InlineKeyboardMarkup([
@@ -1397,7 +1398,29 @@ async def notify_admins(text, buttons=None):
             log.exception("не удалось написать админу %s", admin)
 
 
+def fmt_left(seconds):
+    """Сколько осталось, по-человечески: «7 мин», «2 ч 5 мин», «1 д 3 ч»."""
+    minutes = max(1, int((seconds + 59) // 60))
+    days, rest = divmod(minutes, 1440)
+    hours, mins = divmod(rest, 60)
+    parts = [f"{days} д" if days else "", f"{hours} ч" if hours else "", f"{mins} мин" if mins and not days else ""]
+    return " ".join(p for p in parts if p) or "1 мин"
+
+
+def support_ban_text(state, uid):
+    """Текст запрета на обращения за спам или None, если запрета нет."""
+    until = state["users"].get(str(uid), {}).get("support_ban_until", 0)
+    if until <= time.time():
+        return None
+    return (f"🚫 Вы не можете отправить обращение, пока не пройдёт ещё {fmt_left(until - time.time())} "
+            f"(до {fmt_date(until)}): вы заблокированы за спам.")
+
+
 async def support_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    banned = support_ban_text(load_state(), update.effective_user.id)
+    if banned:
+        await update.message.reply_text(banned, reply_markup=KEYBOARD)
+        return
     ctx.user_data["await"] = "ticket"
     await update.message.reply_text(
         "🆘 Опишите проблему одним сообщением: что не работает, на каком устройстве, "
@@ -1407,6 +1430,10 @@ async def support_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def create_ticket(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text=None, photo=None):
+    banned = support_ban_text(load_state(), update.effective_user.id)
+    if banned:
+        await update.message.reply_text(banned, reply_markup=KEYBOARD)
+        return
     text = (text if text is not None else update.message.text).strip()
     async with lock:
         state = load_state()
@@ -1455,6 +1482,10 @@ async def save_requisites(update: Update, ctx: ContextTypes.DEFAULT_TYPE, tid):
 
 async def ticket_followup(update, tid, text, photo=None):
     """Дополнительный вопрос клиента: обращение снова ждёт ответа администратора."""
+    banned = support_ban_text(load_state(), update.effective_user.id)
+    if banned:
+        await update.message.reply_text(banned, reply_markup=KEYBOARD)
+        return
     async with lock:
         state = load_state()
         t = state["tickets"].get(tid)
@@ -1557,7 +1588,24 @@ async def close_ticket(tid, result, client_text):
     return state
 
 
+async def ban_for_spam(tid, minutes):
+    """Закрывает обращение как спам и запрещает клиенту новые обращения на minutes минут."""
+    until = time.time() + minutes * 60
+    async with lock:
+        state = load_state()
+        uid = state["tickets"][tid]["user"]
+        state["users"].setdefault(uid, {"name": uid})["support_ban_until"] = int(until)
+        save_state(state)
+    return await close_ticket(
+        tid, f"спам, обращения запрещены на {fmt_left(minutes * 60)}",
+        f"🚫 Вы заблокированы за спам: отправлять обращения нельзя {fmt_left(minutes * 60)} "
+        f"(до {fmt_date(until)}).")
+
+
 async def on_ticket_button(query, ctx, action, tid):
+    minutes = None
+    if action == "spamset":
+        tid, _, minutes = tid.partition(":")
     state = load_state()
     t = state["tickets"].get(tid)
     if not t or t["status"] == "closed":
@@ -1594,6 +1642,21 @@ async def on_ticket_button(query, ctx, action, tid):
     elif action == "reject":
         state = await close_ticket(tid, "отклонено", f"Обращение №{tid} закрыто администратором.")
         await query.edit_message_text(ticket_text(state, tid))
+    elif action == "spam":
+        await query.message.reply_text(
+            f"🚫 На сколько запретить клиенту обращения? (обращение №{tid} закроется)",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("10 минут", callback_data=f"tk:spamset:{tid}:10"),
+                 InlineKeyboardButton("1 час", callback_data=f"tk:spamset:{tid}:60"),
+                 InlineKeyboardButton("1 день", callback_data=f"tk:spamset:{tid}:1440")],
+                [InlineKeyboardButton("✏️ Своё число минут", callback_data=f"tk:spamask:{tid}")],
+            ]))
+    elif action == "spamask":
+        ctx.user_data["await"] = f"tk_spam:{tid}"
+        await query.message.reply_text(f"Пришлите, на сколько минут запретить обращения (обращение №{tid}).")
+    elif action == "spamset":
+        state = await ban_for_spam(tid, int(minutes))
+        await query.edit_message_text(ticket_text(state, tid))
 
 
 async def admin_ticket_text(update, ctx, waiting):
@@ -1624,7 +1687,12 @@ async def admin_ticket_text(update, ctx, waiting):
         return
     if not text.isdigit() or int(text) <= 0:
         ctx.user_data["await"] = waiting
-        await update.message.reply_text(f"Нужно число дней, например {DAYS}.")
+        await update.message.reply_text("Нужно число минут, например 30." if kind == "tk_spam"
+                                        else f"Нужно число дней, например {DAYS}.")
+        return
+    if kind == "tk_spam":
+        state = await ban_for_spam(tid, int(text))
+        await update.message.reply_text(ticket_text(state, tid), reply_markup=ADMIN_KEYBOARD)
         return
     result = await grant(int(t["user"]), NEW, int(text), paid=False)
     state = await close_ticket(tid, f"выдан конфиг на {text} дн.",
