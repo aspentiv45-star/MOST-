@@ -111,10 +111,9 @@ GUIDES = {
         "Для двух телефонов купите два конфига.\n\n"
         f"📡 «Роутер AmneziaWG» — {ROUTER_PRICE} ₽\n"
         "Для роутеров Keenetic (KeeneticOS 4.2 и новее) и OpenWrt. VPN работает сразу на всех устройствах дома. "
-        "Самый надёжный вариант для роутера: соединение замаскировано.\n\n"
-        f"📡 «Роутер WireGuard» — {ROUTER_PRICE} ₽\n"
-        "Для любого другого роутера, где в настройках есть «VPN-клиент» → «WireGuard» "
-        "(TP-Link, Asus, Xiaomi, MikroTik и др.). Без маскировки — у части провайдеров может не работать.\n\n"
+        "Соединение замаскировано, провайдеры его не режут.\n\n"
+        "❗ Другие роутеры (TP-Link, Asus, Xiaomi, MikroTik, роутеры провайдеров) умеют только обычный WireGuard, "
+        "а его провайдеры режут — VPN на них работать не будет. Для них купите конфиг «Для себя» на каждое устройство.\n\n"
         "Не уверены — берите «Для себя»: работает у всех."
     ),
     "ios": (
@@ -162,18 +161,6 @@ GUIDES = {
         "3. Добавьте интерфейс в зону wan и включите его.\n\n"
         "Проверка: с любого устройства дома ipinfo.io — Нидерланды."
     ),
-    "router-wg": (
-        "📡 Роутер WireGuard (TP-Link, Asus, Xiaomi, MikroTik и др.)\n\n"
-        "1. Откройте настройки роутера → «VPN-клиент» (или «VPN», «Другие подключения») → «WireGuard».\n"
-        "2. Загрузите файл rtr1.conf. Если роутер не умеет загружать файл — впишите поля вручную: "
-        "бот прислал их все вместе с конфигом (ключи, адрес, порт).\n"
-        "3. «Разрешённые IP-адреса» — длинный список из сообщения бота, скопируйте его целиком "
-        "(не пишите 0.0.0.0/0 — интернет дома может пропасть). «Ключ PSK» оставьте пустым.\n"
-        "4. Сохраните, включите подключение и выберите его для выхода в интернет.\n\n"
-        "Проверка: с любого устройства дома ipinfo.io — Нидерланды.\n\n"
-        "❗ Если не подключается — ваш провайдер режет обычный WireGuard. Тогда нужен роутер с AmneziaWG "
-        "(Keenetic, OpenWrt) или конфиг «Для себя» на каждое устройство."
-    ),
     "trouble": (
         "🆘 Не работает?\n\n"
         f"1. Проверьте срок: «{BTN_LIST}» — у конфига должен быть 🟢. Если ⚪️ — продлите.\n"
@@ -193,8 +180,7 @@ HELP_BUTTONS = InlineKeyboardMarkup([
     [InlineKeyboardButton("🍏 iPhone", callback_data="help:ios"),
      InlineKeyboardButton("🤖 Android", callback_data="help:android")],
     [InlineKeyboardButton("💻 Компьютер", callback_data="help:pc")],
-    [InlineKeyboardButton("📡 Роутер AmneziaWG", callback_data="help:router-awg"),
-     InlineKeyboardButton("📡 Роутер WireGuard", callback_data="help:router-wg")],
+    [InlineKeyboardButton("📡 Роутер (Keenetic, OpenWrt)", callback_data="help:router-awg")],
     [InlineKeyboardButton("🆘 Не работает", callback_data="help:trouble")],
 ])
 
@@ -651,9 +637,12 @@ BUY_MENU = {
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:root")],
     ])),
     "router": ("📡 Какой у вас роутер?\n\n"
-               "Посмотрите название на наклейке снизу роутера или в его веб-интерфейсе.", InlineKeyboardMarkup([
-        [InlineKeyboardButton("Keenetic или OpenWrt (AmneziaWG)", callback_data="menu:router-awg")],
-        [InlineKeyboardButton("Другой роутер с WireGuard", callback_data="menu:router-wg")],
+               "Подходят только роутеры с AmneziaWG: Keenetic (KeeneticOS 4.2 и новее) и OpenWrt.\n\n"
+               "TP-Link, Asus, Xiaomi, MikroTik и роутеры провайдеров не подходят: они умеют только обычный "
+               "WireGuard, а его провайдеры режут. Для них купите конфиг «Для устройства» на каждое устройство.\n\n"
+               "Модель написана на наклейке снизу роутера.", InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ У меня Keenetic или OpenWrt", callback_data="menu:router-awg")],
+        [InlineKeyboardButton("📱 Другой роутер — купить для устройства", callback_data="menu:device")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:root")],
     ])),
     "what": (GUIDES["what"], InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:root")]])),
@@ -661,7 +650,6 @@ BUY_MENU = {
     "android": _buy_screen("android", NEW, PRICE, "device"),
     "pc": _buy_screen("pc", NEW, PRICE, "device"),
     "router-awg": _buy_screen("router-awg", NEW_ROUTER_AWG, ROUTER_PRICE, "router"),
-    "router-wg": _buy_screen("router-wg", NEW_ROUTER, ROUTER_PRICE, "router"),
 }
 
 
@@ -689,8 +677,7 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Непонятно, за что оплата — спрашиваем, картинку держим до ответа.
         ctx.user_data["pending_photo"] = (data, msg.caption)
         rows = [[InlineKeyboardButton(f"📱 Новый для себя — {PRICE} ₽", callback_data=f"payfor:{NEW}")],
-                [InlineKeyboardButton(f"📡 Роутер AmneziaWG — {ROUTER_PRICE} ₽", callback_data=f"payfor:{NEW_ROUTER_AWG}")],
-                [InlineKeyboardButton(f"📡 Роутер WireGuard — {ROUTER_PRICE} ₽", callback_data=f"payfor:{NEW_ROUTER}")]]
+                [InlineKeyboardButton(f"📡 Роутер AmneziaWG — {ROUTER_PRICE} ₽", callback_data=f"payfor:{NEW_ROUTER_AWG}")]]
         rows += [[InlineKeyboardButton(f"🔄 Продлить {p['name']}", callback_data=f"payfor:{pub}")]
                  for pub, p in mine.items()]
         await msg.reply_text("За что эта оплата?", reply_markup=InlineKeyboardMarkup(rows))
@@ -959,7 +946,7 @@ async def admin_give_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Пришлите ID клиента и, через пробел, число дней (по умолчанию {DAYS}).\n"
         f"Например: 123456789 {DAYS}\n"
-        f"Для роутера добавьте «роутер» (WireGuard) или «amnezia» (Keenetic/OpenWrt): "
+        f"Для роутера (Keenetic, OpenWrt) добавьте слово «роутер»: "
         f"123456789 {DAYS} роутер\n\n"
         "Клиент получит новый конфиг бесплатно. ID видно в его оплатах и в «👥 Клиенты». "
         "Клиент должен хотя бы раз нажать /start в клиентском боте.")
@@ -977,14 +964,15 @@ async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     words = update.message.text.lower().split()
     AWG_WORDS = ("amnez", "амнез", "keenetic", "кинет", "awg", "openwrt")
     awg = any(w.startswith(AWG_WORDS) for w in words)
-    router = awg or any(w.startswith(("роут", "router")) for w in words)
+    # Обычный WireGuard для роутеров больше не продаётся: «роутер» = роутер AmneziaWG.
+    awg = awg or any(w.startswith(("роут", "router")) for w in words)
     parts = [w for w in words if w.isdigit()]
     if not parts or not parts[0].isdigit() or (len(parts) > 1 and not parts[1].isdigit()):
         ctx.user_data["await"] = "give"
         await update.message.reply_text(f"Нужно число — ID клиента. Например: 123456789 {DAYS}")
         return
     uid, days = int(parts[0]), int(parts[1]) if len(parts) > 1 else DAYS
-    result = await grant(uid, NEW_ROUTER_AWG if awg else NEW_ROUTER if router else NEW, days, paid=False)
+    result = await grant(uid, NEW_ROUTER_AWG if awg else NEW, days, paid=False)
     await update.message.reply_text(f"Готово: выдан конфиг.\n{result}", reply_markup=ADMIN_KEYBOARD)
 
 
