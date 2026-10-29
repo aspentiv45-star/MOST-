@@ -65,6 +65,7 @@ sudo bash install.sh --link 'vless://...' --sni www.vk.com
 ## Проверка и обслуживание
 
 ```bash
+sudo bash check.sh             # проверить, что трафик выходит в Нидерландах
 systemctl status xray          # работает ли мост
 journalctl -u xray -f          # логи
 cat /root/most-client.txt      # ссылка для клиента
