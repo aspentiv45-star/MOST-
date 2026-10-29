@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """MOST — два Telegram-бота для продажи доступа к AmneziaWG.
 
-Клиентский бот: оплата по скриншоту, выдача и удаление конфигов.
-Админ-бот: одобрение оплат, продление подписок, статистика.
+Каждый конфиг — отдельная подписка: купить новый или продлить имеющийся
+можно только оплатой, которую одобряет администратор.
+
+Клиентский бот: покупка и продление конфигов по скриншоту оплаты.
+Админ-бот: одобрение оплат, клиенты, выдача конфигов, статистика.
 
 Оба бота работают в одном процессе на сервере с AmneziaWG (awg0).
-Клиенты с активной подпиской попадают в /etc/amnezia/amneziawg/awg0.conf,
+В /etc/amnezia/amneziawg/awg0.conf попадают только оплаченные конфиги,
 изменения применяются через `awg syncconf` без перезапуска туннеля.
 """
 import asyncio
@@ -43,7 +46,7 @@ STATE_FILE = os.environ.get("STATE_FILE", "/var/lib/most/state.json")
 ENDPOINT_HOST = os.environ["ENDPOINT_HOST"]
 RELAY_HOST = os.environ.get("RELAY_HOST", "")
 CLIENT_DNS = os.environ.get("CLIENT_DNS", "1.1.1.1, 1.0.0.1")
-MAX_PEERS = int(os.environ.get("MAX_PEERS", "3"))
+MAX_PEERS = int(os.environ.get("MAX_PEERS", "5"))
 PRICE = int(os.environ.get("PRICE", "200"))
 DAYS = int(os.environ.get("DAYS", "30"))
 PAY_FILE = os.environ.get("PAY_FILE", "/etc/most/pay.txt")
@@ -55,29 +58,29 @@ SPLIT_LIMIT = int(os.environ.get("SPLIT_LIMIT", "2000"))
 FULL_TUNNEL = "0.0.0.0/0, ::/0"
 
 DAY = 86400
+NEW = "new"  # цель оплаты «новый конфиг»; иначе цель — публичный ключ продлеваемого конфига
 
 # Параметры обфускации AmneziaWG: клиенту они нужны точно такими же, как у сервера.
 OBFS_KEYS = ("Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
              "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5")
 
-BTN_PAY = f"💳 Оплатить {PRICE} ₽"
-BTN_SUB = "📅 Моя подписка"
-BTN_NEW = "➕ Новый конфиг"
+BTN_BUY = f"➕ Купить конфиг — {PRICE} ₽"
 BTN_LIST = "📄 Мои конфиги"
 BTN_HELP = "❓ Как подключить"
-KEYBOARD = ReplyKeyboardMarkup([[BTN_PAY, BTN_SUB], [BTN_NEW, BTN_LIST], [BTN_HELP]], resize_keyboard=True)
+KEYBOARD = ReplyKeyboardMarkup([[BTN_BUY], [BTN_LIST, BTN_HELP]], resize_keyboard=True)
 
 HELP_TEXT = (
     "Как подключиться:\n\n"
     "1. Установите AmneziaVPN или AmneziaWG (App Store / Google Play / amnezia.org).\n"
-    f"2. Оплатите подписку: «{BTN_PAY}» и пришлите скриншот перевода.\n"
-    f"3. После подтверждения нажмите «{BTN_NEW}» — бот пришлёт файл.\n"
+    f"2. Нажмите «{BTN_BUY}», оплатите и пришлите скриншот перевода.\n"
+    "3. После подтверждения бот пришлёт файл конфига.\n"
     "4. В приложении: «+» → импорт из файла (на iPhone: нажмите на файл → «Поделиться» → Amnezia).\n"
     "5. Включите туннель и проверьте на ipinfo.io — должны быть Нидерланды.\n\n"
     + ("Российские сайты и приложения работают напрямую, VPN выключать не нужно.\n\n" if SPLIT_RU else "")
     + ("Если на мобильном интернете обычный конфиг не подключается — "
-       "включите второй, с «-wl» в названии.\n\n" if os.environ.get("RELAY_HOST") else "") +
-    "Один конфиг — одно устройство. Не пересылайте конфиги другим людям."
+       "включите второй, с «-wl» в названии.\n\n" if RELAY_HOST else "")
+    + f"Один конфиг — одно устройство, {DAYS} дней — {PRICE} ₽. Для второго устройства купите ещё один конфиг.\n"
+    f"Продлить конфиг: «{BTN_LIST}» → «🔄 Продлить»."
 )
 
 log = logging.getLogger("most")
@@ -106,6 +109,11 @@ def load_state():
     state.setdefault("peers", {})
     state.setdefault("payments", {})
     state.setdefault("next_payment", 1)
+    # Переход со старой схемы «подписка на человека»: срок переносится на его конфиги.
+    for p in state["peers"].values():
+        if "until" not in p:
+            p["until"] = state["users"].get(p["user"], {}).get("until", 0)
+            p["warned"] = 0
     return state
 
 
@@ -119,31 +127,35 @@ def save_state(state):
 
 
 def get_user(state, user):
-    u = state["users"].setdefault(str(user.id), {"name": "", "until": 0, "warned": 0})
+    u = state["users"].setdefault(str(user.id), {"name": ""})
     u["name"] = f"{user.full_name} (@{user.username})" if user.username else (user.full_name or str(user.id))
     return u
 
 
-def is_active(state, uid):
-    if int(uid) in ADMINS:
-        return True
-    return state["users"].get(str(uid), {}).get("until", 0) > time.time()
+def user_name(state, uid):
+    return state["users"].get(str(uid), {}).get("name", str(uid))
+
+
+def is_admin(uid):
+    return int(uid) in ADMINS
+
+
+def peer_active(peer):
+    return is_admin(peer["user"]) or peer["until"] > time.time()
 
 
 def user_peers(state, uid):
     return {pub: p for pub, p in state["peers"].items() if p["user"] == str(uid)}
 
 
-def sub_status(state, uid):
-    if int(uid) in ADMINS:
-        return "Вы администратор — доступ без ограничений."
-    until = state["users"].get(str(uid), {}).get("until", 0)
-    if until > time.time():
-        days = int((until - time.time()) // DAY)
-        return f"Подписка активна до {fmt_date(until)} (осталось дней: {days})."
-    if until:
-        return f"Подписка закончилась {fmt_date(until)}. Продлите её: «{BTN_PAY}»."
-    return f"Подписки нет. {DAYS} дней — {PRICE} ₽. Нажмите «{BTN_PAY}»."
+def peer_status(peer):
+    if is_admin(peer["user"]):
+        return "🟢 без срока (администратор)"
+    if peer["until"] > time.time():
+        return f"🟢 до {fmt_date(peer['until'])}"
+    if peer["until"]:
+        return f"⚪️ закончился {fmt_date(peer['until'])}"
+    return "⚪️ не оплачен"
 
 
 # ---------- конфиг сервера ----------
@@ -172,10 +184,10 @@ def server_params():
 
 
 def write_server_conf(state):
-    """Пересобирает awg0.conf: в нём только клиенты с активной подпиской."""
+    """Пересобирает awg0.conf: в нём только оплаченные конфиги."""
     out = interface_section()
     for pub, p in state["peers"].items():
-        if is_active(state, p["user"]):
+        if peer_active(p):
             out += ["", "[Peer]", f"# {p['user']} {p['name']}", f"PublicKey = {pub}", f"AllowedIPs = {p['ip']}/32"]
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(CONF))
     with os.fdopen(fd, "w") as f:
@@ -190,6 +202,18 @@ def write_server_conf(state):
         run(["awg", "syncconf", IFACE, f.name])
 
 
+def apply_or_rollback(state, old_state):
+    """Применяет конфиг сервера; при ошибке возвращает прежний и пробрасывает её дальше."""
+    try:
+        write_server_conf(state)
+    except Exception:
+        try:
+            write_server_conf(old_state)
+        except Exception:
+            pass
+        raise
+
+
 def next_free_ip(state, params):
     iface = ipaddress.ip_interface(params["Address"].split(",")[0].strip())
     used = {p["ip"] for p in state["peers"].values()} | {str(iface.ip)}
@@ -197,6 +221,18 @@ def next_free_ip(state, params):
         if str(host) not in used:
             return str(host)
     raise RuntimeError("в подсети закончились адреса")
+
+
+def create_peer(state, uid, until):
+    """Добавляет конфиг в state (без применения на сервере). Возвращает его ключ и данные."""
+    names = {p["name"] for p in user_peers(state, uid).values()}
+    n = next(i for i in range(1, 1000) if f"vpn{i}" not in names)
+    priv = run(["awg", "genkey"])
+    pub = run(["awg", "pubkey"], priv + "\n")
+    peer = {"user": str(uid), "name": f"vpn{n}", "ip": next_free_ip(state, server_params()),
+            "priv": priv, "created": fmt_date(time.time()), "until": until, "warned": 0}
+    state["peers"][pub] = peer
+    return pub, peer
 
 
 def client_conf(peer, params, host):
@@ -254,7 +290,7 @@ async def split_loop():
 
 # ---------- клиентский бот ----------
 
-async def send_peer(chat, peer):
+async def send_peer(chat_id, peer):
     params = server_params()
     # Имя файла становится именем туннеля; на iOS оно не длиннее 15 символов.
     variants = [(f"{peer['name']}.conf", ENDPOINT_HOST, "обычное подключение")]
@@ -263,24 +299,14 @@ async def send_peer(chat, peer):
                          "через вход в РФ — для мобильного интернета с белыми списками"))
     for filename, host, note in variants:
         text = client_conf(peer, params, host)
-        await chat.send_document(document=io.BytesIO(text.encode()), filename=filename,
-                                 caption=f"{filename}: {note}")
+        await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()), filename=filename,
+                                     caption=f"{filename}: {note}\n{peer_status(peer)}")
         # Конфиг с раздельным туннелем не помещается в QR-код — тогда только файл.
         if len(text) < 2000:
             png = io.BytesIO()
             qrcode.make(text).save(png, format="PNG")
             png.seek(0)
-            await chat.send_photo(photo=png, caption=f"QR-код: {filename}")
-
-
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    async with lock:
-        state = load_state()
-        get_user(state, update.effective_user)
-        save_state(state)
-    await update.message.reply_text(
-        f"Привет! Это VPN на AmneziaWG.\n{DAYS} дней — {PRICE} ₽.\n\n{sub_status(state, update.effective_user.id)}",
-        reply_markup=KEYBOARD)
+            await USER_BOT.send_photo(chat_id, photo=png, caption=f"QR-код: {filename}")
 
 
 def pay_text():
@@ -292,16 +318,42 @@ def pay_text():
         return "Реквизиты не указаны — напишите администратору."
 
 
-async def pay(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+def target_label(state, target):
+    if target == NEW:
+        return "новый конфиг"
+    peer = state["peers"].get(target)
+    return f"продление {peer['name']} ({peer_status(peer)})" if peer else "продление удалённого конфига"
+
+
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    async with lock:
+        state = load_state()
+        get_user(state, update.effective_user)
+        save_state(state)
+    mine = user_peers(state, update.effective_user.id)
+    active = sum(1 for p in mine.values() if peer_active(p))
     await update.message.reply_text(
-        f"Подписка на {DAYS} дней — {PRICE} ₽.\n\n{pay_text()}\n\n"
+        f"Привет! Это VPN на AmneziaWG.\nОдин конфиг (одно устройство) — {PRICE} ₽ за {DAYS} дней.\n\n"
+        + (f"Ваших конфигов: {len(mine)}, активных: {active}. Подробнее — «{BTN_LIST}»." if mine
+           else f"Чтобы подключиться, нажмите «{BTN_BUY}»."),
+        reply_markup=KEYBOARD)
+
+
+async def ask_payment(message, ctx, target, state):
+    ctx.user_data["pay_for"] = target
+    await message.reply_text(
+        f"Оплата: {target_label(state, target)} — {PRICE} ₽ за {DAYS} дней.\n\n{pay_text()}\n\n"
         "После оплаты пришлите сюда скриншот перевода одним фото. "
-        "Администратор проверит его и включит подписку.")
+        "Администратор проверит его, и бот сразу пришлёт результат.")
 
 
-async def subscription(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    await update.message.reply_text(sub_status(state, update.effective_user.id))
+    if len(user_peers(state, update.effective_user.id)) >= MAX_PEERS and not is_admin(update.effective_user.id):
+        await update.message.reply_text(
+            f"У вас уже {MAX_PEERS} конфигов — это максимум. Продлите или удалите ненужный в «{BTN_LIST}».")
+        return
+    await ask_payment(update.message, ctx, NEW, state)
 
 
 async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -315,19 +367,36 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     data = bytes(await file.download_as_bytearray())
 
+    state = load_state()
+    target = ctx.user_data.pop("pay_for", None)
+    mine = user_peers(state, update.effective_user.id)
+    if target is None and not mine:
+        target = NEW
+    if target is None:
+        # Непонятно, за что оплата — спрашиваем, картинку держим до ответа.
+        ctx.user_data["pending_photo"] = (data, msg.caption)
+        rows = [[InlineKeyboardButton(f"➕ Новый конфиг — {PRICE} ₽", callback_data=f"payfor:{NEW}")]]
+        rows += [[InlineKeyboardButton(f"🔄 Продлить {p['name']}", callback_data=f"payfor:{pub}")]
+                 for pub, p in mine.items()]
+        await msg.reply_text("За что эта оплата?", reply_markup=InlineKeyboardMarkup(rows))
+        return
+    await submit_payment(update.effective_user, target, data, msg.caption, msg)
+
+
+async def submit_payment(user, target, data, comment, reply_to):
     async with lock:
         state = load_state()
-        u = get_user(state, update.effective_user)
+        u = get_user(state, user)
         pid = str(state["next_payment"])
         state["next_payment"] += 1
-        state["payments"][pid] = {"user": str(update.effective_user.id), "status": "pending",
+        state["payments"][pid] = {"user": str(user.id), "target": target, "status": "pending",
                                   "created": int(time.time())}
         save_state(state)
 
-    caption = (f"Оплата №{pid}\n{u['name']}\nID {update.effective_user.id}\n"
-               f"{sub_status(state, update.effective_user.id)}")
-    if msg.caption:
-        caption += f"\nКомментарий: {msg.caption}"
+    caption = (f"Оплата №{pid} — {PRICE} ₽\n{u['name']}\nID {user.id}\n"
+               f"За: {target_label(state, target)}")
+    if comment:
+        caption += f"\nКомментарий: {comment}"
     # file_id одного бота не годится для другого — пересылаем саму картинку,
     # а file_id админ-бота запоминаем, чтобы показать её снова в «Оплаты».
     photo_id = None
@@ -343,63 +412,21 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             state = load_state()
             state["payments"][pid]["photo"] = photo_id
             save_state(state)
-    await msg.reply_text("Скриншот отправлен администратору. Как только он подтвердит оплату, придёт сообщение.")
-
-
-async def new_config(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    async with lock:
-        state = load_state()
-        get_user(state, update.effective_user)
-        if not is_active(state, uid):
-            save_state(state)
-            await update.message.reply_text(sub_status(state, uid))
-            return
-        mine = user_peers(state, uid)
-        if len(mine) >= MAX_PEERS and uid not in ADMINS:
-            await update.message.reply_text(
-                f"У вас уже {len(mine)} конфига — это максимум. Удалите ненужный в «{BTN_LIST}».")
-            return
-
-        params = server_params()
-        names = {p["name"] for p in mine.values()}
-        old_state = json.loads(json.dumps(state))
-        n = next(i for i in range(1, 1000) if f"vpn{i}" not in names)
-        priv = run(["awg", "genkey"])
-        pub = run(["awg", "pubkey"], priv + "\n")
-        peer = {"user": str(uid), "name": f"vpn{n}", "ip": next_free_ip(state, params),
-                "priv": priv, "created": fmt_date(time.time())}
-        state["peers"][pub] = peer
-        try:
-            write_server_conf(state)
-        except Exception as e:
-            try:
-                write_server_conf(old_state)
-            except Exception:
-                pass
-            await report_error(f"Не удалось добавить конфиг для {uid}", e)
-            await update.message.reply_text("Не получилось создать конфиг. Администратор уже знает, попробуйте позже.")
-            return
-        save_state(state)
-
-    await send_peer(update.message.chat, peer)
+    await reply_to.reply_text("Скриншот отправлен администратору. Как только он подтвердит оплату, придёт сообщение.")
 
 
 async def list_configs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
     state = load_state()
-    mine = user_peers(state, uid)
+    mine = user_peers(state, update.effective_user.id)
     if not mine:
-        await update.message.reply_text(f"Конфигов пока нет. Нажмите «{BTN_NEW}».")
+        await update.message.reply_text(f"Конфигов пока нет. Нажмите «{BTN_BUY}».")
         return
-    if not is_active(state, uid):
-        await update.message.reply_text("Конфиги отключены, пока подписка не продлена.\n" + sub_status(state, uid))
     for pub, p in mine.items():
-        buttons = InlineKeyboardMarkup([[
-            InlineKeyboardButton("⬇️ Скачать", callback_data=f"get:{pub}"),
-            InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}"),
-        ]])
-        await update.message.reply_text(f"{p['name']}, создан {p['created']}", reply_markup=buttons)
+        row = [InlineKeyboardButton("⬇️ Скачать", callback_data=f"get:{pub}")]
+        if not is_admin(p["user"]):
+            row.append(InlineKeyboardButton(f"🔄 Продлить — {PRICE} ₽", callback_data=f"renew:{pub}"))
+        buttons = InlineKeyboardMarkup([row, [InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}")]])
+        await update.message.reply_text(f"{p['name']} — {peer_status(p)}", reply_markup=buttons)
 
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -409,39 +436,61 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
-    action, _, pub = query.data.partition(":")
+    action, _, arg = query.data.partition(":")
     await query.answer()
-    async with lock:
-        state = load_state()
-        peer = state["peers"].get(pub)
-        if not peer or peer["user"] != str(uid):
-            await query.edit_message_text("Конфиг не найден.")
+
+    if action == "payfor":
+        pending = ctx.user_data.pop("pending_photo", None)
+        if not pending:
+            await query.edit_message_text("Пришлите скриншот ещё раз.")
             return
-        if action == "del":
-            del state["peers"][pub]
-            write_server_conf(state)
+        await query.edit_message_text(f"Оплата: {target_label(load_state(), arg)}.")
+        await submit_payment(query.from_user, arg, pending[0], pending[1], query.message)
+        return
+
+    state = load_state()
+    peer = state["peers"].get(arg)
+    if not peer or peer["user"] != str(uid):
+        await query.edit_message_text("Конфиг не найден.")
+        return
+    if action == "renew":
+        await ask_payment(query.message, ctx, arg, state)
+    elif action == "get":
+        if not peer_active(peer):
+            await query.message.reply_text(f"{peer['name']}: срок закончился, сначала продлите его.")
+            return
+        await send_peer(query.message.chat_id, peer)
+    elif action == "del":
+        await query.edit_message_text(
+            f"Удалить {peer['name']}? Оплаченные дни не вернутся.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("Да, удалить", callback_data=f"delyes:{arg}"),
+                InlineKeyboardButton("Отмена", callback_data=f"delno:{arg}"),
+            ]]))
+    elif action == "delno":
+        await query.edit_message_text(f"{peer['name']} — {peer_status(peer)}")
+    elif action == "delyes":
+        async with lock:
+            state = load_state()
+            old_state = json.loads(json.dumps(state))
+            state["peers"].pop(arg, None)
+            apply_or_rollback(state, old_state)
             save_state(state)
-            await query.edit_message_text(f"{peer['name']} удалён.")
-            return
-    if action == "get":
-        if not is_active(state, uid):
-            await query.message.reply_text(sub_status(state, uid))
-            return
-        await send_peer(query.message.chat, peer)
+        await query.edit_message_text(f"{peer['name']} удалён.")
 
 
 # ---------- админ-бот ----------
 
 ABTN_PAY = "⏳ Оплаты"
 ABTN_USERS = "👥 Клиенты"
-ABTN_GIVE = "🎁 Выдать подписку"
+ABTN_GIVE = "🎁 Выдать конфиг"
 ABTN_STATS = "📊 Статистика"
 ADMIN_KEYBOARD = ReplyKeyboardMarkup([[ABTN_PAY, ABTN_USERS], [ABTN_GIVE, ABTN_STATS]], resize_keyboard=True)
 
 
 def admin_only(func):
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user and update.effective_user.id in ADMINS:
+        if update.effective_user and is_admin(update.effective_user.id):
             await func(update, ctx)
     return wrapper
 
@@ -453,61 +502,67 @@ def payment_buttons(pid):
     ]])
 
 
-def user_buttons(uid):
+def peer_buttons(pub):
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"➕ {DAYS} дней", callback_data=f"give:{uid}"),
-        InlineKeyboardButton("⛔️ Отключить", callback_data=f"take:{uid}"),
+        InlineKeyboardButton(f"➕ {DAYS} дней", callback_data=f"give:{pub}"),
+        InlineKeyboardButton("⛔️ Отключить", callback_data=f"take:{pub}"),
     ]])
 
 
-def user_line(state, uid):
-    u = state["users"].get(str(uid), {"name": str(uid), "until": 0})
-    mark = "🟢" if u["until"] > time.time() else "⚪️"
-    until = f"до {fmt_date(u['until'])}" if u["until"] else "без подписки"
-    return f"{mark} {u['name']}\nID {uid} · {until} · конфигов: {len(user_peers(state, uid))}"
-
-
-async def extend(uid, days):
-    """Продлевает подписку и сразу включает конфиги. Возвращает новую дату окончания."""
+async def grant(uid, target, days, paid=True):
+    """Выдаёт новый конфиг или продлевает имеющийся и отправляет клиенту. Возвращает текст итога."""
     async with lock:
         state = load_state()
-        u = state["users"].setdefault(str(uid), {"name": str(uid), "until": 0, "warned": 0})
-        u["until"] = max(u["until"], time.time()) + days * DAY
-        u["warned"] = 0
-        write_server_conf(state)
-        save_state(state)
-        return u["until"]
-
-
-async def take(uid):
-    async with lock:
-        state = load_state()
-        if str(uid) in state["users"]:
-            state["users"][str(uid)]["until"] = 0
-        write_server_conf(state)
+        old_state = json.loads(json.dumps(state))
+        if target == NEW:
+            pub, peer = create_peer(state, uid, time.time() + days * DAY)
+        else:
+            pub, peer = target, state["peers"].get(target)
+            if not peer:
+                return "Конфиг уже удалён клиентом — продлевать нечего."
+            peer["until"] = max(peer["until"], time.time()) + days * DAY
+            peer["warned"] = 0
+        apply_or_rollback(state, old_state)
         save_state(state)
 
-
-async def notify_extended(uid, until):
-    """Сообщает клиенту о продлении. False — если клиент ещё не писал боту."""
+    head = "Оплата подтверждена!" if paid else "Подарок от администратора!"
     try:
-        await USER_BOT.send_message(
-            uid, f"Подписка активна до {fmt_date(until)}.\n"
-                 f"Получите конфиг: «{BTN_NEW}» (если он у вас уже есть — он снова работает).",
-            reply_markup=KEYBOARD)
-        return True
+        if target == NEW:
+            await USER_BOT.send_message(uid, f"{head} Ваш новый конфиг {peer['name']} "
+                                             f"активен до {fmt_date(peer['until'])}:", reply_markup=KEYBOARD)
+            await send_peer(uid, peer)
+        else:
+            await USER_BOT.send_message(uid, f"{head} {peer['name']} продлён до "
+                                             f"{fmt_date(peer['until'])}. Если он уже есть в приложении — "
+                                             "просто включите его.", reply_markup=KEYBOARD)
+        sent = ""
     except Exception:
-        return False
+        log.exception("не удалось отправить клиенту %s", uid)
+        sent = "\nКлиенту написать не удалось — он ещё не нажимал /start в клиентском боте."
+    return f"{peer['name']}: {peer_status(peer)}{sent}"
+
+
+async def take(pub):
+    async with lock:
+        state = load_state()
+        old_state = json.loads(json.dumps(state))
+        peer = state["peers"].get(pub)
+        if peer:
+            peer["until"] = 0
+            apply_or_rollback(state, old_state)
+            save_state(state)
+        return peer
 
 
 @admin_only
 async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Админ-панель MOST.\n\n"
-        "Скриншоты оплат приходят сюда сами — с кнопками «Одобрить» / «Отклонить».\n\n"
+        "Скриншоты оплат приходят сюда сами — с кнопками «Одобрить» / «Отклонить». "
+        "После одобрения клиент сразу получает новый конфиг или продление.\n\n"
         f"{ABTN_PAY} — неразобранные оплаты\n"
-        f"{ABTN_USERS} — клиенты: продлить или отключить\n"
-        f"{ABTN_GIVE} — выдать подписку по ID\n"
+        f"{ABTN_USERS} — клиенты и их конфиги: продлить или отключить\n"
+        f"{ABTN_GIVE} — бесплатно выдать конфиг по ID\n"
         f"{ABTN_STATS} — кто подключён и трафик\n\n"
         "Команды: /send ID текст — написать клиенту, /broadcast текст — написать всем.",
         reply_markup=ADMIN_KEYBOARD)
@@ -521,7 +576,8 @@ async def admin_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Неразобранных оплат нет.", reply_markup=ADMIN_KEYBOARD)
         return
     for pid, p in pending:
-        caption = f"Оплата №{pid} от {fmt_date(p['created'])}\n{user_line(state, p['user'])}"
+        caption = (f"Оплата №{pid} от {fmt_date(p['created'])}\n{user_name(state, p['user'])}\nID {p['user']}\n"
+                   f"За: {target_label(state, p.get('target', NEW))}")
         if p.get("photo"):
             await update.message.reply_photo(p["photo"], caption=caption, reply_markup=payment_buttons(pid))
         else:
@@ -531,15 +587,19 @@ async def admin_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def admin_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    users = sorted(state["users"], key=lambda uid: -state["users"][uid]["until"])
-    if not users:
-        await update.message.reply_text("Клиентов пока нет.", reply_markup=ADMIN_KEYBOARD)
-        return
-    active = sum(1 for u in state["users"].values() if u["until"] > time.time())
-    await update.message.reply_text(f"Клиентов: {len(users)}, с подпиской: {active}."
-                                    + (" Показаны первые 30." if len(users) > 30 else ""))
-    for uid in users[:30]:
-        await update.message.reply_text(user_line(state, uid), reply_markup=user_buttons(uid))
+    with_peers = {p["user"] for p in state["peers"].values()}
+    active = {p["user"] for p in state["peers"].values() if peer_active(p)}
+    await update.message.reply_text(
+        f"Клиентов: {len(state['users'])}, с конфигами: {len(with_peers)}, с активными: {len(active)}.\n"
+        f"Активных конфигов: {sum(1 for p in state['peers'].values() if peer_active(p))}.",
+        reply_markup=ADMIN_KEYBOARD)
+    peers = sorted(state["peers"].items(), key=lambda kv: -kv[1]["until"])
+    for pub, p in peers[:40]:
+        await update.message.reply_text(
+            f"{user_name(state, p['user'])} · ID {p['user']}\n{p['name']} — {peer_status(p)}",
+            reply_markup=None if is_admin(p["user"]) else peer_buttons(pub))
+    if len(peers) > 40:
+        await update.message.reply_text(f"Показаны первые 40 конфигов из {len(peers)}.")
 
 
 @admin_only
@@ -548,7 +608,7 @@ async def admin_give_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Пришлите ID клиента и, через пробел, число дней (по умолчанию {DAYS}).\n"
         f"Например: 123456789 {DAYS}\n\n"
-        "ID клиента видно в его оплатах и в «👥 Клиенты». "
+        "Клиент получит новый конфиг бесплатно. ID видно в его оплатах и в «👥 Клиенты». "
         "Клиент должен хотя бы раз нажать /start в клиентском боте.")
 
 
@@ -563,31 +623,38 @@ async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Нужно число — ID клиента. Например: 123456789 {DAYS}")
         return
     uid, days = int(parts[0]), int(parts[1]) if len(parts) > 1 else DAYS
-    until = await extend(uid, days)
-    told = await notify_extended(uid, until)
-    await update.message.reply_text(
-        f"Готово: подписка до {fmt_date(until)}.\n{user_line(load_state(), uid)}"
-        + ("" if told else "\n\nКлиенту написать не удалось — он ещё не нажимал /start в клиентском боте."),
-        reply_markup=ADMIN_KEYBOARD)
+    result = await grant(uid, NEW, days, paid=False)
+    await update.message.reply_text(f"Готово: выдан конфиг.\n{result}", reply_markup=ADMIN_KEYBOARD)
 
 
 async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if query.from_user.id not in ADMINS:
+    if not is_admin(query.from_user.id):
         await query.answer()
         return
     action, _, arg = query.data.partition(":")
 
     if action in ("give", "take"):
-        uid = int(arg)
+        state = load_state()
+        peer = state["peers"].get(arg)
+        if not peer:
+            await query.answer("Конфиг удалён.")
+            return
         if action == "give":
-            until = await extend(uid, DAYS)
-            await notify_extended(uid, until)
-            await query.answer(f"Продлено до {fmt_date(until)}")
+            result = await grant(int(peer["user"]), arg, DAYS, paid=False)
+            await query.answer(result.split("\n")[0][:190])
         else:
-            await take(uid)
-            await query.answer("Подписка отключена")
-        await query.edit_message_text(user_line(load_state(), uid), reply_markup=user_buttons(uid))
+            await take(arg)
+            await query.answer(f"{peer['name']} отключён")
+            try:
+                await USER_BOT.send_message(int(peer["user"]), f"Конфиг {peer['name']} отключён администратором.")
+            except Exception:
+                pass
+        state = load_state()
+        peer = state["peers"].get(arg)
+        await query.edit_message_text(
+            f"{user_name(state, peer['user'])} · ID {peer['user']}\n{peer['name']} — {peer_status(peer)}",
+            reply_markup=peer_buttons(arg))
         return
 
     async with lock:
@@ -603,13 +670,14 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     uid = int(payment["user"])
     if action == "ok":
-        until = await extend(uid, DAYS)
-        result = f"✅ Одобрено, подписка до {fmt_date(until)}"
-        await notify_extended(uid, until)
+        result = "✅ Одобрено. " + await grant(uid, payment.get("target", NEW), DAYS)
     else:
         result = "❌ Отклонено"
-        await USER_BOT.send_message(
-            uid, "Оплата не подтверждена. Если это ошибка — пришлите скриншот ещё раз или напишите администратору.")
+        try:
+            await USER_BOT.send_message(
+                uid, "Оплата не подтверждена. Если это ошибка — пришлите скриншот ещё раз или напишите администратору.")
+        except Exception:
+            pass
     if query.message.photo:
         await query.edit_message_caption(f"{query.message.caption}\n\n{result}")
     else:
@@ -619,8 +687,7 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def admin_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    names = {pub: f"{state['users'].get(p['user'], {}).get('name', p['user'])} / {p['name']}"
-             for pub, p in state["peers"].items()}
+    names = {pub: f"{user_name(state, p['user'])} / {p['name']}" for pub, p in state["peers"].items()}
     now = time.time()
     rows = []
     for line in run(["awg", "show", IFACE, "dump"]).splitlines()[1:]:
@@ -628,28 +695,12 @@ async def admin_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pub, handshake, rx, tx = f[0], int(f[4]), int(f[5]), int(f[6])
         ago = "никогда" if not handshake else f"{int(now - handshake) // 60} мин назад"
         rows.append(f"{names.get(pub, pub[:8])}: вход {ago}, ↓{rx / 2**20:.0f} МБ ↑{tx / 2**20:.0f} МБ")
-    active = sum(1 for u in state["users"].values() if u["until"] > now)
-    await update.message.reply_text(f"Активных подписок: {active}\n\n" + ("\n".join(rows) or "Подключений нет."),
-                                    reply_markup=ADMIN_KEYBOARD)
-
-
-@admin_only
-async def admin_give(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        await admin_give_start(update, ctx)
-        return
-    update.message.text = " ".join(ctx.args)
-    ctx.user_data["await"] = "give"
-    await admin_text(update, ctx)
-
-
-@admin_only
-async def admin_take(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if len(ctx.args) != 1 or not ctx.args[0].isdigit():
-        await update.message.reply_text("Использование: /take ID")
-        return
-    await take(int(ctx.args[0]))
-    await update.message.reply_text(f"Подписка {ctx.args[0]} отключена, конфиги не работают.")
+    active = sum(1 for p in state["peers"].values() if peer_active(p) and not is_admin(p["user"]))
+    approved = sum(1 for p in state["payments"].values() if p["status"] == "approved")
+    await update.message.reply_text(
+        f"Оплаченных конфигов сейчас: {active}\nОдобренных оплат всего: {approved} "
+        f"(≈ {approved * PRICE} ₽)\n\n" + ("\n".join(rows) or "Подключений нет."),
+        reply_markup=ADMIN_KEYBOARD)
 
 
 @admin_only
@@ -685,24 +736,26 @@ async def check_expiry():
     notify = []
     async with lock:
         state = load_state()
+        old_state = json.loads(json.dumps(state))
         expired = False
-        for uid, u in state["users"].items():
-            if not u["until"]:
+        for pub, p in state["peers"].items():
+            if is_admin(p["user"]) or not p["until"]:
                 continue
-            left = u["until"] - now
-            if left <= 0 and u["warned"] < 3:
-                u["warned"] = 3
+            left = p["until"] - now
+            renew = f"Продлить: «{BTN_LIST}» → «🔄 Продлить»."
+            if left <= 0 and p["warned"] < 3:
+                p["warned"] = 3
                 expired = True
-                notify.append((uid, f"Подписка закончилась, конфиги отключены. Продлить: «{BTN_PAY}»."))
-            elif 0 < left <= DAY and u["warned"] < 2:
-                u["warned"] = 2
-                notify.append((uid, f"Подписка закончится {fmt_date(u['until'])} — меньше чем через сутки. "
-                                    f"Продлить: «{BTN_PAY}»."))
-            elif DAY < left <= 3 * DAY and u["warned"] < 1:
-                u["warned"] = 1
-                notify.append((uid, f"Подписка закончится {fmt_date(u['until'])}. Продлить: «{BTN_PAY}»."))
+                notify.append((p["user"], f"Срок конфига {p['name']} закончился, он отключён. {renew}"))
+            elif 0 < left <= DAY and p["warned"] < 2:
+                p["warned"] = 2
+                notify.append((p["user"], f"Конфиг {p['name']} отключится {fmt_date(p['until'])} — "
+                                          f"меньше чем через сутки. {renew}"))
+            elif DAY < left <= 3 * DAY and p["warned"] < 1:
+                p["warned"] = 1
+                notify.append((p["user"], f"Конфиг {p['name']} работает до {fmt_date(p['until'])}. {renew}"))
         if expired:
-            write_server_conf(state)
+            apply_or_rollback(state, old_state)
         save_state(state)
     for uid, text in notify:
         try:
@@ -715,8 +768,8 @@ async def expiry_loop():
     while True:
         try:
             await check_expiry()
-        except Exception:
-            log.exception("ошибка проверки подписок")
+        except Exception as e:
+            await report_error("Ошибка проверки сроков", e)
         await asyncio.sleep(600)
 
 
@@ -750,12 +803,12 @@ def build_user_app():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(MessageHandler(filters.Text([BTN_PAY]), pay))
-    app.add_handler(MessageHandler(filters.Text([BTN_SUB]), subscription))
-    app.add_handler(MessageHandler(filters.Text([BTN_NEW]), new_config))
+    app.add_handler(MessageHandler(filters.Text([BTN_BUY]), buy))
     app.add_handler(MessageHandler(filters.Text([BTN_LIST]), list_configs))
     app.add_handler(MessageHandler(filters.Text([BTN_HELP]), help_cmd))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_screenshot))
+    # Старые кнопки из прошлой версии бота, оставшиеся у клиентов на экране.
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
     app.add_handler(CallbackQueryHandler(on_user_button))
     app.add_error_handler(on_error)
     return app
@@ -764,11 +817,9 @@ def build_user_app():
 def build_admin_app():
     app = Application.builder().token(ADMIN_TOKEN).build()
     app.add_handler(CommandHandler(["start", "help"], admin_start))
-    app.add_handler(CommandHandler(["users"], admin_users))
+    app.add_handler(CommandHandler("users", admin_users))
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CommandHandler("pending", admin_pending))
-    app.add_handler(CommandHandler("give", admin_give))
-    app.add_handler(CommandHandler("take", admin_take))
     app.add_handler(CommandHandler("send", admin_send))
     app.add_handler(CommandHandler("broadcast", admin_broadcast))
     app.add_handler(MessageHandler(filters.Text([ABTN_PAY]), admin_pending))
@@ -786,11 +837,13 @@ async def amain():
     user_app, admin_app = build_user_app(), build_admin_app()
     async with user_app, admin_app:
         USER_BOT, ADMIN_BOT = user_app.bot, admin_app.bot
+        # Сразу применяем сроки к серверу: после простоя бота истёкшие конфиги отключатся.
+        async with lock:
+            write_server_conf(load_state())
         for app in (user_app, admin_app):
             await app.start()
             await app.updater.start_polling()
-        expiry = asyncio.create_task(expiry_loop())
-        split_task = asyncio.create_task(split_loop())
+        tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop())]
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -798,8 +851,8 @@ async def amain():
             loop.add_signal_handler(sig, stop.set)
         await stop.wait()
 
-        expiry.cancel()
-        split_task.cancel()
+        for task in tasks:
+            task.cancel()
         for app in (user_app, admin_app):
             await app.updater.stop()
             await app.stop()
