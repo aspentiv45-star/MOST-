@@ -50,6 +50,8 @@ MAX_PEERS = int(os.environ.get("MAX_PEERS", "5"))
 PRICE = int(os.environ.get("PRICE", "200"))
 DAYS = int(os.environ.get("DAYS", "30"))
 PAY_FILE = os.environ.get("PAY_FILE", "/etc/most/pay.txt")
+# approve — купить может только тот, кого администратор пустил; open — любой.
+ACCESS = os.environ.get("ACCESS", "open")
 TZ = ZoneInfo(os.environ.get("TZ_NAME", "Europe/Moscow"))
 # Раздельный туннель: российские сайты и приложения — напрямую с IP устройства.
 SPLIT_RU = os.environ.get("SPLIT_RU", "1") == "1"
@@ -140,6 +142,23 @@ def user_name(state, uid):
 
 def is_admin(uid):
     return int(uid) in ADMINS
+
+
+def is_approved(state, uid):
+    """Может ли человек покупать. Кто уже платил или получал конфиги — пущен автоматически."""
+    if ACCESS == "open" or is_admin(uid):
+        return True
+    u = state["users"].get(str(uid), {})
+    if "approved" in u:
+        return u["approved"]
+    return any(p["user"] == str(uid) for p in state["peers"].values()) or any(
+        p["user"] == str(uid) and p["status"] == "approved" for p in state["payments"].values())
+
+
+def closed_text(state, uid):
+    if state["users"].get(str(uid), {}).get("approved") is False:
+        return "Администратор отклонил запрос доступа."
+    return "Доступ по приглашению. Запрос отправлен администратору — бот напишет, когда вас пустят."
 
 
 def peer_active(peer):
@@ -333,11 +352,32 @@ def target_label(state, target):
     return f"продление {peer['name']} ({peer_status(peer)})" if peer else "продление удалённого конфига"
 
 
+async def request_access(user):
+    """Отправляет администраторам запрос доступа (один раз)."""
+    async with lock:
+        state = load_state()
+        u = get_user(state, user)
+        first = "requested" not in u
+        u.setdefault("requested", int(time.time()))
+        save_state(state)
+    if first:
+        for admin in ADMINS:
+            try:
+                await ADMIN_BOT.send_message(admin, f"🙋 Запрос доступа\n{u['name']}\nID {user.id}",
+                                             reply_markup=access_buttons(user.id))
+            except Exception:
+                log.exception("не удалось отправить запрос доступа админу %s", admin)
+
+
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     async with lock:
         state = load_state()
         get_user(state, update.effective_user)
         save_state(state)
+    if not is_approved(state, update.effective_user.id):
+        await request_access(update.effective_user)
+        await update.message.reply_text(f"Привет! Это VPN на AmneziaWG.\n\n{closed_text(state, update.effective_user.id)}")
+        return
     mine = user_peers(state, update.effective_user.id)
     active = sum(1 for p in mine.values() if peer_active(p))
     await update.message.reply_text(
@@ -357,6 +397,10 @@ async def ask_payment(message, ctx, target, state):
 
 async def buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = load_state()
+    if not is_approved(state, update.effective_user.id):
+        await request_access(update.effective_user)
+        await update.message.reply_text(closed_text(state, update.effective_user.id))
+        return
     if len(user_peers(state, update.effective_user.id)) >= MAX_PEERS and not is_admin(update.effective_user.id):
         await update.message.reply_text(
             f"У вас уже {MAX_PEERS} конфигов — это максимум. Продлите или удалите ненужный в «{BTN_LIST}».")
@@ -373,9 +417,13 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await msg.reply_text("Пришлите скриншот оплаты картинкой.")
         return
+    state = load_state()
+    if not is_approved(state, update.effective_user.id):
+        await request_access(update.effective_user)
+        await msg.reply_text(closed_text(state, update.effective_user.id))
+        return
     data = bytes(await file.download_as_bytearray())
 
-    state = load_state()
     target = ctx.user_data.pop("pay_for", None)
     mine = user_peers(state, update.effective_user.id)
     if target is None and not mine:
@@ -512,6 +560,13 @@ def payment_buttons(pid):
     ]])
 
 
+def access_buttons(uid):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Пустить", callback_data=f"acc:yes:{uid}"),
+        InlineKeyboardButton("❌ Отказать", callback_data=f"acc:no:{uid}"),
+    ]])
+
+
 def peer_buttons(pub):
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(f"➕ {DAYS} дней", callback_data=f"give:{pub}"),
@@ -524,6 +579,7 @@ async def grant(uid, target, days, paid=True):
     async with lock:
         state = load_state()
         old_state = json.loads(json.dumps(state))
+        state["users"].setdefault(str(uid), {"name": str(uid)})["approved"] = True
         if target == NEW:
             pub, peer = create_peer(state, uid, time.time() + days * DAY)
         else:
@@ -570,7 +626,7 @@ async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Админ-панель MOST.\n\n"
         "Скриншоты оплат приходят сюда сами — с кнопками «Одобрить» / «Отклонить». "
         "После одобрения клиент сразу получает новый конфиг или продление.\n\n"
-        f"{ABTN_PAY} — неразобранные оплаты\n"
+        f"{ABTN_PAY} — неразобранные оплаты и запросы доступа\n"
         f"{ABTN_USERS} — клиенты и их конфиги: продлить или отключить\n"
         f"{ABTN_GIVE} — бесплатно выдать конфиг по ID\n"
         f"{ABTN_STATS} — кто подключён и трафик\n"
@@ -583,7 +639,12 @@ async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def admin_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = load_state()
     pending = [(pid, p) for pid, p in state["payments"].items() if p["status"] == "pending"]
-    if not pending:
+    waiting = [uid for uid, u in state["users"].items()
+               if u.get("requested") and "approved" not in u and not is_approved(state, uid)]
+    for uid in waiting:
+        await update.message.reply_text(f"🙋 Запрос доступа\n{user_name(state, uid)}\nID {uid}",
+                                        reply_markup=access_buttons(uid))
+    if not pending and not waiting:
         await update.message.reply_text("Неразобранных оплат нет.", reply_markup=ADMIN_KEYBOARD)
         return
     for pid, p in pending:
@@ -644,6 +705,22 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return
     action, _, arg = query.data.partition(":")
+
+    if action == "acc":
+        verdict, _, uid = arg.partition(":")
+        async with lock:
+            state = load_state()
+            state["users"].setdefault(uid, {"name": uid})["approved"] = verdict == "yes"
+            save_state(state)
+        await query.answer()
+        try:
+            await USER_BOT.send_message(
+                int(uid), f"Доступ открыт! Нажмите «{BTN_BUY}»." if verdict == "yes"
+                else "Администратор отклонил запрос доступа.", reply_markup=KEYBOARD if verdict == "yes" else None)
+        except Exception:
+            pass
+        await query.edit_message_text(f"{query.message.text}\n\n{'✅ Пущен' if verdict == 'yes' else '❌ Отказано'}")
+        return
 
     if action == "resend":
         await query.answer()

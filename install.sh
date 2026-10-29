@@ -27,6 +27,7 @@ RELAY=""
 PORT=""
 PUBLIC_IP=""
 MAX_PEERS=""
+ACCESS=""
 
 die() { echo "Ошибка: $*" >&2; exit 1; }
 
@@ -41,6 +42,7 @@ usage() {
   --price N            цена подписки в рублях (по умолчанию 200)
   --days N             срок подписки в днях (по умолчанию 30)
   --relay IP           IP сервера-входа для белых списков (см. relay.sh); --relay off — убрать
+  --access approve|open  approve (по умолчанию) — новые люди могут купить только после вашего одобрения
 
 При повторном запуске всё, что не указано, берётся из прошлой установки.
   --port N         UDP-порт AmneziaWG (по умолчанию случайный 40000–60000)
@@ -62,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --port) PORT="$2"; shift 2 ;;
     --ip) PUBLIC_IP="$2"; shift 2 ;;
     --max) MAX_PEERS="$2"; shift 2 ;;
+    --access) ACCESS="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) die "неизвестный параметр: $1 (см. --help)" ;;
   esac
@@ -79,11 +82,14 @@ if [[ -f "$ENV_FILE" ]]; then
   [[ -n "$DAYS" ]] || DAYS="$(old DAYS)"
   [[ -n "$MAX_PEERS" ]] || MAX_PEERS="$(old MAX_PEERS)"
   [[ -n "$RELAY" ]] || RELAY="$(old RELAY_HOST)"
+  [[ -n "$ACCESS" ]] || ACCESS="$(old ACCESS)"
   SPLIT="$(old SPLIT_RU)"
 fi
 PRICE="${PRICE:-200}"
 DAYS="${DAYS:-30}"
 MAX_PEERS="${MAX_PEERS:-3}"
+ACCESS="${ACCESS:-approve}"
+[[ "$ACCESS" == "approve" || "$ACCESS" == "open" ]] || die "--access: approve или open"
 [[ "$RELAY" == "off" ]] && RELAY=""
 
 [[ -n "$TOKEN" ]] || read -rp "Токен клиентского бота от @BotFather: " TOKEN
@@ -170,6 +176,28 @@ if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow "$PORT"/udp comment "MOST AmneziaWG" >/dev/null
 fi
 
+echo "==> Блокирую торренты и спам (защита от жалоб хостинга)"
+install -m 755 "$SCRIPT_DIR/abuse-rules.sh" /usr/local/sbin/most-abuse
+cat >/etc/systemd/system/most-abuse.service <<EOF
+[Unit]
+Description=MOST: запрет торрентов и спама для клиентов
+After=awg-quick@$IFACE.service
+PartOf=awg-quick@$IFACE.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=MOST_AWG_IFACE=$IFACE
+ExecStart=/usr/local/sbin/most-abuse up
+ExecStop=/usr/local/sbin/most-abuse down
+
+[Install]
+WantedBy=awg-quick@$IFACE.service
+EOF
+systemctl daemon-reload
+systemctl enable most-abuse >/dev/null 2>&1
+systemctl restart most-abuse || echo "    ВНИМАНИЕ: правила не применились: journalctl -u most-abuse"
+
 echo "==> Устанавливаю бота"
 mkdir -p "$BOT_DIR" /etc/most /var/lib/most
 install -m 644 "$SCRIPT_DIR"/bot/*.py "$SCRIPT_DIR/bot/requirements.txt" "$BOT_DIR/"
@@ -191,6 +219,7 @@ AWG_CONF=$AWG_CONF
 STATE_FILE=/var/lib/most/state.json
 MAX_PEERS=$MAX_PEERS
 RELAY_HOST=$RELAY
+ACCESS=$ACCESS
 EOF
 # SPLIT_RU=0 ставит ru-route.sh — сохраняем его при переустановке.
 [[ -n "${SPLIT:-}" ]] && echo "SPLIT_RU=$SPLIT" >>"$ENV_FILE"
@@ -227,6 +256,8 @@ cat <<EOF
 Готово.
   AmneziaWG: $PUBLIC_IP:$PORT/udp
   Вход для белых списков: ${RELAY:-не настроен (см. relay.sh)}
+  Доступ: $([[ $ACCESS == approve ]] && echo "только после вашего одобрения в админ-боте" || echo "открыт для всех")
+  Торренты и порт 25 для клиентов заблокированы
   Боты запущены. Нажмите /start в обоих: в клиентском и в админском.
   Реквизиты для оплаты: /etc/most/pay.txt (можно менять без перезапуска)
 
