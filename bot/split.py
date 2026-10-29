@@ -74,28 +74,85 @@ def _complement(direct):
     return out
 
 
-def tunnel_networks(ru_nets, limit=500, threshold=0.1):
-    """Сети, которые идут через VPN.
+def _gaps(direct):
+    """Промежутки IPv4-пространства между сетями direct: список (начало, конец)."""
+    gaps, cur = [], 0
+    for net in ipaddress.collapse_addresses(direct):
+        start, end = int(net.network_address), int(net.broadcast_address)
+        if start > cur:
+            gaps.append((cur, start - 1))
+        cur = max(cur, end + 1)
+    if cur <= MAX_ADDR:
+        gaps.append((cur, MAX_ADDR))
+    return gaps
 
-    Российские сети укрупняются до блоков /16, /15, ...: блок считается
-    российским, если российских адресов в нём не меньше threshold.
-    Берётся самое мелкое укрупнение, при котором список не длиннее limit.
+
+def _cidrs(start, end):
+    return list(ipaddress.summarize_address_range(ipaddress.IPv4Address(start), ipaddress.IPv4Address(end)))
+
+
+def tunnel_networks(ru_nets, limit=500):
+    """Сети, которые идут через VPN: всё, кроме российских и локальных.
+
+    Российские сети никогда не попадают в туннель. Чтобы список уложился
+    в limit префиксов, самые мелкие зарубежные промежутки между российскими
+    сетями отдаются «напрямую» — это доли процента адресного пространства.
     """
-    ru_nets = list(ipaddress.collapse_addresses(ru_nets))
     local = [ipaddress.IPv4Network(n) for n in LOCAL]
-    for gran in range(16, 5, -1):
-        size = 2 ** (32 - gran)
-        cover = {}
-        for net in ru_nets:
-            first = int(net.network_address) >> (32 - gran)
-            if net.prefixlen >= gran:
-                cover[first] = cover.get(first, 0) + net.num_addresses
-            else:
-                for block in range(first, first + net.num_addresses // size):
-                    cover[block] = size
-        direct = [ipaddress.IPv4Network((block << (32 - gran), gran))
-                  for block, count in cover.items() if count >= threshold * size]
-        tunnel = _complement(direct + local)
-        if len(tunnel) <= limit:
-            return tunnel
-    return _complement(local)
+    gaps = [(s, e, len(_cidrs(s, e))) for s, e in _gaps(list(ru_nets) + local)]
+    # Минимальный размер промежутка, при котором список ещё укладывается в limit.
+    sizes = sorted({e - s + 1 for s, e, _ in gaps})
+    lo, hi = 0, len(sizes) - 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if sum(n for s, e, n in gaps if e - s + 1 >= sizes[mid]) <= limit:
+            hi = mid
+        else:
+            lo = mid + 1
+    keep = [(s, e) for s, e, _ in gaps if e - s + 1 >= sizes[lo]]
+    return [net for s, e in keep for net in _cidrs(s, e)]
+
+
+def _report():
+    """Проверка на реальном списке: python3 split.py"""
+    import bisect
+    import socket
+
+    ru = list(ipaddress.collapse_addresses(fetch_ru_networks()))
+    ru_starts = [int(n.network_address) for n in ru]
+    local = sum(ipaddress.IPv4Network(n).num_addresses for n in LOCAL)
+    foreign = 2**32 - sum(n.num_addresses for n in ru) - local
+    print(f"Российских сетей: {len(ru)}")
+
+    def is_ru(ip):
+        i = bisect.bisect_right(ru_starts, ip) - 1
+        return i >= 0 and ip <= int(ru[i].broadcast_address)
+
+    sites = ["youtube.com", "instagram.com", "web.telegram.org", "x.com", "discord.com", "chatgpt.com",
+             "facebook.com", "linkedin.com", "gosuslugi.ru", "sberbank.ru", "vk.com", "ya.ru",
+             "ozon.ru", "wildberries.ru", "tbank.ru", "avito.ru", "mail.ru", "kinopoisk.ru"]
+    ips = {}
+    for site in sites:
+        try:
+            ips[site] = int(ipaddress.IPv4Address(socket.gethostbyname(site)))
+        except OSError:
+            pass
+
+    for limit in (500, 1000, 2000):
+        tun = list(ipaddress.collapse_addresses(tunnel_networks(ru, limit)))
+        starts = [int(n.network_address) for n in tun]
+
+        def via_vpn(ip):
+            i = bisect.bisect_right(starts, ip) - 1
+            return i >= 0 and ip <= int(tun[i].broadcast_address)
+
+        direct_foreign = foreign - sum(n.num_addresses for n in tun)
+        print(f"\nlimit {limit}: сетей в конфиге {len(tun)}, "
+              f"зарубежных адресов напрямую {100 * direct_foreign / foreign:.2f}%")
+        for site, ip in ips.items():
+            route = "VPN" if via_vpn(ip) else "напрямую"
+            print(f"  {site:18} {str(ipaddress.IPv4Address(ip)):16} {'РФ ' if is_ru(ip) else 'зар'} -> {route}")
+
+
+if __name__ == "__main__":
+    _report()
