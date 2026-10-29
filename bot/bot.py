@@ -493,7 +493,9 @@ ABTN_PAY = "⏳ Оплаты"
 ABTN_USERS = "👥 Клиенты"
 ABTN_GIVE = "🎁 Выдать конфиг"
 ABTN_STATS = "📊 Статистика"
-ADMIN_KEYBOARD = ReplyKeyboardMarkup([[ABTN_PAY, ABTN_USERS], [ABTN_GIVE, ABTN_STATS]], resize_keyboard=True)
+ABTN_RESEND = "📤 Разослать конфиги"
+ADMIN_KEYBOARD = ReplyKeyboardMarkup([[ABTN_PAY, ABTN_USERS], [ABTN_GIVE, ABTN_STATS], [ABTN_RESEND]],
+                                     resize_keyboard=True)
 
 
 def admin_only(func):
@@ -571,7 +573,8 @@ async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{ABTN_PAY} — неразобранные оплаты\n"
         f"{ABTN_USERS} — клиенты и их конфиги: продлить или отключить\n"
         f"{ABTN_GIVE} — бесплатно выдать конфиг по ID\n"
-        f"{ABTN_STATS} — кто подключён и трафик\n\n"
+        f"{ABTN_STATS} — кто подключён и трафик\n"
+        f"{ABTN_RESEND} — отправить всем клиентам актуальные файлы их конфигов\n\n"
         "Команды: /send ID текст — написать клиенту, /broadcast текст — написать всем.",
         reply_markup=ADMIN_KEYBOARD)
 
@@ -642,6 +645,15 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     action, _, arg = query.data.partition(":")
 
+    if action == "resend":
+        await query.answer()
+        if arg == "yes":
+            await query.edit_message_text("📤 Рассылаю…")
+            await resend_all(query)
+        else:
+            await query.edit_message_text("Рассылка отменена.")
+        return
+
     if action in ("give", "take"):
         state = load_state()
         peer = state["peers"].get(arg)
@@ -690,6 +702,46 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_caption(f"{query.message.caption}\n\n{result}")
     else:
         await query.edit_message_text(f"{query.message.text}\n\n{result}")
+
+
+@admin_only
+async def admin_resend_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    state = load_state()
+    peers = [p for p in state["peers"].values() if peer_active(p)]
+    users = {p["user"] for p in peers}
+    await update.message.reply_text(
+        f"Отправить актуальные файлы {len(peers)} активных конфигов {len(users)} клиентам?\n"
+        "Каждый получит свои конфиги и инструкцию заменить старые. Сроки не меняются.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("📤 Да, разослать", callback_data="resend:yes"),
+            InlineKeyboardButton("Отмена", callback_data="resend:no"),
+        ]]))
+
+
+async def resend_all(query):
+    state = load_state()
+    by_user = {}
+    for p in state["peers"].values():
+        if peer_active(p):
+            by_user.setdefault(p["user"], []).append(p)
+    sent, failed = 0, []
+    for uid, peers in by_user.items():
+        try:
+            await USER_BOT.send_message(
+                int(uid), "🔄 Обновление VPN: теперь российские сайты и приложения работают с включённым VPN.\n\n"
+                          "Ниже ваши обновлённые конфиги. В приложении удалите старые и импортируйте эти. "
+                          "Срок подписки не меняется.", reply_markup=KEYBOARD)
+            for p in peers:
+                await send_peer(int(uid), p)
+                await asyncio.sleep(0.1)
+            sent += 1
+        except Exception:
+            log.exception("не удалось разослать конфиги %s", uid)
+            failed.append(user_name(state, uid))
+    text = f"📤 Разослано клиентам: {sent} из {len(by_user)}."
+    if failed:
+        text += "\nНе удалось (не нажимали /start или заблокировали бота): " + ", ".join(failed)[:3000]
+    await query.message.reply_text(text, reply_markup=ADMIN_KEYBOARD)
 
 
 @admin_only
@@ -834,6 +886,8 @@ def build_admin_app():
     app.add_handler(MessageHandler(filters.Text([ABTN_USERS]), admin_users))
     app.add_handler(MessageHandler(filters.Text([ABTN_GIVE]), admin_give_start))
     app.add_handler(MessageHandler(filters.Text([ABTN_STATS]), admin_stats))
+    app.add_handler(MessageHandler(filters.Text([ABTN_RESEND]), admin_resend_ask))
+    app.add_handler(CommandHandler("resend", admin_resend_ask))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text))
     app.add_handler(CallbackQueryHandler(on_admin_button))
     app.add_error_handler(on_error)
