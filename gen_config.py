@@ -177,7 +177,7 @@ def build_chain(p, args):
             "security": "reality",
             "realitySettings": {
                 "show": False,
-                "dest": f"{args.sni}:443",
+                "target": f"{args.sni}:443",
                 "xver": 0,
                 "serverNames": [args.sni],
                 "privateKey": args.private_key,
