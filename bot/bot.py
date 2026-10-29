@@ -803,7 +803,7 @@ async def resend_confirm(update, ctx):
     peers = [p for p in state["peers"].values() if peer_active(p)]
     users = {p["user"] for p in peers}
     await update.message.reply_text(
-        f"Клиенты получат:\n\n{resend_message(text)}\n\n…и свои файлы конфигов.\n\n"
+        f"Клиенты получат:\n\n{resend_message(text)}\n\n…и кнопку на каждый свой конфиг — файл придёт по нажатию.\n\n"
         f"Разослать {len(peers)} активных конфигов {len(users)} клиентам? Сроки не меняются.",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("📤 Да, разослать", callback_data="resend:yes"),
@@ -818,17 +818,19 @@ def resend_message(text):
 async def resend_all(query, text):
     state = load_state()
     by_user = {}
-    for p in state["peers"].values():
+    for pub, p in state["peers"].items():
         if peer_active(p):
-            by_user.setdefault(p["user"], []).append(p)
+            by_user.setdefault(p["user"], []).append((pub, p))
     sent, failed = 0, []
     for uid, peers in by_user.items():
+        # Не заваливаем чат файлами: кнопка на каждый конфиг, файлы — по нажатию.
+        buttons = InlineKeyboardMarkup([[InlineKeyboardButton(f"📥 Получить {p['name']}", callback_data=f"get:{pub}")]
+                                        for pub, p in peers])
         try:
             await USER_BOT.send_message(
-                int(uid), resend_message(text), reply_markup=KEYBOARD)
-            for p in peers:
-                await send_peer(int(uid), p)
-                await asyncio.sleep(0.1)
+                int(uid), f"{resend_message(text)}\n\nНажмите на конфиг, чтобы получить обновлённый файл. "
+                          "Старый в приложении можно удалить.", reply_markup=buttons)
+            await asyncio.sleep(0.05)
             sent += 1
         except Exception:
             log.exception("не удалось разослать конфиги %s", uid)
