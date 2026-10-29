@@ -101,7 +101,10 @@ CLIENT_LINK="$(python3 "$SCRIPT_DIR/gen_config.py" \
   --link "$LINK" --mode "$MODE" --port "$PORT" --public-ip "$PUBLIC_IP" \
   --out "$TMP_CONFIG" "${KEY_ARGS[@]}" "${EXTRA[@]}")"
 
-"$XRAY" run -test -c "$TMP_CONFIG" >/dev/null || die "Xray отверг конфиг ($TMP_CONFIG)"
+if ! TEST_OUT="$("$XRAY" run -test -c "$TMP_CONFIG" 2>&1)"; then
+  echo "$TEST_OUT" | tail -n 15 >&2
+  die "Xray отверг конфиг ($TMP_CONFIG), причина выше"
+fi
 install -m 644 "$TMP_CONFIG" "$CONFIG"
 rm -f "$TMP_CONFIG"
 
