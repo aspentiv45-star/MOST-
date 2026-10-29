@@ -84,7 +84,8 @@ OBFS_KEYS = ("Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
 BTN_BUY = "➕ Купить конфиг"
 BTN_LIST = "📄 Мои конфиги"
 BTN_HELP = "❓ Как подключить"
-KEYBOARD = ReplyKeyboardMarkup([[BTN_BUY], [BTN_LIST, BTN_HELP]], resize_keyboard=True)
+BTN_NEWS = "🆕 Что нового"
+KEYBOARD = ReplyKeyboardMarkup([[BTN_BUY], [BTN_LIST, BTN_HELP], [BTN_NEWS]], resize_keyboard=True)
 
 HELP_TEXT = (
     "Как подключиться — коротко:\n\n"
@@ -198,6 +199,24 @@ def fmt_date(ts):
     return datetime.fromtimestamp(ts, TZ).strftime("%d.%m.%Y %H:%M")
 
 
+def fmt_day(ts):
+    return datetime.fromtimestamp(ts, TZ).strftime("%d.%m.%Y")
+
+
+async def add_news(text):
+    """Записывает обновление в историю «Что нового». Возвращает дату записи."""
+    now = time.time()
+    async with lock:
+        state = load_state()
+        state["news"].append({"date": int(now), "text": text})
+        save_state(state)
+    return now
+
+
+def news_message(ts, text):
+    return f"📢 Обновление от {fmt_day(ts)}\n\n{text}"
+
+
 # ---------- состояние ----------
 
 def load_state():
@@ -210,6 +229,7 @@ def load_state():
     state.setdefault("peers", {})
     state.setdefault("payments", {})
     state.setdefault("next_payment", 1)
+    state.setdefault("news", [])  # история обновлений для «Что нового»: [{"date": ts, "text": ...}]
     # Переход со старой схемы «подписка на человека»: срок переносится на его конфиги.
     for p in state["peers"].values():
         if "until" not in p:
@@ -733,6 +753,15 @@ async def list_configs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"{icon} {p['name']} — {peer_status(p)}", reply_markup=buttons)
 
 
+async def news_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    news = load_state()["news"][-10:][::-1]
+    if not news:
+        await update.message.reply_text("Пока обновлений не было.", reply_markup=KEYBOARD)
+        return
+    text = "🆕 Что нового\n\n" + "\n\n".join(f"📅 {fmt_day(n['date'])}\n{n['text']}" for n in news)
+    await update.message.reply_text(text[:4000], reply_markup=KEYBOARD)
+
+
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, reply_markup=HELP_BUTTONS)
 
@@ -808,7 +837,8 @@ ABTN_USERS = "👥 Клиенты"
 ABTN_GIVE = "🎁 Выдать конфиг"
 ABTN_STATS = "📊 Статистика"
 ABTN_RESEND = "📤 Разослать конфиги"
-ADMIN_KEYBOARD = ReplyKeyboardMarkup([[ABTN_PAY, ABTN_USERS], [ABTN_GIVE, ABTN_STATS], [ABTN_RESEND]],
+ABTN_NEWS = "📢 Оповестить об обновлении"
+ADMIN_KEYBOARD = ReplyKeyboardMarkup([[ABTN_PAY, ABTN_USERS], [ABTN_GIVE, ABTN_STATS], [ABTN_RESEND], [ABTN_NEWS]],
                                      resize_keyboard=True)
 
 
@@ -896,7 +926,8 @@ async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{ABTN_USERS} — клиенты и их конфиги: продлить или отключить\n"
         f"{ABTN_GIVE} — бесплатно выдать конфиг по ID\n"
         f"{ABTN_STATS} — кто подключён и трафик\n"
-        f"{ABTN_RESEND} — отправить всем клиентам актуальные файлы их конфигов\n\n"
+        f"{ABTN_RESEND} — отправить всем клиентам актуальные файлы их конфигов\n"
+        f"{ABTN_NEWS} — написать всем клиентам, что нового (попадёт в «{BTN_NEWS}»)\n\n"
         "Команды: /send ID текст — написать клиенту, /broadcast текст — написать всем.",
         reply_markup=ADMIN_KEYBOARD)
 
@@ -955,6 +986,17 @@ async def admin_give_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     waiting = ctx.user_data.pop("await", None)
+    if waiting == "news":
+        ctx.user_data["news_text"] = update.message.text.strip()
+        users = len(load_state()["users"])
+        await update.message.reply_text(
+            f"Клиенты получат:\n\n{news_message(time.time(), ctx.user_data['news_text'])}\n\n"
+            f"Разослать {users} клиентам? Запись появится в «{BTN_NEWS}».",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📢 Да, разослать", callback_data="news:yes"),
+                InlineKeyboardButton("Отмена", callback_data="news:no"),
+            ]]))
+        return
     if waiting == "resend":
         await resend_confirm(update, ctx)
         return
@@ -999,11 +1041,35 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"{query.message.text}\n\n{'✅ Пущен' if verdict == 'yes' else '❌ Отказано'}")
         return
 
+    if action == "news":
+        await query.answer()
+        text = ctx.user_data.pop("news_text", None)
+        if arg != "yes":
+            await query.edit_message_text("Оповещение отменено.")
+            return
+        if not text:
+            await query.edit_message_text(f"Текст потерялся — нажмите «{ABTN_NEWS}» ещё раз.")
+            return
+        await query.edit_message_text("📢 Рассылаю…")
+        ts = await add_news(text)
+        sent = 0
+        users = list(load_state()["users"])
+        for uid in users:
+            try:
+                await USER_BOT.send_message(int(uid), news_message(ts, text), reply_markup=KEYBOARD)
+                sent += 1
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)
+        await query.message.reply_text(f"📢 Оповещено клиентов: {sent} из {len(users)}.", reply_markup=ADMIN_KEYBOARD)
+        return
+
     if action == "resend":
         await query.answer()
         text = ctx.user_data.pop("resend_text", None)
         if arg == "yes" and text:
             await query.edit_message_text("📤 Рассылаю…")
+            await add_news(f"Обновление конфига — {text}")
             await resend_all(query, text)
         elif arg == "yes":
             await query.edit_message_text(f"Текст рассылки потерялся — нажмите «{ABTN_RESEND}» ещё раз.")
@@ -1059,6 +1125,14 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_caption(f"{query.message.caption}\n\n{result}")
     else:
         await query.edit_message_text(f"{query.message.text}\n\n{result}")
+
+
+@admin_only
+async def admin_news_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["await"] = "news"
+    await update.message.reply_text(
+        f"Напишите, что нового — это получат все клиенты, с сегодняшней датой ({fmt_day(time.time())}).\n"
+        "Например: «Добавили подключение роутеров Keenetic».")
 
 
 @admin_only
@@ -1240,6 +1314,8 @@ def build_user_app():
     app.add_handler(MessageHandler(filters.Text([BTN_BUY]), buy))
     app.add_handler(MessageHandler(filters.Text([BTN_LIST]), list_configs))
     app.add_handler(MessageHandler(filters.Text([BTN_HELP]), help_cmd))
+    app.add_handler(MessageHandler(filters.Text([BTN_NEWS]), news_cmd))
+    app.add_handler(CommandHandler("news", news_cmd))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_screenshot))
     # Старые кнопки из прошлой версии бота, оставшиеся у клиентов на экране.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
@@ -1261,6 +1337,7 @@ def build_admin_app():
     app.add_handler(MessageHandler(filters.Text([ABTN_GIVE]), admin_give_start))
     app.add_handler(MessageHandler(filters.Text([ABTN_STATS]), admin_stats))
     app.add_handler(MessageHandler(filters.Text([ABTN_RESEND]), admin_resend_ask))
+    app.add_handler(MessageHandler(filters.Text([ABTN_NEWS]), admin_news_ask))
     app.add_handler(CommandHandler("resend", admin_resend_ask))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text))
     app.add_handler(CallbackQueryHandler(on_admin_button))
