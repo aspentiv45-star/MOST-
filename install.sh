@@ -2,7 +2,8 @@
 # MOST — установка AmneziaWG и Telegram-бота, который выдаёт конфиги.
 # Запускать на сервере, через который пойдёт трафик (Ubuntu 22.04 / 24.04).
 #
-#   sudo bash install.sh --token 123456:ABC... --admin 111111111
+#   sudo bash install.sh --token КЛИЕНТСКИЙ_ТОКЕН --admin-token АДМИН_ТОКЕН --admin 111111111 \
+#     --pay 'Сбербанк, перевод по номеру +7 900 000-00-00 (Иван И.)'
 #
 # Повторный запуск безопасен: ключи и выданные конфиги сохраняются,
 # обновляются только код бота и его настройки.
@@ -17,7 +18,11 @@ BOT_DIR=/opt/most
 ENV_FILE=/etc/most/bot.env
 
 TOKEN=""
+ADMIN_TOKEN=""
 ADMIN=""
+PAY=""
+PRICE=200
+DAYS=30
 PORT=""
 PUBLIC_IP=""
 MAX_PEERS=3
@@ -26,10 +31,14 @@ die() { echo "Ошибка: $*" >&2; exit 1; }
 
 usage() {
   cat <<EOF
-Использование: sudo bash install.sh --token ТОКЕН --admin ВАШ_ID [параметры]
+Использование: sudo bash install.sh --token ТОКЕН --admin-token ТОКЕН --admin ВАШ_ID [параметры]
 
-  --token ТОКЕН    токен бота от @BotFather
-  --admin ID       ваш Telegram ID (узнать: @userinfobot); несколько — через запятую
+  --token ТОКЕН        токен клиентского бота от @BotFather
+  --admin-token ТОКЕН  токен второго бота — для администратора (оплаты, клиенты)
+  --admin ID           ваш Telegram ID (узнать: @userinfobot); несколько — через запятую
+  --pay 'ТЕКСТ'        реквизиты для оплаты, их увидит клиент
+  --price N            цена подписки в рублях (по умолчанию 200)
+  --days N             срок подписки в днях (по умолчанию 30)
   --port N         UDP-порт AmneziaWG (по умолчанию случайный 40000–60000)
   --ip АДРЕС       внешний IP сервера (по умолчанию определяется сам)
   --max N          сколько конфигов может взять один человек (по умолчанию 3)
@@ -40,7 +49,11 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --token) TOKEN="$2"; shift 2 ;;
+    --admin-token) ADMIN_TOKEN="$2"; shift 2 ;;
     --admin) ADMIN="$2"; shift 2 ;;
+    --pay) PAY="$2"; shift 2 ;;
+    --price) PRICE="$2"; shift 2 ;;
+    --days) DAYS="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --ip) PUBLIC_IP="$2"; shift 2 ;;
     --max) MAX_PEERS="$2"; shift 2 ;;
@@ -50,9 +63,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ $EUID -eq 0 ]] || die "запустите через sudo"
-[[ -n "$TOKEN" ]] || read -rp "Токен бота от @BotFather: " TOKEN
+[[ -n "$TOKEN" ]] || read -rp "Токен клиентского бота от @BotFather: " TOKEN
+[[ -n "$ADMIN_TOKEN" ]] || read -rp "Токен админ-бота от @BotFather: " ADMIN_TOKEN
 [[ -n "$ADMIN" ]] || read -rp "Ваш Telegram ID (узнать у @userinfobot): " ADMIN
-[[ "$TOKEN" == *:* ]] || die "токен выглядит неправильно (должен быть вида 123456:ABC...)"
+[[ "$TOKEN" == *:* && "$ADMIN_TOKEN" == *:* ]] || die "токен выглядит неправильно (должен быть вида 123456:ABC...)"
+[[ "$TOKEN" != "$ADMIN_TOKEN" ]] || die "нужны два разных бота: клиентский и админский"
 [[ "$ADMIN" =~ ^[0-9,\ ]+$ ]] || die "Telegram ID — это только цифры"
 
 echo "==> Устанавливаю пакеты"
@@ -139,21 +154,33 @@ install -m 644 "$SCRIPT_DIR/bot/bot.py" "$SCRIPT_DIR/bot/requirements.txt" "$BOT
 "$BOT_DIR/venv/bin/pip" install -q --upgrade pip
 "$BOT_DIR/venv/bin/pip" install -q -r "$BOT_DIR/requirements.txt"
 
+OLD_RELAY="$(sed -n 's/^RELAY_HOST=//p' "$ENV_FILE" 2>/dev/null || true)"
 umask 077
 cat >"$ENV_FILE" <<EOF
 BOT_TOKEN=$TOKEN
+ADMIN_BOT_TOKEN=$ADMIN_TOKEN
 ADMIN_IDS=$ADMIN
+PRICE=$PRICE
+DAYS=$DAYS
+PAY_FILE=/etc/most/pay.txt
 ENDPOINT_HOST=$PUBLIC_IP
 AWG_IFACE=$IFACE
 AWG_CONF=$AWG_CONF
 STATE_FILE=/var/lib/most/state.json
 MAX_PEERS=$MAX_PEERS
 EOF
+# RELAY_HOST дописывает ru-route.sh — сохраняем его при переустановке.
+[[ -n "$OLD_RELAY" ]] && echo "RELAY_HOST=$OLD_RELAY" >>"$ENV_FILE"
+if [[ -n "$PAY" ]]; then
+  printf '%s\n' "$PAY" >/etc/most/pay.txt
+elif [[ ! -f /etc/most/pay.txt ]]; then
+  echo "Реквизиты не указаны — напишите администратору." >/etc/most/pay.txt
+fi
 umask 022
 
 cat >/etc/systemd/system/most-bot.service <<EOF
 [Unit]
-Description=MOST: Telegram-бот AmneziaWG
+Description=MOST: Telegram-боты AmneziaWG
 After=network-online.target awg-quick@$IFACE.service
 Wants=network-online.target
 
@@ -176,7 +203,8 @@ cat <<EOF
 
 Готово.
   AmneziaWG: $PUBLIC_IP:$PORT/udp
-  Бот запущен. Откройте его в Telegram и нажмите /start.
+  Боты запущены. Нажмите /start в обоих: в клиентском и в админском.
+  Реквизиты для оплаты: /etc/most/pay.txt (можно менять без перезапуска)
 
 Если у хостинга есть свой файрвол — откройте в нём UDP-порт $PORT.
 Логи бота:  journalctl -u most-bot -f
