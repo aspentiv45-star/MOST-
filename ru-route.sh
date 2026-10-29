@@ -86,7 +86,7 @@ case "$1" in
     fi
     python3 /opt/most/split.py --force >"$tmp" && install -m 644 "$tmp" "$FORCE"
     rm -f "$tmp"
-    ip link show awg1 >/dev/null 2>&1 && load_set ;;
+    if ip link show awg1 >/dev/null 2>&1; then load_set; fi ;;
 esac
 EOF
 chmod 755 "$RULES"
