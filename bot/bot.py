@@ -72,7 +72,10 @@ FULL_TUNNEL = "0.0.0.0/0, ::/0"
 DAY = 86400
 # Цель оплаты: новый конфиг для устройства или для роутера; иначе — публичный ключ продлеваемого конфига.
 NEW = "new"
-NEW_ROUTER = "new-router"
+NEW_ROUTER = "new-router"          # роутер на чистом WireGuard
+NEW_ROUTER_AWG = "new-router-awg"  # роутер с AmneziaWG (Keenetic, OpenWrt)
+KIND_BY_TARGET = {NEW: "device", NEW_ROUTER: "router", NEW_ROUTER_AWG: "router-awg"}
+ROUTER_KINDS = ("router", "router-awg")
 
 # Параметры обфускации AmneziaWG: клиенту они нужны точно такими же, как у сервера.
 OBFS_KEYS = ("Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
@@ -84,7 +87,7 @@ BTN_HELP = "❓ Как подключить"
 KEYBOARD = ReplyKeyboardMarkup([[BTN_BUY], [BTN_LIST, BTN_HELP]], resize_keyboard=True)
 
 HELP_TEXT = (
-    "Как подключиться:\n\n"
+    "Как подключиться — коротко:\n\n"
     "1. Установите AmneziaVPN или AmneziaWG (App Store / Google Play / amnezia.org).\n"
     f"2. Нажмите «{BTN_BUY}», оплатите и пришлите скриншот перевода.\n"
     "3. После подтверждения бот пришлёт файл конфига.\n"
@@ -95,8 +98,102 @@ HELP_TEXT = (
        if RELAY_HOST and SEND_DIRECT else "")
     + f"Цены на {DAYS} дней: конфиг для себя (одно устройство) — {PRICE} ₽, для роутера (весь дом) — {ROUTER_PRICE} ₽.\n"
     "Для второго устройства купите ещё один конфиг.\n"
-    f"Продлить конфиг: «{BTN_LIST}» → «🔄 Продлить»."
+    f"Продлить конфиг: «{BTN_LIST}» → «🔄 Продлить».\n\n"
+    "👇 Подробные инструкции для вашего устройства:"
 )
+
+# Подробные инструкции для клиентов — открываются кнопками из «❓ Как подключить».
+GUIDES = {
+    "what": (
+        "🛒 Что купить?\n\n"
+        f"📱 «Для себя» — {PRICE} ₽\n"
+        "Телефон, планшет или компьютер. Один конфиг — одно устройство. "
+        "Для двух телефонов купите два конфига.\n\n"
+        f"📡 «Роутер AmneziaWG» — {ROUTER_PRICE} ₽\n"
+        "Для роутеров Keenetic (KeeneticOS 4.2 и новее) и OpenWrt. VPN работает сразу на всех устройствах дома. "
+        "Самый надёжный вариант для роутера: соединение замаскировано.\n\n"
+        f"📡 «Роутер WireGuard» — {ROUTER_PRICE} ₽\n"
+        "Для любого другого роутера, где в настройках есть «VPN-клиент» → «WireGuard» "
+        "(TP-Link, Asus, Xiaomi, MikroTik и др.). Без маскировки — у части провайдеров может не работать.\n\n"
+        "Не уверены — берите «Для себя»: работает у всех."
+    ),
+    "ios": (
+        "🍏 iPhone и iPad\n\n"
+        "1. Установите из App Store приложение AmneziaWG (или AmneziaVPN).\n"
+        f"2. В боте: «{BTN_LIST}» → «⬇️ Скачать». Придёт файл vpn1.conf.\n"
+        "3. Нажмите на файл → значок «Поделиться» (квадрат со стрелкой) → выберите AmneziaWG.\n"
+        "   Если AmneziaWG нет в списке: «Сохранить в Файлы», затем в AmneziaWG «+» → «Создать из файла или архива» → выберите vpn1.conf.\n"
+        "4. iPhone спросит «Разрешить добавление конфигураций VPN?» → «Разрешить», подтвердите код или Face ID.\n"
+        "5. Включите переключатель напротив vpn1.\n"
+        "6. Проверка: откройте ipinfo.io — должны быть Нидерланды (Netherlands).\n\n"
+        "❗ Включайте только один конфиг и выключите другие VPN-приложения."
+    ),
+    "android": (
+        "🤖 Android\n\n"
+        "1. Установите из Google Play приложение AmneziaWG (или AmneziaVPN).\n"
+        f"2. В боте: «{BTN_LIST}» → «⬇️ Скачать». Придёт файл vpn1.conf.\n"
+        "3. Нажмите на файл → «⋮» → «Сохранить в загрузки» (или «Сохранить в музыку/файлы»).\n"
+        "4. В AmneziaWG нажмите «+» → «Импорт из файла» → папка «Загрузки» → vpn1.conf.\n"
+        "   Вместо шагов 3–4 можно нажать «+» → «Сканировать QR-код» и навести камеру на QR из бота (если он пришёл).\n"
+        "5. Включите переключатель напротив vpn1, на вопрос о VPN-подключении нажмите «ОК».\n"
+        "6. Проверка: откройте ipinfo.io — должны быть Нидерланды (Netherlands).\n\n"
+        "❗ Включайте только один конфиг и выключите другие VPN-приложения."
+    ),
+    "pc": (
+        "💻 Компьютер (Windows, macOS, Linux)\n\n"
+        "1. Скачайте AmneziaVPN с сайта amnezia.org и установите.\n"
+        f"2. В боте (Telegram на компьютере): «{BTN_LIST}» → «⬇️ Скачать» → сохраните vpn1.conf.\n"
+        "3. В AmneziaVPN: «+» (или «Добавить сервер») → «Файл с настройками» → выберите vpn1.conf.\n"
+        "4. Нажмите «Подключиться».\n"
+        "5. Проверка: откройте ipinfo.io — должны быть Нидерланды (Netherlands).\n\n"
+        "❗ Один конфиг — одно устройство. Для компьютера и телефона нужны два конфига."
+    ),
+    "router-awg": (
+        "📡 Роутер AmneziaWG (Keenetic, OpenWrt)\n\n"
+        "Keenetic (KeeneticOS 4.2 и новее):\n"
+        "1. Откройте my.keenetic.net → «Интернет» → «Другие подключения» → «WireGuard» → «Загрузить из файла» → rtr1.conf.\n"
+        "2. Включите у подключения «Использовать для выхода в интернет».\n"
+        "3. Откройте my.keenetic.net/a и выполните команду, которую бот прислал вместе с конфигом "
+        "(начинается с «interface Wireguard0 wireguard asc»), затем «system configuration save».\n"
+        "4. Выключите и включите подключение.\n\n"
+        "OpenWrt:\n"
+        "1. System → Software: установите kmod-amneziawg, amneziawg-tools, luci-proto-amneziawg.\n"
+        "2. Network → Interfaces → Add new interface → протокол AmneziaWG → «Import configuration» → rtr1.conf.\n"
+        "3. Добавьте интерфейс в зону wan и включите его.\n\n"
+        "Проверка: с любого устройства дома ipinfo.io — Нидерланды."
+    ),
+    "router-wg": (
+        "📡 Роутер WireGuard (TP-Link, Asus, Xiaomi, MikroTik и др.)\n\n"
+        "1. Откройте настройки роутера → «VPN-клиент» (или «VPN», «Другие подключения») → «WireGuard».\n"
+        "2. Загрузите файл rtr1.conf. Если роутер не умеет загружать файл — впишите поля вручную: "
+        "бот прислал их все вместе с конфигом (ключи, адрес, порт).\n"
+        "3. «Разрешённые IP-адреса»: 0.0.0.0/0, «Ключ PSK» оставьте пустым.\n"
+        "4. Сохраните, включите подключение и выберите его для выхода в интернет.\n\n"
+        "Проверка: с любого устройства дома ipinfo.io — Нидерланды.\n\n"
+        "❗ Если не подключается — ваш провайдер режет обычный WireGuard. Тогда нужен роутер с AmneziaWG "
+        "(Keenetic, OpenWrt) или конфиг «Для себя» на каждое устройство."
+    ),
+    "trouble": (
+        "🆘 Не работает?\n\n"
+        f"1. Проверьте срок: «{BTN_LIST}» — у конфига должен быть 🟢. Если ⚪️ — продлите.\n"
+        "2. Выключите и включите VPN. Выключите другие VPN-приложения.\n"
+        f"3. Скачайте конфиг заново («{BTN_LIST}» → «⬇️ Скачать»), удалите старый в приложении и импортируйте новый.\n"
+        "4. Попробуйте другую сеть: Wi-Fi вместо мобильного интернета или наоборот.\n"
+        "5. Один конфиг нельзя включать на двух устройствах одновременно — будут обрывы.\n"
+        "6. Торренты через VPN заблокированы — это не ошибка.\n\n"
+        "Не помогло — напишите администратору, приложите скриншот ошибки."
+    ),
+}
+
+HELP_BUTTONS = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🛒 Что купить?", callback_data="help:what")],
+    [InlineKeyboardButton("🍏 iPhone", callback_data="help:ios"),
+     InlineKeyboardButton("🤖 Android", callback_data="help:android")],
+    [InlineKeyboardButton("💻 Компьютер", callback_data="help:pc")],
+    [InlineKeyboardButton("📡 Роутер AmneziaWG", callback_data="help:router-awg"),
+     InlineKeyboardButton("📡 Роутер WireGuard", callback_data="help:router-wg")],
+    [InlineKeyboardButton("🆘 Не работает", callback_data="help:trouble")],
+])
 
 log = logging.getLogger("most")
 lock = asyncio.Lock()
@@ -275,9 +372,9 @@ def next_free_ip(state, params):
 
 
 def is_router(state, target):
-    if target == NEW_ROUTER:
+    if target in (NEW_ROUTER, NEW_ROUTER_AWG):
         return True
-    return state["peers"].get(target, {}).get("kind") == "router"
+    return state["peers"].get(target, {}).get("kind") in ROUTER_KINDS
 
 
 def price_for(state, target):
@@ -286,7 +383,7 @@ def price_for(state, target):
 
 def create_peer(state, uid, until, kind="device"):
     """Добавляет конфиг в state (без применения на сервере). Возвращает его ключ и данные."""
-    prefix = "rtr" if kind == "router" else "vpn"
+    prefix = "rtr" if kind in ROUTER_KINDS else "vpn"
     names = {p["name"] for p in user_peers(state, uid).values()}
     n = next(i for i in range(1, 1000) if f"{prefix}{i}" not in names)
     priv = run(["awg", "genkey"])
@@ -313,7 +410,7 @@ def client_conf(peer, params, host):
         f"PublicKey = {run(['awg', 'pubkey'], params['PrivateKey'] + chr(10))}",
         f"Endpoint = {host}:{params['ListenPort']}",
         # Роутеры часто не принимают IPv6 в этом поле — им только IPv4.
-        f"AllowedIPs = {'0.0.0.0/0' if peer.get('kind') == 'router' else allowed_ips()}",
+        f"AllowedIPs = {'0.0.0.0/0' if peer.get('kind') in ROUTER_KINDS else allowed_ips()}",
         "PersistentKeepalive = 25",
     ]
     return "\n".join(lines) + "\n"
@@ -373,7 +470,7 @@ async def send_peer(chat_id, peer):
         text = client_conf(peer, params, host)
         await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()), filename=filename,
                                      caption=f"{filename} — {peer_status(peer)}")
-        if peer.get("kind") == "router":
+        if peer.get("kind") in ROUTER_KINDS:
             continue
         # Конфиг с раздельным туннелем не помещается в QR-код — тогда только файл.
         if len(text) < 2000:
@@ -381,12 +478,12 @@ async def send_peer(chat_id, peer):
             qrcode.make(text).save(png, format="PNG")
             png.seek(0)
             await USER_BOT.send_photo(chat_id, photo=png, caption=f"QR-код: {filename}")
-    if peer.get("kind") == "router":
+    if peer.get("kind") in ROUTER_KINDS:
         await USER_BOT.send_message(chat_id, router_help(peer, params))
 
 
-def router_requirements():
-    if plain_routers():
+def router_requirements(target):
+    if target == NEW_ROUTER and plain_routers():
         return ("Подходит роутер с VPN-клиентом WireGuard: Keenetic, TP-Link, Asus, Xiaomi, MikroTik, OpenWrt и другие. "
                 "Проверьте, что в настройках роутера есть раздел «VPN-клиент» → «WireGuard».")
     return ("Подходят только роутеры с поддержкой AmneziaWG:\n"
@@ -396,7 +493,7 @@ def router_requirements():
 
 
 def router_help(peer, params):
-    if plain_routers():
+    if peer_iface(peer)[0] == ROUTER_IFACE:
         text = client_conf(peer, params, RELAY_HOST or ENDPOINT_HOST)
         fields = dict(line.split(" = ", 1) for line in text.splitlines() if " = " in line)
         host, _, port = fields["Endpoint"].rpartition(":")
@@ -448,7 +545,9 @@ def target_label(state, target):
     if target == NEW:
         return "новый конфиг для себя"
     if target == NEW_ROUTER:
-        return "новый конфиг для роутера"
+        return "новый конфиг для роутера (WireGuard)"
+    if target == NEW_ROUTER_AWG:
+        return "новый конфиг для роутера (AmneziaWG)"
     peer = state["peers"].get(target)
     return f"продление {peer['name']} ({peer_status(peer)})" if peer else "продление удалённого конфига"
 
@@ -491,7 +590,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def ask_payment(message, ctx, target, state):
     ctx.user_data["pay_for"] = target
-    warning = f"{router_requirements()}\n\n" if target == NEW_ROUTER else ""
+    warning = f"{router_requirements(target)}\n\n" if target in (NEW_ROUTER, NEW_ROUTER_AWG) else ""
     await message.reply_text(
         f"Оплата: {target_label(state, target)} — {price_for(state, target)} ₽ за {DAYS} дней.\n\n"
         f"{warning}{pay_text()}\n\n"
@@ -513,7 +612,11 @@ async def buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Что подключаем? Срок — {DAYS} дней.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"📱 Для себя (телефон, ПК) — {PRICE} ₽", callback_data=f"buy:{NEW}")],
-            [InlineKeyboardButton(f"📡 Для роутера (весь дом) — {ROUTER_PRICE} ₽", callback_data=f"buy:{NEW_ROUTER}")],
+            [InlineKeyboardButton(f"📡 Роутер AmneziaWG (Keenetic, OpenWrt) — {ROUTER_PRICE} ₽",
+                                  callback_data=f"buy:{NEW_ROUTER_AWG}")],
+            [InlineKeyboardButton(f"📡 Роутер WireGuard (другие роутеры) — {ROUTER_PRICE} ₽",
+                                  callback_data=f"buy:{NEW_ROUTER}")],
+            [InlineKeyboardButton("🛒 Что выбрать?", callback_data="help:what")],
         ]))
 
 
@@ -541,7 +644,8 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Непонятно, за что оплата — спрашиваем, картинку держим до ответа.
         ctx.user_data["pending_photo"] = (data, msg.caption)
         rows = [[InlineKeyboardButton(f"📱 Новый для себя — {PRICE} ₽", callback_data=f"payfor:{NEW}")],
-                [InlineKeyboardButton(f"📡 Новый для роутера — {ROUTER_PRICE} ₽", callback_data=f"payfor:{NEW_ROUTER}")]]
+                [InlineKeyboardButton(f"📡 Роутер AmneziaWG — {ROUTER_PRICE} ₽", callback_data=f"payfor:{NEW_ROUTER_AWG}")],
+                [InlineKeyboardButton(f"📡 Роутер WireGuard — {ROUTER_PRICE} ₽", callback_data=f"payfor:{NEW_ROUTER}")]]
         rows += [[InlineKeyboardButton(f"🔄 Продлить {p['name']}", callback_data=f"payfor:{pub}")]
                  for pub, p in mine.items()]
         await msg.reply_text("За что эта оплата?", reply_markup=InlineKeyboardMarkup(rows))
@@ -593,12 +697,12 @@ async def list_configs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not is_admin(p["user"]):
             row.append(InlineKeyboardButton(f"🔄 Продлить — {price_for(state, pub)} ₽", callback_data=f"renew:{pub}"))
         buttons = InlineKeyboardMarkup([row, [InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}")]])
-        icon = "📡" if p.get("kind") == "router" else "📱"
+        icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
         await update.message.reply_text(f"{icon} {p['name']} — {peer_status(p)}", reply_markup=buttons)
 
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP_TEXT, reply_markup=KEYBOARD)
+    await update.message.reply_text(HELP_TEXT, reply_markup=HELP_BUTTONS)
 
 
 async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -606,6 +710,10 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = query.from_user.id
     action, _, arg = query.data.partition(":")
     await query.answer()
+
+    if action == "help":
+        await query.message.reply_text(GUIDES.get(arg, HELP_TEXT), reply_markup=HELP_BUTTONS)
+        return
 
     if action == "buy":
         state = load_state()
@@ -701,9 +809,8 @@ async def grant(uid, target, days, paid=True):
         state = load_state()
         old_state = json.loads(json.dumps(state))
         state["users"].setdefault(str(uid), {"name": str(uid)})["approved"] = True
-        if target in (NEW, NEW_ROUTER):
-            kind = "router" if target == NEW_ROUTER else "device"
-            pub, peer = create_peer(state, uid, time.time() + days * DAY, kind)
+        if target in KIND_BY_TARGET:
+            pub, peer = create_peer(state, uid, time.time() + days * DAY, KIND_BY_TARGET[target])
         else:
             pub, peer = target, state["peers"].get(target)
             if not peer:
@@ -715,7 +822,7 @@ async def grant(uid, target, days, paid=True):
 
     head = "Оплата подтверждена!" if paid else "Подарок от администратора!"
     try:
-        if target in (NEW, NEW_ROUTER):
+        if target in KIND_BY_TARGET:
             await USER_BOT.send_message(uid, f"{head} Ваш новый конфиг {peer['name']} "
                                              f"активен до {fmt_date(peer['until'])}:", reply_markup=KEYBOARD)
             await send_peer(uid, peer)
@@ -802,7 +909,8 @@ async def admin_give_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Пришлите ID клиента и, через пробел, число дней (по умолчанию {DAYS}).\n"
         f"Например: 123456789 {DAYS}\n"
-        f"Для роутера добавьте слово «роутер»: 123456789 {DAYS} роутер\n\n"
+        f"Для роутера добавьте «роутер» (WireGuard) или «amnezia» (Keenetic/OpenWrt): "
+        f"123456789 {DAYS} роутер\n\n"
         "Клиент получит новый конфиг бесплатно. ID видно в его оплатах и в «👥 Клиенты». "
         "Клиент должен хотя бы раз нажать /start в клиентском боте.")
 
@@ -817,14 +925,16 @@ async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Выберите действие на кнопках ниже.", reply_markup=ADMIN_KEYBOARD)
         return
     words = update.message.text.lower().split()
-    router = any(w.startswith(("роут", "router")) for w in words)
-    parts = [w for w in words if not w.startswith(("роут", "router"))]
+    AWG_WORDS = ("amnez", "амнез", "keenetic", "кинет", "awg", "openwrt")
+    awg = any(w.startswith(AWG_WORDS) for w in words)
+    router = awg or any(w.startswith(("роут", "router")) for w in words)
+    parts = [w for w in words if w.isdigit()]
     if not parts or not parts[0].isdigit() or (len(parts) > 1 and not parts[1].isdigit()):
         ctx.user_data["await"] = "give"
         await update.message.reply_text(f"Нужно число — ID клиента. Например: 123456789 {DAYS}")
         return
     uid, days = int(parts[0]), int(parts[1]) if len(parts) > 1 else DAYS
-    result = await grant(uid, NEW_ROUTER if router else NEW, days, paid=False)
+    result = await grant(uid, NEW_ROUTER_AWG if awg else NEW_ROUTER if router else NEW, days, paid=False)
     await update.message.reply_text(f"Готово: выдан конфиг.\n{result}", reply_markup=ADMIN_KEYBOARD)
 
 
