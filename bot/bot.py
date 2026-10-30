@@ -26,9 +26,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import qrcode
-import bank
 import split
-from aiohttp import web
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -62,10 +60,6 @@ ROUTER_PRICE = int(os.environ.get("ROUTER_PRICE", "500"))
 TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "3"))
 DAYS = int(os.environ.get("DAYS", "30"))
 PAY_FILE = os.environ.get("PAY_FILE", "/etc/most/pay.txt")
-# Автооплата: секрет для адреса, на который телефон пересылает уведомления банка.
-BANK_SECRET = os.environ.get("BANK_SECRET", "")
-BANK_PORT = int(os.environ.get("BANK_PORT", "8787"))
-INVOICE_TTL = 3 * 3600
 # approve — купить может только тот, кого администратор пустил; open — любой.
 ACCESS = os.environ.get("ACCESS", "open")
 TZ = ZoneInfo(os.environ.get("TZ_NAME", "Europe/Moscow"))
@@ -238,8 +232,6 @@ def load_state():
     state.setdefault("peers", {})
     state.setdefault("payments", {})
     state.setdefault("next_payment", 1)
-    state.setdefault("invoices", {})
-    state.setdefault("next_invoice", 1)
     state.setdefault("tickets", {})
     state.setdefault("next_ticket", 1)
     state.setdefault("news", [])  # история обновлений для «Что нового»: [{"date": ts, "text": ...}]
@@ -630,20 +622,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def ask_payment(message, ctx, target, state):
     ctx.user_data["pay_for"] = target
     warning = f"{router_requirements(target)}\n\n" if target in (NEW_ROUTER, NEW_ROUTER_AWG) else ""
-    if BANK_SECRET:
-        async with lock:
-            state = load_state()
-            iid, amount = new_invoice(state, message.chat_id, target)
-            save_state(state)
-        ctx.user_data["invoice"] = iid
-        await message.reply_text(
-            f"Оплата: {target_label(state, target)} на {DAYS} дней.\n\n{warning}"
-            f"💳 Переведите РОВНО {bank.fmt_amount(amount)} — с копейками, по ним бот узнает ваш платёж.\n\n"
-            f"{pay_text()}\n\n"
-            f"✅ После перевода всё придёт автоматически в течение пары минут.\n"
-            f"Сумма действует до {fmt_date(time.time() + INVOICE_TTL)}. Если за 10 минут ничего не пришло — "
-            "пришлите сюда скриншот перевода, администратор проверит вручную.")
-        return
     await message.reply_text(
         f"Оплата: {target_label(state, target)} — {price_for(state, target)} ₽ за {DAYS} дней.\n\n"
         f"{warning}{pay_text()}\n\n"
@@ -780,7 +758,6 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(closed_text(state, update.effective_user.id))
         return
     target = ctx.user_data.pop("pay_for", None)
-    invoice = ctx.user_data.pop("invoice", None)
     if target is None:
         # Оплату принимаем только после выбора, за что она.
         await msg.reply_text(
@@ -791,27 +768,18 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Если это скриншот проблемы — нажмите «{BTN_SUPPORT}» и пришлите его там.",
             reply_markup=KEYBOARD)
         return
-    await submit_payment(update.effective_user, target, data, msg.caption, msg, invoice)
+    await submit_payment(update.effective_user, target, data, msg.caption, msg)
 
 
-async def submit_payment(user, target, data, comment, reply_to, invoice=None):
+async def submit_payment(user, target, data, comment, reply_to):
     async with lock:
         state = load_state()
         u = get_user(state, user)
-        inv = state["invoices"].get(invoice) if invoice else None
-        if inv and inv["status"] == "paid":
-            save_state(state)
-            await reply_to.reply_text("Эта оплата уже получена автоматически — всё должно было прийти выше.",
-                                      reply_markup=KEYBOARD)
-            return
         pid = str(state["next_payment"])
         state["next_payment"] += 1
         price = price_for(state, target)
         state["payments"][pid] = {"user": str(user.id), "target": target, "status": "pending",
                                   "price": price, "created": int(time.time())}
-        if inv:
-            inv["payment"] = pid
-            state["payments"][pid]["invoice"] = invoice
         save_state(state)
 
     caption = (f"Оплата №{pid} — {price} ₽\n{u['name']}\nID {user.id}\n"
@@ -1231,10 +1199,6 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         payment["status"] = "approved" if action == "ok" else "rejected"
         payment["by"] = query.from_user.id
-        inv = state["invoices"].get(payment.get("invoice") or "")
-        if inv and inv["status"] == "pending":
-            # Одобрено вручную — уведомление банка с этой суммой уже не выдаст второй раз.
-            inv["status"] = "paid" if action == "ok" else "cancelled"
         save_state(state)
     await query.answer()
 
@@ -1736,95 +1700,6 @@ async def admin_ticket_text(update, ctx, waiting):
     await update.message.reply_text(f"{ticket_text(state, tid)}\n\n{result}", reply_markup=ADMIN_KEYBOARD)
 
 
-# ---------- автоматическая оплата по уведомлениям банка ----------
-# Клиенту выставляется уникальная сумма с копейками (200,37 ₽). Телефон с банковским
-# приложением пересылает пуш о поступлении на /bank — бот находит счёт и сам выдаёт конфиг.
-
-def new_invoice(state, uid, target):
-    """Выставляет счёт с уникальной суммой. Возвращает его номер и сумму в копейках."""
-    now = time.time()
-    busy = {i["amount"] for i in state["invoices"].values()
-            if i["status"] == "pending" and i["expires"] > now}
-    base = price_for(state, target) * 100
-    amount = next(base + rub * 100 + kop for rub in range(0, 50) for kop in range(1, 100)
-                  if base + rub * 100 + kop not in busy)
-    iid = str(state["next_invoice"])
-    state["next_invoice"] += 1
-    state["invoices"][iid] = {"user": str(uid), "target": target, "amount": amount, "status": "pending",
-                              "created": int(now), "expires": int(now + INVOICE_TTL)}
-    return iid, amount
-
-
-async def process_bank_text(text):
-    """Ищет в уведомлении банка сумму выставленного счёта и выдаёт оплаченное."""
-    if not bank.is_incoming(text):
-        return
-    amounts = bank.parse_amounts(text)
-    now = time.time()
-    async with lock:
-        state = load_state()
-        state["bank_last"] = {"date": int(now), "text": text[:300]}
-        matched = [(iid, i) for iid, i in state["invoices"].items()
-                   if i["status"] == "pending" and i["expires"] > now - 3600 and i["amount"] in amounts]
-        if not matched:
-            save_state(state)
-            # Повтор уведомления об уже полученной оплате (телефон иногда шлёт дубли) — молча пропускаем.
-            if any(i["status"] == "paid" and i["amount"] in amounts and now - i.get("paid", 0) < 3600
-                   for i in state["invoices"].values()):
-                return
-            await notify_admins(f"💸 Поступление без счёта: {', '.join(bank.fmt_amount(a) for a in sorted(amounts))}\n"
-                                f"«{text[:300]}»\nЕсли это оплата клиента — одобрите её вручную в «⏳ Оплаты».")
-            return
-        iid, inv = min(matched, key=lambda kv: kv[1]["created"])
-        inv["status"] = "paid"
-        inv["paid"] = int(now)
-        # Скриншот, если клиент его уже прислал, больше не требует ручного одобрения.
-        if inv.get("payment") and state["payments"].get(inv["payment"], {}).get("status") == "pending":
-            state["payments"][inv["payment"]]["status"] = "approved"
-            state["payments"][inv["payment"]]["by"] = "auto"
-        else:
-            pid = str(state["next_payment"])
-            state["next_payment"] += 1
-            state["payments"][pid] = {"user": inv["user"], "target": inv["target"], "status": "approved",
-                                      "price": inv["amount"] // 100, "created": int(now), "by": "auto",
-                                      "invoice": iid}
-        save_state(state)
-    result = await grant(int(inv["user"]), inv["target"], DAYS)
-    await notify_admins(f"💸 Автооплата {bank.fmt_amount(inv['amount'])} от {user_name(state, inv['user'])} "
-                        f"(ID {inv['user']}) — {target_label(state, inv['target'])}.\n{result}")
-
-
-async def bank_webhook(request):
-    if not BANK_SECRET or request.query.get("key") != BANK_SECRET:
-        return web.Response(status=403, text="forbidden")
-    raw = await request.text()
-    try:
-        data = json.loads(raw)
-        text = " ".join(str(data.get(k, "")) for k in ("title", "text", "message", "notification", "body")).strip() or raw
-    except ValueError:
-        text = raw
-    try:
-        await process_bank_text(text)
-    except Exception as e:
-        await report_error("Ошибка автооплаты", e)
-    return web.Response(text="ok")
-
-
-@admin_only
-async def admin_bank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    state = load_state()
-    if not BANK_SECRET:
-        await update.message.reply_text("Автооплата выключена. Включить: sudo bash install.sh --autopay on")
-        return
-    last = state.get("bank_last")
-    pending = sum(1 for i in state["invoices"].values() if i["status"] == "pending" and i["expires"] > time.time())
-    await update.message.reply_text(
-        "💸 Автооплата включена.\n"
-        + (f"Последнее уведомление банка: {fmt_date(last['date'])}\n«{last['text']}»" if last
-           else "Уведомлений от телефона ещё не было — проверьте MacroDroid.")
-        + f"\n\nОжидают оплаты счетов: {pending}.")
-
-
 # ---------- окончание подписок ----------
 
 async def check_expiry():
@@ -1928,7 +1803,6 @@ def build_admin_app():
     app.add_handler(MessageHandler(filters.Text([ABTN_RESEND]), admin_resend_ask))
     app.add_handler(MessageHandler(filters.Text([ABTN_NEWS]), admin_news_ask))
     app.add_handler(MessageHandler(filters.Text([ABTN_TICKETS]), admin_tickets))
-    app.add_handler(CommandHandler("bank", admin_bank))
     app.add_handler(CommandHandler("resend", admin_resend_ask))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text))
     app.add_handler(CallbackQueryHandler(on_admin_button))
@@ -1948,14 +1822,6 @@ async def amain():
             await app.start()
             await app.updater.start_polling()
         tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop())]
-        runner = None
-        if BANK_SECRET:
-            web_app = web.Application()
-            web_app.router.add_post("/bank", bank_webhook)
-            runner = web.AppRunner(web_app)
-            await runner.setup()
-            await web.TCPSite(runner, "0.0.0.0", BANK_PORT).start()
-            log.info("автооплата: принимаю уведомления банка на порту %d", BANK_PORT)
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -1965,8 +1831,6 @@ async def amain():
 
         for task in tasks:
             task.cancel()
-        if runner:
-            await runner.cleanup()
         for app in (user_app, admin_app):
             await app.updater.stop()
             await app.stop()
