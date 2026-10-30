@@ -144,7 +144,8 @@ r = random.SystemRandom()
 s1 = r.randint(15, 150)
 s2 = r.choice([x for x in range(15, 151) if x != s1 + 56])
 h = r.sample(range(5, 2**31 - 1), 4)
-print(r.randint(4, 8), r.randint(40, 70), r.randint(700, 1200), s1, s2, *h)
+jmin = r.randint(40, 80)
+print(r.randint(3, 6), jmin, jmin + r.randint(50, 150), s1, s2, *h)
 EOF
 )
   mkdir -p "$AWG_DIR"
@@ -168,6 +169,10 @@ PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACC
 EOF
   umask 022
 fi
+
+# MTU 1280 и у сервера: иначе он шлёт клиентам (у них 1280) пакеты крупнее, и на мобильном
+# интернете они теряются — сайты «висят», игры лагают.
+grep -q '^MTU' "$AWG_CONF" || sed -i '/^ListenPort/a MTU = 1280' "$AWG_CONF"
 
 echo "==> Включаю маршрутизацию"
 cat >/etc/sysctl.d/99-most.conf <<EOF

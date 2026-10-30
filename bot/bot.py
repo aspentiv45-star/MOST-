@@ -17,6 +17,7 @@ import ipaddress
 import json
 import logging
 import os
+import random
 import signal
 import subprocess
 import tempfile
@@ -82,6 +83,25 @@ ROUTER_KINDS = ("router", "router-awg")
 # Параметры обфускации AmneziaWG: клиенту они нужны точно такими же, как у сервера.
 OBFS_KEYS = ("Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
              "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5")
+
+# Профили маскировки под мобильных операторов. Jc/Jmin/Jmax и I1 задаёт только клиент
+# (сервер эти пакеты-пустышки просто отбрасывает), поэтому у каждого конфига они свои
+# и сервер менять не нужно. Значения — из замеров bivlked/amneziawg-installer:
+# мобильные сети режут крупные пустышки и случайный I1, а пакет в форме ответа DNS пропускают.
+OPERATORS = {
+    "mts": "МТС", "beeline": "Билайн", "megafon": "МегаФон", "t2": "Т2 (Tele2)",
+    "yota": "Yota", "tmob": "Т-Мобайл", "wifi": "Только Wi-Fi / домашний", "other": "Другой",
+}
+PROFILES = {
+    "mts": {"Jc": 3, "Jmin": 40, "Jmax": 90, "I1": True},
+    "beeline": {"Jc": 4, "Jmin": 40, "Jmax": 120, "I1": True},
+    "megafon": {"Jc": 3, "Jmin": 40, "Jmax": 90, "I1": False},
+    "t2": {"Jc": 3, "Jmin": 40, "Jmax": 90, "I1": True},
+    "yota": {"Jc": 3, "Jmin": 30, "Jmax": 80, "I1": True},
+    "tmob": {"Jc": 2, "Jmin": 20, "Jmax": 60, "I1": True},
+    "wifi": {"Jc": 4, "Jmin": 40, "Jmax": 150, "I1": True},
+    "other": {"Jc": 3, "Jmin": 40, "Jmax": 90, "I1": True},
+}
 
 BTN_BUY = "➕ Купить конфиг"
 BTN_LIST = "📄 Мои конфиги"
@@ -170,7 +190,10 @@ GUIDES = {
         f"1. Проверьте срок: «{BTN_LIST}» — у конфига должен быть 🟢. Если ⚪️ — продлите.\n"
         "2. Выключите и включите VPN. Выключите другие VPN-приложения.\n"
         f"3. Скачайте конфиг заново («{BTN_LIST}» → «⬇️ Скачать»), удалите старый в приложении и импортируйте новый.\n"
-        "4. Попробуйте другую сеть: Wi-Fi вместо мобильного интернета или наоборот.\n"
+        f"4. Не подключается или тормозит на мобильном интернете — «{BTN_LIST}» → «📶 Оператор» → выберите своего "
+        "оператора (или «Другой»), удалите старый туннель и импортируйте новый файл. Не помогло — попробуйте "
+        "другого оператора из списка: настройки у них разные.\n"
+        "   Обновите приложение AmneziaVPN / AmneziaWG до последней версии.\n"
         "5. Один конфиг нельзя включать на двух устройствах одновременно — будут обрывы.\n"
         "6. Торренты через VPN заблокированы — это не ошибка.\n\n"
         "7. Роутер: если после включения VPN пропадает Wi-Fi или интернет — в «Разрешённых IP» стоит 0.0.0.0/0. "
@@ -405,9 +428,43 @@ def create_peer(state, uid, until, kind="device"):
     pub = run(["awg", "pubkey"], priv + "\n")
     peer = {"user": str(uid), "name": f"{prefix}{n}", "kind": kind,
             "priv": priv, "created": fmt_date(time.time()), "until": until, "warned": 0}
+    if kind not in ROUTER_KINDS:
+        peer["op"] = state["users"].get(str(uid), {}).get("op")
     peer["ip"] = next_free_ip(state, server_params(peer_iface(peer)[1]))
     state["peers"][pub] = peer
     return pub, peer
+
+
+def dns_i1(seed):
+    """Маскирующий пакет I1 в форме ответа DNS (как в amneziawg-installer).
+
+    Случайный I1 часть мобильных сетей отбрасывает вместе с рукопожатием,
+    а пакет осмысленной формы пропускает. Для одного конфига он всегда одинаковый.
+    """
+    r = random.Random(seed)
+    label = r.randint(20, 62)
+    answers = r.randint(1, 2)
+    head = f"85800001{answers:04x}00000000{label:02x}"
+    tail = "0463646e730669636c6f756403636f6d0000010001"  # .cdns.icloud.com, тип A, класс IN
+    ttl = r.choice(["0000003c", "0000012c", "00000384", "00000e10"])
+    for _ in range(answers):
+        o1 = r.randint(1, 221)
+        o1 = {10: 222, 127: 223}.get(o1, o1)
+        tail += f"c00c00010001{ttl}0004{o1:02x}{r.randint(0, 255):02x}{r.randint(0, 255):02x}{r.randint(1, 254):02x}"
+    return f"<r 2><b 0x{head}><rc {label}><b 0x{tail}>"
+
+
+def obfs_params(peer, params):
+    """Параметры маскировки для клиента: серверные, с поправкой под оператора конфига."""
+    params = {k: params[k] for k in OBFS_KEYS if k in params}
+    prof = PROFILES.get(peer.get("op"))
+    if prof:
+        params.update(Jc=str(prof["Jc"]), Jmin=str(prof["Jmin"]), Jmax=str(prof["Jmax"]))
+        for k in ("I1", "I2", "I3", "I4", "I5"):
+            params.pop(k, None)
+        if prof["I1"]:
+            params["I1"] = dns_i1(peer["priv"])
+    return params
 
 
 def client_conf(peer, params, host):
@@ -418,7 +475,7 @@ def client_conf(peer, params, host):
         f"DNS = {CLIENT_DNS}",
         "MTU = 1280",
     ]
-    lines += [f"{k} = {params[k]}" for k in OBFS_KEYS if k in params]
+    lines += [f"{k} = {v}" for k, v in obfs_params(peer, params).items()]
     lines += [
         "",
         "[Peer]",
@@ -694,6 +751,28 @@ async def start_trial(query, ctx):
             pass
 
 
+def op_picker(prefix, suffix=""):
+    """Выбор оператора; кнопка шлёт «prefix:код[suffix]»."""
+    codes = list(OPERATORS)
+    rows = [[InlineKeyboardButton(OPERATORS[c], callback_data=f"{prefix}:{c}{suffix}") for c in codes[i:i + 2]]
+            for i in range(0, len(codes), 2)]
+    return InlineKeyboardMarkup(rows)
+
+
+OP_QUESTION = ("📶 Какой у вас мобильный оператор?\n\n"
+               "Конфиг подстроится под его сеть: так меньше обрывов и быстрее подключение. "
+               "Дома по Wi-Fi он тоже будет работать. Если мобильным интернетом не пользуетесь — "
+               "выберите «Только Wi-Fi».")
+
+
+async def remember_op(user, op):
+    async with lock:
+        state = load_state()
+        get_user(state, user)["op"] = op
+        save_state(state)
+    return state
+
+
 def _buy_screen(guide, target, price, back):
     """Экран «инструкция + купить»: подробные шаги для выбранного устройства и кнопка оплаты."""
     return (GUIDES[guide], InlineKeyboardMarkup([
@@ -817,7 +896,12 @@ async def list_configs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         row = [InlineKeyboardButton("⬇️ Скачать", callback_data=f"get:{pub}")]
         if not is_admin(p["user"]):
             row.append(InlineKeyboardButton(f"🔄 Продлить — {price_for(state, pub)} ₽", callback_data=f"renew:{pub}"))
-        buttons = InlineKeyboardMarkup([row, [InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}")]])
+        rows = [row]
+        if p.get("kind") not in ROUTER_KINDS:
+            rows.append([InlineKeyboardButton(f"📶 Оператор: {OPERATORS.get(p.get('op'), 'не выбран')}",
+                                              callback_data=f"opc:{pub}")])
+        rows.append([InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}")])
+        buttons = InlineKeyboardMarkup(rows)
         icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
         await update.message.reply_text(f"{icon} {p['name']} — {peer_status(p)}", reply_markup=buttons)
 
@@ -855,7 +939,40 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "trial":
-        await start_trial(query, ctx)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(OP_QUESTION, reply_markup=op_picker("opt"))
+        return
+
+    if action in ("opt", "opb") and arg in OPERATORS:
+        state = await remember_op(query.from_user, arg)
+        if action == "opt":
+            await start_trial(query, ctx)
+            return
+        if not is_approved(state, uid):
+            await query.edit_message_text(closed_text(state, uid))
+            return
+        await query.edit_message_text(f"📶 Оператор: {OPERATORS[arg]}.")
+        await ask_payment(query.message, ctx, NEW, state)
+        return
+
+    if action == "ops":
+        op, _, pub = arg.partition(":")
+        async with lock:
+            state = load_state()
+            peer = state["peers"].get(pub)
+            if not peer or peer["user"] != str(uid) or op not in OPERATORS:
+                await query.edit_message_text("Конфиг не найден.")
+                return
+            peer["op"] = op
+            get_user(state, query.from_user)["op"] = op
+            save_state(state)
+        await query.edit_message_text(f"📶 {peer['name']}: оператор {OPERATORS[op]}.")
+        if not peer_active(peer):
+            await query.message.reply_text("Срок конфига закончился: продлите его, и он заработает с новыми настройками.")
+            return
+        await query.message.reply_text("Вот обновлённый файл. Удалите старый туннель в приложении и добавьте этот "
+                                       "(ключи те же, платить заново не нужно).")
+        await send_peer(query.message.chat_id, peer)
         return
 
     if action == "help":
@@ -868,6 +985,9 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(closed_text(state, uid))
             return
         await query.edit_message_reply_markup(reply_markup=None)  # инструкция остаётся на экране
+        if arg == NEW:
+            await query.message.reply_text(OP_QUESTION, reply_markup=op_picker("opb"))
+            return
         await ask_payment(query.message, ctx, arg, state)
         return
 
@@ -887,6 +1007,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if action == "renew":
         await ask_payment(query.message, ctx, arg, state)
+    elif action == "opc":
+        await query.message.reply_text(f"{peer['name']}: {OP_QUESTION}", reply_markup=op_picker("ops", f":{arg}"))
     elif action == "get":
         if not peer_active(peer):
             await query.message.reply_text(f"{peer['name']}: срок закончился, сначала продлите его.")
@@ -1051,7 +1173,8 @@ async def admin_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     peers = sorted(state["peers"].items(), key=lambda kv: -kv[1]["until"])
     for pub, p in peers[:40]:
         await update.message.reply_text(
-            f"{user_name(state, p['user'])} · ID {p['user']}\n{p['name']} — {peer_status(p)}",
+            f"{user_name(state, p['user'])} · ID {p['user']}\n{p['name']} — {peer_status(p)}"
+            + (f"\n📶 {OPERATORS[p['op']]}" if p.get("op") in OPERATORS else ""),
             reply_markup=None if is_admin(p["user"]) else peer_buttons(pub))
     if len(peers) > 40:
         await update.message.reply_text(f"Показаны первые 40 конфигов из {len(peers)}.")
