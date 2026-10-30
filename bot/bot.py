@@ -54,7 +54,7 @@ RELAY_HOST = os.environ.get("RELAY_HOST", "")
 SEND_DIRECT = os.environ.get("SEND_DIRECT", "0") == "1"
 CLIENT_DNS = os.environ.get("CLIENT_DNS", "1.1.1.1, 1.0.0.1")
 MAX_PEERS = int(os.environ.get("MAX_PEERS", "5"))
-PRICE = int(os.environ.get("PRICE", "200"))
+PRICE = int(os.environ.get("PRICE", "100"))
 ROUTER_PRICE = int(os.environ.get("ROUTER_PRICE", "500"))
 # Бесплатный пробный период для нового клиента (один раз на аккаунт); 0 — выключить.
 TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "3"))
