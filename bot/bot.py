@@ -674,7 +674,11 @@ async def refresh_split():
 # Адреса, которые бот узнаёт сам и добавляет в режимы (новые файлы конфигов их уже содержат).
 # Игровые серверы Supercell — по DNS раз в 6 часов.
 GAME_HOSTS = ("game.brawlstarsgame.com", "game.clashroyaleapp.com", "gamea.clashofclans.com",
-              "game.clashofclans.com", "game.haydaygame.com", "game.boombeachgame.com")
+              "game.clashofclans.com", "game.haydaygame.com", "game.boombeachgame.com",
+              # вход (Supercell ID), магазин и загрузка обновлений — точечно, по адресам, а не целыми сетями CDN
+              "id.supercell.com", "security.supercell.com", "accounts.supercell.com", "store.supercell.com",
+              "game-assets.brawlstarsgame.com", "game-assets.clashroyaleapp.com",
+              "game-assets.clashofclans.com", "game-assets.haydaygame.com", "game-assets.boombeachgame.com")
 GAME_IPS = set()
 # TikTok: сети TikTok и ByteDance (RIPEstat, раз в сутки) и адреса его серверов по DNS.
 # Сетей у них много, берём самые крупные — общий список должен остаться около ста.
