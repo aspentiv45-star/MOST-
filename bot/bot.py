@@ -78,6 +78,13 @@ FULL_TUNNEL = "0.0.0.0/0, ::/0"
 # Режим «только заблокированное»: через VPN идут лишь эти сервисы, всё остальное (российские
 # сайты, банки) — напрямую с устройства. Около 100 сетей: больший список приложения Amnezia
 # обрабатывают плохо (зависания на Windows, обрыв правил на Linux, тормоза интерфейса).
+# Режимы конфига. full — весь трафик через вход в России; smart — только заблокированное;
+# game — только игры и напрямую на основной сервер, без входа в России: меньше пинг.
+MODES = {"full": "🌍 Весь трафик", "smart": "📱 Только заблокированное", "game": "🎮 Игровой"}
+# Порт основного сервера для игрового режима: 443 принимает alt-port.sh (как QUIC его режут реже).
+GAME_PORT = os.environ.get("GAME_PORT", "443")
+GAME_NETS = ("5.180.72.0/22", "2a09:fa40::/29")  # собственная сеть Supercell; адреса серверов ещё и из DNS (GAME_HOSTS)
+
 # Устройства и какой режим им подходит. На телефонах приложение AmneziaWG понимает список сетей,
 # а на iPhone иначе российские приложения не пустить мимо VPN. AmneziaVPN на компьютере
 # список игнорирует (macOS) или зависает на нём (Windows) — там весь трафик.
@@ -101,9 +108,7 @@ SMART_NETS = (
     "52.223.192.0/18", "99.181.64.0/18", "185.42.204.0/22",
     # Reddit и другие сайты на Fastly
     "151.101.0.0/16", "199.232.0.0/16",
-    # Игры Supercell (Brawl Stars, Clash Royale, Clash of Clans): их собственная сеть;
-    # адреса игровых серверов дополнительно узнаём через DNS (GAME_HOSTS)
-    "5.180.72.0/22",
+    *GAME_NETS,  # игры Supercell
     # DNS из конфига — чтобы адреса заблокированных сайтов не подменяли
     "1.1.1.1/32", "1.0.0.1/32",
     # IPv6 этих сервисов: у сервера IPv6 нет, так приложения сразу переходят на IPv4
@@ -181,6 +186,17 @@ HELP_TEXT = (
 )
 
 # Подробные инструкции для клиентов — открываются кнопками из «❓ Как подключить».
+MODE_TEXT = (
+    "🌍 Весь трафик — через VPN идёт всё, российские сайты через наш российский сервер. "
+    "Работает в любом приложении, в том числе в AmneziaVPN.\n\n"
+    "📱 Только заблокированное — через VPN идут Telegram, YouTube, соцсети и игры Supercell, "
+    "а банки, Госуслуги, российские приложения и остальные игры — напрямую, быстро. Нужно приложение AmneziaWG.\n\n"
+    "🎮 Игровой — через VPN только игры Supercell (Brawl Stars, Clash Royale, Clash of Clans, Hay Day, "
+    "Boom Beach), и подключение идёт напрямую в Нидерланды, минуя российский сервер: пинг ниже. "
+    "Telegram, YouTube и соцсети через него не идут. У части операторов прямое подключение не проходит — "
+    "тогда выберите «Только заблокированное». Нужно приложение AmneziaWG."
+)
+
 # Список для клиентов: что идёт через VPN в режиме «только заблокированное».
 # Сворачиваемая цитата Telegram — показывается свёрнутой, по нажатию разворачивается (parse_mode=HTML).
 SMART_LIST = (
@@ -268,22 +284,13 @@ GUIDES = {
     ),
     "mode": (
         "🔀 Режимы VPN\n\n"
-        "У каждого конфига два режима:\n\n"
-        "📱 Только заблокированное (на телефонах по умолчанию)\n"
-        "Через VPN идут только Telegram, YouTube, Google, Instagram, WhatsApp, Facebook, X, Discord, "
-        "Twitch, Reddit. Всё остальное — банки, Госуслуги, маркетплейсы, российские приложения и игры — "
-        "работает напрямую: быстро, с вашим обычным IP, VPN выключать не нужно.\n"
-        "Нужно приложение AmneziaWG (в AmneziaVPN режим может не сработать).\n\n"
-        "🌍 Весь трафик (на компьютере по умолчанию)\n"
-        "Через VPN идёт всё. Подходит, если нужен заблокированный сайт, которого нет в списке выше, "
-        "или если у вас AmneziaVPN. Российские сайты при этом тоже работают, но чуть медленнее.\n\n"
-        "Как поменять:\n"
-        f"1. «{BTN_LIST}» → под нужным конфигом «🔀 Режим» → «✅ Да, переключить».\n"
+        "У каждого конфига три режима:\n\n"
+        + MODE_TEXT +
+        "\n\nКак поменять:\n"
+        f"1. «{BTN_LIST}» → под нужным конфигом «🔀 Режим» → выберите режим.\n"
         "2. Бот пришлёт новый файл.\n"
         "3. В приложении удалите старый туннель и добавьте новый файл.\n"
-        "Ключи и срок подписки те же, платить заново не нужно. Вернуть режим можно так же.\n\n"
-        "Какой выбрать? Пользуетесь в основном Telegram, YouTube, соцсетями — «только заблокированное». "
-        "Какой-то сайт не открывается — переключитесь на «весь трафик».\n\n"
+        "Ключи и срок подписки те же, платить заново не нужно.\n\n"
         + SMART_LIST
     ),
     "trouble": (
@@ -578,7 +585,7 @@ def obfs_params(peer, params):
     return params
 
 
-def client_conf(peer, params, host):
+def client_conf(peer, params, host, port=None):
     lines = [
         "[Interface]",
         f"PrivateKey = {peer['priv']}",
@@ -591,9 +598,10 @@ def client_conf(peer, params, host):
         "",
         "[Peer]",
         f"PublicKey = {run(['awg', 'pubkey'], params['PrivateKey'] + chr(10))}",
-        f"Endpoint = {host}:{params['ListenPort']}",
+        f"Endpoint = {host}:{port or params['ListenPort']}",
         f"AllowedIPs = {router_allowed_ips(host) if peer.get('kind') in ROUTER_KINDS else
-                        smart_allowed_ips() if peer.get('mode') == 'smart' else allowed_ips()}",
+                        smart_allowed_ips() if mode_of(peer) == 'smart' else
+                        smart_allowed_ips(GAME_NETS) if mode_of(peer) == 'game' else allowed_ips()}",
         "PersistentKeepalive = 25",
     ]
     return "\n".join(lines) + "\n"
@@ -666,8 +674,12 @@ async def games_loop():
         await asyncio.sleep(6 * 3600)
 
 
-def smart_allowed_ips():
-    nets = [ipaddress.ip_network(n) for n in SMART_NETS]
+def mode_of(peer):
+    return peer.get("mode") if peer.get("mode") in MODES else "full"
+
+
+def smart_allowed_ips(nets=SMART_NETS):
+    nets = [ipaddress.ip_network(n) for n in nets]
     v4 = [n for n in nets if n.version == 4] + [ipaddress.ip_network(f"{ip}/32") for ip in GAME_IPS]
     v6 = [n for n in nets if n.version == 6]
     return ", ".join(map(str, [*ipaddress.collapse_addresses(v4), *ipaddress.collapse_addresses(v6)]))
@@ -703,14 +715,17 @@ def file_base(peer):
 async def send_peer(chat_id, peer):
     params = server_params(peer_iface(peer)[1])
     # Имя файла становится именем туннеля; на iOS оно не длиннее 15 символов.
-    if RELAY_HOST:
-        variants = [(f"{file_base(peer)}.conf", RELAY_HOST)]
+    if mode_of(peer) == "game" and peer.get("kind") not in ROUTER_KINDS:
+        # Игровой режим — напрямую на основной сервер, минуя вход в России.
+        variants = [(f"{file_base(peer)}.conf", ENDPOINT_HOST, GAME_PORT)]
+    elif RELAY_HOST:
+        variants = [(f"{file_base(peer)}.conf", RELAY_HOST, None)]
         if SEND_DIRECT:
-            variants.append((f"{file_base(peer)}-nl.conf", ENDPOINT_HOST))
+            variants.append((f"{file_base(peer)}-nl.conf", ENDPOINT_HOST, None))
     else:
-        variants = [(f"{file_base(peer)}.conf", ENDPOINT_HOST)]
-    for filename, host in variants:
-        text = client_conf(peer, params, host)
+        variants = [(f"{file_base(peer)}.conf", ENDPOINT_HOST, None)]
+    for filename, host, port in variants:
+        text = client_conf(peer, params, host, port)
         await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()), filename=filename,
                                      caption=f"{filename} — {peer_status(peer)}")
         if peer.get("kind") in ROUTER_KINDS:
@@ -1068,8 +1083,7 @@ async def list_configs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             rows.append([InlineKeyboardButton(f"📶 Оператор: {OPERATORS.get(p.get('op'), 'не выбран')}",
                                               callback_data=f"opc:{pub}")])
         if p.get("kind") not in ROUTER_KINDS:
-            rows.append([InlineKeyboardButton("🔀 Режим: " + ("только заблокированное" if p.get("mode") == "smart"
-                                                             else "весь трафик"), callback_data=f"mode:{pub}")])
+            rows.append([InlineKeyboardButton(f"🔀 Режим: {MODES[mode_of(p)]}", callback_data=f"mode:{pub}")])
         rows.append([InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}")])
         buttons = InlineKeyboardMarkup(rows)
         icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
@@ -1131,6 +1145,27 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_text(f"📶 Оператор: {OPERATORS[arg]}.")
         await ask_payment(query.message, ctx, NEW, state)
+        return
+
+    if action == "mset":
+        mode, _, pub = arg.partition(":")
+        async with lock:
+            state = load_state()
+            p = state["peers"].get(pub)
+            if not p or p["user"] != str(uid) or mode not in MODES:
+                await query.edit_message_text("Конфиг не найден.")
+                return
+            if mode == "full":
+                p.pop("mode", None)
+            else:
+                p["mode"] = mode
+            save_state(state)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(f"🔀 {title(p)}: режим «{MODES[mode]}».")
+        if peer_active(p):
+            await query.message.reply_text("Вот новый файл. Удалите старый туннель в приложении и добавьте этот "
+                                           "(ключи и срок те же).")
+            await send_peer(query.message.chat_id, p)
         return
 
     if action == "ops":
@@ -1195,40 +1230,13 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif action == "png":
         await query.message.reply_text(await check_peer(arg, peer))
     elif action == "mode":
-        smart = peer.get("mode") != "smart"
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Да, переключить", callback_data=f"modeyes:{arg}"),
-            InlineKeyboardButton("Отмена", callback_data=f"modeno:{arg}")]]))
+        cur = mode_of(peer)
         await query.message.reply_text(
-            f"🔀 {html.escape(title(peer))}: переключить на «{'только заблокированное' if smart else 'весь трафик'}»?\n\n"
-            + ("Через VPN пойдут только Telegram, YouTube и Google, Instagram, WhatsApp, Facebook, X, Discord, "
-               "Twitch, Reddit. Всё остальное — российские сайты, банки, Госуслуги, игры — напрямую, "
-               "быстро и с вашим обычным IP.\n\n"
-               "Минус: заблокированный сайт не из этого списка без VPN не откроется — тогда вернитесь "
-               "на «весь трафик».\n\n"
-               "⚠️ Работает в приложении AmneziaWG. В AmneziaVPN (особенно на компьютере) режим может "
-               "не примениться — тогда через VPN пойдёт всё, как раньше."
-               if smart else
-               "Через VPN снова пойдёт весь трафик, российские сайты — через наш российский сервер.")
-            + f"\n\nПодробнее: «{BTN_HELP}» → «🔀 Режимы».\n\n" + SMART_LIST, parse_mode="HTML")
-    elif action in ("modeyes", "modeno"):
-        if action == "modeyes":
-            async with lock:
-                state = load_state()
-                p = state["peers"].get(arg)
-                if p:
-                    if p.get("mode") == "smart":
-                        p.pop("mode")
-                    else:
-                        p["mode"] = "smart"
-                    save_state(state)
-            peer = p or peer
-        await query.edit_message_text(f"{'📱'} {title(peer)} — {peer_status(peer)}\n"
-                                      f"🔀 Режим: {'только заблокированное' if peer.get('mode') == 'smart' else 'весь трафик'}")
-        if action == "modeyes" and peer_active(peer):
-            await query.message.reply_text("Вот новый файл. Удалите старый туннель в приложении и добавьте этот "
-                                           "(ключи и срок те же).")
-            await send_peer(query.message.chat_id, peer)
+            f"🔀 {html.escape(title(peer))}: сейчас «{MODES[cur]}». Какой режим нужен?\n\n" + MODE_TEXT
+            + f"\n\nПодробнее: «{BTN_HELP}» → «🔀 Режимы».\n\n" + SMART_LIST,
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(("✅ " if m == cur else "") + n, callback_data=f"mset:{m}:{arg}")]
+                 for m, n in MODES.items()]))
     elif action == "opc":
         await query.message.reply_text(f"{title(peer)}: {OP_QUESTION}", reply_markup=op_picker("ops", f":{arg}"))
     elif action == "get":
