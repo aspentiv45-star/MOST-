@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo
 
 import qrcode
 import split
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
+from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -1107,11 +1107,36 @@ def access_buttons(uid):
     ]])
 
 
-def peer_buttons(pub):
+def peer_buttons(pub, uid):
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"➕ {DAYS} дней", callback_data=f"give:{pub}"),
+        InlineKeyboardButton("➕ Продлить", callback_data=f"ext:{pub}"),
         InlineKeyboardButton("⛔️ Отключить", callback_data=f"take:{pub}"),
-    ], [InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}")]])
+    ], [
+        InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}"),
+        InlineKeyboardButton(f"📋 ID {uid}", copy_text=CopyTextButton(str(uid))),
+    ]])
+
+
+def extend_buttons(pub):
+    """На сколько продлить: быстрые варианты или своё число дней."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"+{d} дн.", callback_data=f"exd:{d}:{pub}") for d in (7, 30, 90, 365)],
+        [InlineKeyboardButton("✏️ Своё число дней", callback_data=f"exc:{pub}"),
+         InlineKeyboardButton("⬅️ Назад", callback_data=f"exb:{pub}")],
+    ])
+
+
+def peer_line(state, pub):
+    peer = state["peers"][pub]
+    return f"{user_name(state, peer['user'])} · ID {peer['user']}\n{title(peer)} — {peer_status(peer)}"
+
+
+async def extend_peer(pub, days):
+    """Продление конфига администратором на любое число дней (клиенту приходит уведомление)."""
+    peer = load_state()["peers"].get(pub)
+    if not peer:
+        return "Конфиг удалён."
+    return await grant(int(peer["user"]), pub, days, paid=False)
 
 
 async def check_peer(pub, peer):
@@ -1245,7 +1270,7 @@ async def admin_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"{user_name(state, p['user'])} · ID {p['user']}\n{title(p)} — {peer_status(p)}"
             + (f"\n📶 {OPERATORS[p['op']]}" if p.get("op") in OPERATORS else ""),
-            reply_markup=None if is_admin(p["user"]) else peer_buttons(pub))
+            reply_markup=None if is_admin(p["user"]) else peer_buttons(pub, p["user"]))
     if len(peers) > 40:
         await update.message.reply_text(f"Показаны первые 40 конфигов из {len(peers)}.")
 
@@ -1281,6 +1306,18 @@ async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if waiting == "resend":
         await resend_confirm(update, ctx)
+        return
+    if waiting and waiting.startswith("extend:"):
+        text = update.message.text.strip()
+        if not text.isdigit() or not 1 <= int(text) <= 3650:
+            ctx.user_data["await"] = waiting
+            await update.message.reply_text("Нужно число дней от 1 до 3650, например 45.")
+            return
+        pub = waiting.partition(":")[2]
+        result = await extend_peer(pub, int(text))
+        state = load_state()
+        markup = peer_buttons(pub, state["peers"][pub]["user"]) if pub in state["peers"] else None
+        await update.message.reply_text(result, reply_markup=markup)
         return
     if waiting != "give":
         await update.message.reply_text("Выберите действие на кнопках ниже.", reply_markup=ADMIN_KEYBOARD)
@@ -1371,6 +1408,30 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"{user_name(load_state(), peer['user'])}\n" + await check_peer(arg, peer))
         return
 
+    if action in ("ext", "exd", "exc", "exb"):
+        days, _, pub = arg.partition(":") if action == "exd" else ("", "", arg)
+        state = load_state()
+        peer = state["peers"].get(pub)
+        if not peer:
+            await query.answer("Конфиг удалён.")
+            return
+        if action == "ext":
+            await query.answer()
+            await query.edit_message_text(f"{peer_line(state, pub)}\n\nНа сколько продлить?",
+                                          reply_markup=extend_buttons(pub))
+        elif action == "exc":
+            await query.answer()
+            ctx.user_data["await"] = f"extend:{pub}"
+            await query.message.reply_text(f"На сколько дней продлить {title(peer)}? Пришлите число, например 45.")
+        elif action == "exb":
+            await query.answer()
+            await query.edit_message_text(peer_line(state, pub), reply_markup=peer_buttons(pub, peer["user"]))
+        else:
+            result = await extend_peer(pub, int(days))
+            await query.answer(result.split("\n")[0][:190])
+            await query.edit_message_text(peer_line(load_state(), pub), reply_markup=peer_buttons(pub, peer["user"]))
+        return
+
     if action in ("give", "take"):
         state = load_state()
         peer = state["peers"].get(arg)
@@ -1389,9 +1450,7 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
         state = load_state()
         peer = state["peers"].get(arg)
-        await query.edit_message_text(
-            f"{user_name(state, peer['user'])} · ID {peer['user']}\n{title(peer)} — {peer_status(peer)}",
-            reply_markup=peer_buttons(arg))
+        await query.edit_message_text(peer_line(state, arg), reply_markup=peer_buttons(arg, peer["user"]))
         return
 
     async with lock:
