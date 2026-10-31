@@ -896,7 +896,7 @@ async def list_configs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         row = [InlineKeyboardButton("⬇️ Скачать", callback_data=f"get:{pub}")]
         if not is_admin(p["user"]):
             row.append(InlineKeyboardButton(f"🔄 Продлить — {price_for(state, pub)} ₽", callback_data=f"renew:{pub}"))
-        rows = [row]
+        rows = [row, [InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}")]]
         if p.get("kind") not in ROUTER_KINDS:
             rows.append([InlineKeyboardButton(f"📶 Оператор: {OPERATORS.get(p.get('op'), 'не выбран')}",
                                               callback_data=f"opc:{pub}")])
@@ -1007,6 +1007,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if action == "renew":
         await ask_payment(query.message, ctx, arg, state)
+    elif action == "png":
+        await query.message.reply_text(await check_peer(arg, peer))
     elif action == "opc":
         await query.message.reply_text(f"{peer['name']}: {OP_QUESTION}", reply_markup=op_picker("ops", f":{arg}"))
     elif action == "get":
@@ -1072,7 +1074,38 @@ def peer_buttons(pub):
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(f"➕ {DAYS} дней", callback_data=f"give:{pub}"),
         InlineKeyboardButton("⛔️ Отключить", callback_data=f"take:{pub}"),
-    ]])
+    ], [InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}")]])
+
+
+async def check_peer(pub, peer):
+    """Проверка связи с конфигом: когда было рукопожатие, трафик и пинг от сервера до устройства."""
+    iface = peer_iface(peer)[0]
+    handshake = rx = tx = 0
+    for line in run(["awg", "show", iface, "dump"]).splitlines()[1:]:
+        f = line.split("\t")
+        if f[0] == pub:
+            handshake, rx, tx = int(f[4]), int(f[5]), int(f[6])
+    head = f"🏓 {peer['name']}\n"
+    if not peer_active(peer):
+        return head + "⚪️ Срок закончился — конфиг отключён на сервере."
+    # Рукопожатие повторяется каждые 2 минуты, пока туннель включён.
+    if not handshake or time.time() - handshake > 180:
+        when = "ни разу" if not handshake else f"последний раз {fmt_date(handshake)}"
+        return head + (f"🔴 Сейчас не подключён (подключался {when}).\n\n"
+                       "Включите VPN в приложении и нажмите «🏓 Пинг» ещё раз.")
+    proc = await asyncio.create_subprocess_exec(
+        "ping", "-c", "5", "-i", "0.3", "-W", "2", "-q", peer["ip"],
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    out = (await proc.communicate())[0].decode()
+    loss = next((w for w in out.replace(",", " ").split() if w.endswith("%")), "?")
+    rtt = next((line.split("=")[1].split("/")[1] for line in out.splitlines() if "min/avg" in line), None)
+    text = head + f"🟢 Подключён, трафик: ↓{tx / 2**20:.0f} МБ ↑{rx / 2**20:.0f} МБ\n"
+    if rtt is None:
+        return text + ("Пинг: устройство не ответило. Так бывает на iPhone и при экономии батареи — "
+                       "если сайты открываются, всё в порядке.")
+    ms = round(float(rtt))
+    grade = "отлично" if ms < 80 else "нормально" if ms < 150 else "высокий — возможны лаги в играх и звонках"
+    return text + f"Пинг до сервера: {ms} мс ({grade}), потери: {loss}"
 
 
 async def grant(uid, target, days, paid=True):
@@ -1292,6 +1325,13 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"Текст рассылки потерялся — нажмите «{ABTN_RESEND}» ещё раз.")
         else:
             await query.edit_message_text("Рассылка отменена.")
+        return
+
+    if action == "png":
+        peer = load_state()["peers"].get(arg)
+        await query.answer()
+        if peer:
+            await query.message.reply_text(f"{user_name(load_state(), peer['user'])}\n" + await check_peer(arg, peer))
         return
 
     if action in ("give", "take"):
