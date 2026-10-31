@@ -1166,7 +1166,11 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 p["mode"] = mode
             save_state(state)
         await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text(f"🔀 {title(p)}: режим «{MODES[mode]}».")
+        await query.message.reply_text(
+            f"🔀 {title(p)}: режим «{MODES[mode]}»."
+            + ("\n\n⚠️ Это режим только для игр: Telegram, YouTube, Instagram и другие заблокированные "
+               "сайты и приложения в нём не откроются. Для них переключитесь на «🌍 Весь трафик» или "
+               "«📱 Только заблокированное»." if mode == "game" else ""))
         if peer_active(p):
             await query.message.reply_text("Вот новый файл. Удалите старый туннель в приложении и добавьте этот "
                                            "(ключи и срок те же).")
