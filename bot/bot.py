@@ -197,6 +197,17 @@ HELP_TEXT = (
 )
 
 # Подробные инструкции для клиентов — открываются кнопками из «❓ Как подключить».
+# На компьютере игрового режима нет: игры с античитом (Easy Anti-Cheat и др.) рвут соединение, когда
+# часть трафика игры идёт через VPN, а часть напрямую, — у игрока оказывается два разных IP.
+PC_MODE_NOTE = (
+    "🌍 Весь трафик — через VPN идёт всё. Это режим и для игр на компьютере: игры с античитом "
+    "(Easy Anti-Cheat и др.), Discord, Telegram, сайты — всё работает стабильно, с одного IP. "
+    "Если пользуетесь zapret или другим обходом блокировок — на время VPN его лучше выключить.\n\n"
+    "📱 Только заблокированное — через VPN идут Telegram, Discord, YouTube, соцсети, а остальное напрямую. "
+    "Для игр с античитом не подходит. Нужно приложение AmneziaWG (в AmneziaVPN на компьютере режим может "
+    "не применяться)."
+)
+
 MODE_TEXT = (
     "Для сайтов и приложений — первые два режима, для игр — третий.\n\n"
     "🌍 Весь трафик — для сайтов и приложений. Через VPN идёт всё: и заблокированное, и российское "
@@ -205,9 +216,11 @@ MODE_TEXT = (
     "YouTube, Instagram, WhatsApp, X, TikTok и игры Supercell. А российские приложения и сайты — банки, Госуслуги, "
     "Ozon, Wildberries, VK — открываются напрямую с телефона, как без VPN: быстро и без ошибок. "
     "Нужно приложение AmneziaWG.\n\n"
-    "🎮 Игровой — только для игр: Brawl Stars, Clash Royale, Clash of Clans, Hay Day, Boom Beach. "
+    "🎮 Игровой (для телефонов) — только для игр: Brawl Stars, Clash Royale, Clash of Clans, Hay Day, "
+    "Boom Beach, Roblox. "
     "Через VPN идут игровые серверы, вход в Supercell ID, магазин и загрузка обновлений игр, а также "
-    "серверы Cloudflare — через них работают многие другие игры. "
+    "серверы Cloudflare — через них работают многие другие игры. На компьютере для игр используйте "
+    "«Весь трафик»: игры с античитом в игровом режиме отключаются. "
     "Подключение идёт напрямую в Нидерланды, поэтому пинг самый низкий. Это режим НЕ для сайтов и приложений: "
     "Telegram, YouTube, Instagram и другие заблокированные сайты в нём не откроются. Закончили играть — "
     "переключитесь обратно на «Весь трафик» или «Только заблокированное». Если игра не подключается — "
@@ -701,6 +714,10 @@ TIKTOK_HOSTS = ("www.tiktok.com", "m.tiktok.com", "api.tiktokv.com", "api16-norm
                 "api16-normal-c-alisg.tiktokv.com", "api22-normal-c-alisg.tiktokv.com",
                 "api16-normal-useast5.tiktokv.us", "log.tiktokv.com", "mon.tiktokv.com")
 TIKTOK_NETS = set(TIKTOK_SEED)
+# Roblox (в России заблокирован) — его собственные сети, только для игрового режима на телефонах.
+ROBLOX_ASNS = (22697,)
+ROBLOX_SEED = ("128.116.0.0/17",)
+ROBLOX_NETS = set(ROBLOX_SEED)
 TIKTOK_IPS = set()
 
 
@@ -740,6 +757,19 @@ async def dynamic_loop():
                 TIKTOK_NETS.update(TIKTOK_SEED)
                 TIKTOK_NETS.update(str(n) for n in v4 + v6)
                 log.info("TikTok: взято %d сетей из %d", len(v4) + len(v6), len(nets))
+            nets = []
+            for asn in ROBLOX_ASNS:
+                try:
+                    nets += await asyncio.to_thread(split.fetch_asn_prefixes, asn)
+                except Exception as e:
+                    log.warning("сети Roblox AS%s не скачались: %s", asn, e)
+            if nets:
+                v4 = sorted((n for n in nets if n.version == 4), key=lambda n: n.prefixlen)[:10]
+                v6 = sorted((n for n in nets if n.version == 6), key=lambda n: n.prefixlen)[:2]
+                ROBLOX_NETS.clear()
+                ROBLOX_NETS.update(ROBLOX_SEED)
+                ROBLOX_NETS.update(str(n) for n in v4 + v6)
+                log.info("Roblox: взято %d сетей из %d", len(v4) + len(v6), len(nets))
         rounds += 1
         await asyncio.sleep(6 * 3600)
 
@@ -750,7 +780,7 @@ def mode_of(peer):
 
 def smart_allowed_ips(game_only=False):
     """Список сетей для «только заблокированное» (или только игры для игрового режима)."""
-    nets = [*GAME_NETS, *CLOUDFLARE_NETS] if game_only else [*SMART_NETS, *TIKTOK_NETS]
+    nets = [*GAME_NETS, *CLOUDFLARE_NETS, *ROBLOX_NETS] if game_only else [*SMART_NETS, *TIKTOK_NETS]
     ips = GAME_IPS if game_only else GAME_IPS | TIKTOK_IPS
     nets = [ipaddress.ip_network(n) for n in nets]
     v4 = [n for n in nets if n.version == 4] + [ipaddress.ip_network(f"{ip}/32") for ip in ips]
@@ -1311,12 +1341,15 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(await check_peer(arg, peer))
     elif action == "mode":
         cur = mode_of(peer)
+        pc = peer.get("os") == "pc"
+        choices = {m: n for m, n in MODES.items() if not (pc and m == "game")}
         await query.message.reply_text(
-            f"🔀 {html.escape(title(peer))}: сейчас «{MODES[cur]}». Какой режим нужен?\n\n" + MODE_TEXT
+            f"🔀 {html.escape(title(peer))}: сейчас «{MODES[cur]}». Какой режим нужен?\n\n"
+            + (PC_MODE_NOTE if pc else MODE_TEXT)
             + f"\n\nПодробнее: «{BTN_HELP}» → «🔀 Режимы».\n\n" + SMART_LIST,
             parse_mode="HTML", reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton(("✅ " if m == cur else "") + n, callback_data=f"mset:{m}:{arg}")]
-                 for m, n in MODES.items()]))
+                 for m, n in choices.items()]))
     elif action == "ads":
         async with lock:
             state = load_state()
