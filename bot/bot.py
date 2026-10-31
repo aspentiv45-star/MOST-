@@ -73,6 +73,34 @@ SPLIT_LIMIT = int(os.environ.get("SPLIT_LIMIT", "2000"))
 FORCE_FILE = os.environ.get("FORCE_FILE", "/etc/most/force_vpn.txt")
 FULL_TUNNEL = "0.0.0.0/0, ::/0"
 
+# Режим «только заблокированное»: через VPN идут лишь эти сервисы, всё остальное (российские
+# сайты, банки) — напрямую с устройства. Около 100 сетей: больший список приложения Amnezia
+# обрабатывают плохо (зависания на Windows, обрыв правил на Linux, тормоза интерфейса).
+SMART_NETS = (
+    *split.FORCE_VPN,  # Telegram, Meta, основные сети Google, X
+    # Google и YouTube — остальные сети
+    "8.8.4.0/24", "8.8.8.0/24", "8.34.208.0/20", "8.35.192.0/20", "23.236.48.0/20", "23.251.128.0/19",
+    "64.15.112.0/20", "70.32.128.0/19", "172.253.0.0/16", "192.178.0.0/15", "199.36.154.0/23",
+    "199.36.156.0/24", "207.223.160.0/20", "208.65.152.0/22", "208.117.224.0/19",
+    # Meta — остальные сети
+    "31.13.96.0/19", "45.64.40.0/22", "74.119.76.0/22", "103.4.96.0/22", "204.15.20.0/22",
+    # X (Twitter) — остальные сети
+    "69.195.160.0/19", "192.133.76.0/22", "199.16.156.0/22", "199.59.148.0/22", "199.96.56.0/21",
+    "202.160.128.0/22", "209.237.192.0/19",
+    # Discord
+    "66.22.192.0/18", "138.128.136.0/21", "162.159.128.0/19", "162.245.208.0/21",
+    # Twitch
+    "52.223.192.0/18", "99.181.64.0/18", "185.42.204.0/22",
+    # Reddit и другие сайты на Fastly
+    "151.101.0.0/16", "199.232.0.0/16",
+    # DNS из конфига — чтобы адреса заблокированных сайтов не подменяли
+    "1.1.1.1/32", "1.0.0.1/32",
+    # IPv6 этих сервисов: у сервера IPv6 нет, так приложения сразу переходят на IPv4
+    "2001:4860::/32", "2404:6800::/32", "2607:f8b0::/32", "2a00:1450::/32", "2a03:2880::/32",
+    "2001:67c:4e8::/48", "2001:b28:f23c::/47", "2001:b28:f23f::/48", "2a0a:f280::/32",
+)
+
+
 DAY = 86400
 # Цель оплаты: новый конфиг для устройства или для роутера; иначе — публичный ключ продлеваемого конфига.
 NEW = "new"
@@ -500,7 +528,8 @@ def client_conf(peer, params, host):
         "[Peer]",
         f"PublicKey = {run(['awg', 'pubkey'], params['PrivateKey'] + chr(10))}",
         f"Endpoint = {host}:{params['ListenPort']}",
-        f"AllowedIPs = {router_allowed_ips(host) if peer.get('kind') in ROUTER_KINDS else allowed_ips()}",
+        f"AllowedIPs = {router_allowed_ips(host) if peer.get('kind') in ROUTER_KINDS else
+                        ', '.join(SMART_NETS) if peer.get('mode') == 'smart' else allowed_ips()}",
         "PersistentKeepalive = 25",
     ]
     return "\n".join(lines) + "\n"
@@ -593,7 +622,7 @@ async def send_peer(chat_id, peer):
         if peer.get("kind") in ROUTER_KINDS:
             continue
         # Конфиг с раздельным туннелем не помещается в QR-код — тогда только файл.
-        if len(text) < 2000:
+        if len(text) < 2900:
             png = io.BytesIO()
             qrcode.make(text).save(png, format="PNG")
             png.seek(0)
@@ -935,6 +964,8 @@ async def list_configs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if p.get("kind") not in ROUTER_KINDS:
             rows.append([InlineKeyboardButton(f"📶 Оператор: {OPERATORS.get(p.get('op'), 'не выбран')}",
                                               callback_data=f"opc:{pub}")])
+            rows.append([InlineKeyboardButton("🔀 Режим: " + ("только заблокированное" if p.get("mode") == "smart"
+                                                             else "весь трафик"), callback_data=f"mode:{pub}")])
         rows.append([InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}")])
         buttons = InlineKeyboardMarkup(rows)
         icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
@@ -1050,6 +1081,40 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "до 12 символов, например mama-phone.\n\nПередумали — напишите «отмена».")
     elif action == "png":
         await query.message.reply_text(await check_peer(arg, peer))
+    elif action == "mode":
+        smart = peer.get("mode") != "smart"
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Да, переключить", callback_data=f"modeyes:{arg}"),
+            InlineKeyboardButton("Отмена", callback_data=f"modeno:{arg}")]]))
+        await query.message.reply_text(
+            f"🔀 {title(peer)}: переключить на «{'только заблокированное' if smart else 'весь трафик'}»?\n\n"
+            + ("Через VPN пойдут только Telegram, YouTube и Google, Instagram, WhatsApp, Facebook, X, Discord, "
+               "Twitch, Reddit. Всё остальное — российские сайты, банки, Госуслуги, игры — напрямую, "
+               "быстро и с вашим обычным IP.\n\n"
+               "Минус: заблокированный сайт не из этого списка без VPN не откроется — тогда вернитесь "
+               "на «весь трафик».\n\n"
+               "⚠️ Работает в приложении AmneziaWG. В AmneziaVPN (особенно на компьютере) режим может "
+               "не примениться — тогда через VPN пойдёт всё, как раньше."
+               if smart else
+               "Через VPN снова пойдёт весь трафик, российские сайты — через наш российский сервер."))
+    elif action in ("modeyes", "modeno"):
+        if action == "modeyes":
+            async with lock:
+                state = load_state()
+                p = state["peers"].get(arg)
+                if p:
+                    if p.get("mode") == "smart":
+                        p.pop("mode")
+                    else:
+                        p["mode"] = "smart"
+                    save_state(state)
+            peer = p or peer
+        await query.edit_message_text(f"{'📱'} {title(peer)} — {peer_status(peer)}\n"
+                                      f"🔀 Режим: {'только заблокированное' if peer.get('mode') == 'smart' else 'весь трафик'}")
+        if action == "modeyes" and peer_active(peer):
+            await query.message.reply_text("Вот новый файл. Удалите старый туннель в приложении и добавьте этот "
+                                           "(ключи и срок те же).")
+            await send_peer(query.message.chat_id, peer)
     elif action == "opc":
         await query.message.reply_text(f"{title(peer)}: {OP_QUESTION}", reply_markup=op_picker("ops", f":{arg}"))
     elif action == "get":
