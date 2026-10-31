@@ -76,6 +76,12 @@ FULL_TUNNEL = "0.0.0.0/0, ::/0"
 # Режим «только заблокированное»: через VPN идут лишь эти сервисы, всё остальное (российские
 # сайты, банки) — напрямую с устройства. Около 100 сетей: больший список приложения Amnezia
 # обрабатывают плохо (зависания на Windows, обрыв правил на Linux, тормоза интерфейса).
+# Устройства и какой режим им подходит. На телефонах приложение AmneziaWG понимает список сетей,
+# а на iPhone иначе российские приложения не пустить мимо VPN. AmneziaVPN на компьютере
+# список игнорирует (macOS) или зависает на нём (Windows) — там весь трафик.
+OS_NAMES = {"ios": "🍏 iPhone / iPad", "android": "🤖 Android", "pc": "💻 Компьютер"}
+SMART_OS = ("ios", "android")
+
 SMART_NETS = (
     *split.FORCE_VPN,  # Telegram, Meta, основные сети Google, X
     # Google и YouTube — остальные сети
@@ -191,7 +197,11 @@ GUIDES = {
         "   Если AmneziaWG нет в списке: «Сохранить в Файлы», затем в AmneziaWG «+» → «Создать из файла или архива» → выберите vpn1.conf.\n"
         "4. iPhone спросит «Разрешить добавление конфигураций VPN?» → «Разрешить», подтвердите код или Face ID.\n"
         "5. Включите переключатель напротив vpn1.\n"
-        "6. Проверка: откройте ipinfo.io — должны быть Нидерланды (Netherlands).\n\n"
+        "6. Проверка: откройте YouTube и Telegram — должны работать.\n\n"
+        "📱 На телефоне через VPN идут только заблокированные сервисы (Telegram, YouTube, Instagram, "
+        "WhatsApp и др.), а российские приложения, банки и игры — напрямую, быстро и без отключения VPN. "
+        "Поэтому ipinfo.io и 2ip.ru покажут ваш обычный IP — это нормально. Нужен VPN для всего — "
+        f"«{BTN_LIST}» → «🔀 Режим». Используйте приложение AmneziaWG: в AmneziaVPN этот режим может не работать.\n\n"
         "❗ Включайте только один конфиг и выключите другие VPN-приложения."
     ),
     "android": (
@@ -202,7 +212,11 @@ GUIDES = {
         "4. В AmneziaWG нажмите «+» → «Импорт из файла» → папка «Загрузки» → vpn1.conf.\n"
         "   Вместо шагов 3–4 можно нажать «+» → «Сканировать QR-код» и навести камеру на QR из бота (если он пришёл).\n"
         "5. Включите переключатель напротив vpn1, на вопрос о VPN-подключении нажмите «ОК».\n"
-        "6. Проверка: откройте ipinfo.io — должны быть Нидерланды (Netherlands).\n\n"
+        "6. Проверка: откройте YouTube и Telegram — должны работать.\n\n"
+        "📱 На телефоне через VPN идут только заблокированные сервисы (Telegram, YouTube, Instagram, "
+        "WhatsApp и др.), а российские приложения, банки и игры — напрямую, быстро и без отключения VPN. "
+        "Поэтому ipinfo.io и 2ip.ru покажут ваш обычный IP — это нормально. Нужен VPN для всего — "
+        f"«{BTN_LIST}» → «🔀 Режим». Используйте приложение AmneziaWG: в AmneziaVPN этот режим может не работать.\n\n"
         "❗ Включайте только один конфиг и выключите другие VPN-приложения."
     ),
     "pc": (
@@ -472,7 +486,12 @@ def create_peer(state, uid, until, kind="device"):
     peer = {"user": str(uid), "name": f"{prefix}{n}", "kind": kind,
             "priv": priv, "created": fmt_date(time.time()), "until": until, "warned": 0}
     if kind not in ROUTER_KINDS:
-        peer["op"] = state["users"].get(str(uid), {}).get("op")
+        u = state["users"].get(str(uid), {})
+        peer["op"] = u.get("op")
+        # Режим под устройство: на телефонах через VPN только заблокированное, на компьютере — всё.
+        peer["os"] = u.get("os")
+        if u.get("os") in SMART_OS:
+            peer["mode"] = "smart"
     peer["ip"] = next_free_ip(state, server_params(peer_iface(peer)[1]))
     state["peers"][pub] = peer
     return pub, peer
@@ -828,6 +847,14 @@ OP_QUESTION = ("📶 Какой у вас мобильный оператор?\n
                "выберите «Только Wi-Fi».")
 
 
+async def remember_os(user, os_):
+    async with lock:
+        state = load_state()
+        get_user(state, user)["os"] = os_
+        save_state(state)
+    return state
+
+
 async def remember_op(user, op):
     async with lock:
         state = load_state()
@@ -839,7 +866,8 @@ async def remember_op(user, op):
 def _buy_screen(guide, target, price, back):
     """Экран «инструкция + купить»: подробные шаги для выбранного устройства и кнопка оплаты."""
     return (GUIDES[guide], InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💳 Купить — {price} ₽ за {DAYS} дней", callback_data=f"buy:{target}")],
+        [InlineKeyboardButton(f"💳 Купить — {price} ₽ за {DAYS} дней",
+                              callback_data=f"buy:{target}:{guide}" if guide in OS_NAMES else f"buy:{target}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data=f"menu:{back}")],
     ]))
 
@@ -961,15 +989,17 @@ async def list_configs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             row.append(InlineKeyboardButton(f"🔄 Продлить — {price_for(state, pub)} ₽", callback_data=f"renew:{pub}"))
         rows = [row, [InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}"),
                       InlineKeyboardButton("✏️ Название", callback_data=f"ren:{pub}")]]
-        if p.get("kind") not in ROUTER_KINDS:
+        if p.get("kind") not in ROUTER_KINDS and os.environ.get("OP_PROFILES", "0") == "1":
             rows.append([InlineKeyboardButton(f"📶 Оператор: {OPERATORS.get(p.get('op'), 'не выбран')}",
                                               callback_data=f"opc:{pub}")])
+        if p.get("kind") not in ROUTER_KINDS:
             rows.append([InlineKeyboardButton("🔀 Режим: " + ("только заблокированное" if p.get("mode") == "smart"
                                                              else "весь трафик"), callback_data=f"mode:{pub}")])
         rows.append([InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}")])
         buttons = InlineKeyboardMarkup(rows)
         icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
-        await update.message.reply_text(f"{icon} {title(p)} — {peer_status(p)}", reply_markup=buttons)
+        device = f"\n{OS_NAMES[p['os']]}" if p.get("os") in OS_NAMES else ""
+        await update.message.reply_text(f"{icon} {title(p)} — {peer_status(p)}{device}", reply_markup=buttons)
 
 
 async def news_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1006,7 +1036,14 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "trial":
         await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text(OP_QUESTION, reply_markup=op_picker("opt"))
+        await query.message.reply_text("На каком устройстве будете пользоваться? Конфиг настроится под него.",
+                                       reply_markup=InlineKeyboardMarkup(
+                                           [[InlineKeyboardButton(n, callback_data=f"tos:{k}")] for k, n in OS_NAMES.items()]))
+        return
+
+    if action == "tos" and arg in OS_NAMES:
+        await remember_os(query.from_user, arg)
+        await start_trial(query, ctx)
         return
 
     if action in ("opt", "opb") and arg in OPERATORS:
@@ -1051,10 +1088,10 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(closed_text(state, uid))
             return
         await query.edit_message_reply_markup(reply_markup=None)  # инструкция остаётся на экране
-        if arg == NEW:
-            await query.message.reply_text(OP_QUESTION, reply_markup=op_picker("opb"))
-            return
-        await ask_payment(query.message, ctx, arg, state)
+        target, _, os_ = arg.partition(":")
+        if os_ in OS_NAMES:
+            state = await remember_os(query.from_user, os_)
+        await ask_payment(query.message, ctx, target, state)
         return
 
     if action == "payfor":
