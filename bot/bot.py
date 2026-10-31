@@ -472,7 +472,10 @@ def dns_i1(seed):
 def obfs_params(peer, params):
     """Параметры маскировки для клиента: серверные, с поправкой под оператора конфига."""
     params = {k: params[k] for k in OBFS_KEYS if k in params}
-    prof = PROFILES.get(peer.get("op"))
+    # Оператор не выбран — всё равно маскируем по-новому: серверные пустышки (до 1200 байт)
+    # без I1 режут на границе по дороге от российского входа в Нидерланды.
+    op = peer.get("op") or ("other" if peer.get("kind") not in ROUTER_KINDS else None)
+    prof = PROFILES.get(op)
     if prof:
         params.update(Jc=str(prof["Jc"]), Jmin=str(prof["Jmin"]), Jmax=str(prof["Jmax"]))
         for k in ("I1", "I2", "I3", "I4", "I5"):
