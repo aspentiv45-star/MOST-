@@ -108,7 +108,29 @@ BTN_LIST = "📄 Мои конфиги"
 BTN_HELP = "❓ Как подключить"
 BTN_NEWS = "🆕 Что нового"
 BTN_SUPPORT = "🆘 Нужна помощь"
-KEYBOARD = ReplyKeyboardMarkup([[BTN_BUY], [BTN_LIST, BTN_HELP], [BTN_NEWS, BTN_SUPPORT]], resize_keyboard=True)
+BTN_CLEAR = "🧹 Почистить чат"
+KEYBOARD = ReplyKeyboardMarkup([[BTN_BUY], [BTN_LIST, BTN_HELP], [BTN_NEWS, BTN_SUPPORT], [BTN_CLEAR]],
+                               resize_keyboard=True)
+
+CLEAR_BUTTONS = InlineKeyboardMarkup([[
+    InlineKeyboardButton("🧹 Да, очистить", callback_data="clr:yes"),
+    InlineKeyboardButton("Отмена", callback_data="clr:no"),
+]])
+CLEAR_QUESTION = ("Удалить сообщения в этом чате? Telegram разрешает ботам удалять только сообщения "
+                  "за последние 48 часов, более старые останутся.")
+
+
+async def clear_chat(bot, chat_id, last_id):
+    """Удаляет сообщения чата от last_id назад, пачками по 100, пока удаляется хоть что-то."""
+    for top in range(last_id, max(0, last_id - 1000), -100):
+        ids = list(range(max(1, top - 99), top + 1))
+        try:
+            await bot.delete_messages(chat_id, ids)
+        except Exception:
+            # В пачке есть сообщения старше 48 часов — удаляем по одному, что получится.
+            results = await asyncio.gather(*(bot.delete_message(chat_id, i) for i in ids), return_exceptions=True)
+            if not any(r is True for r in results):
+                break
 
 HELP_TEXT = (
     "Как подключиться — коротко:\n\n"
@@ -938,6 +960,15 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=buttons)
         return
 
+    if action == "clr":
+        if arg == "yes":
+            await clear_chat(ctx.bot, query.message.chat_id, query.message.message_id)
+            await ctx.bot.send_message(query.message.chat_id, "🧹 Чат очищен. Конфиги всегда можно скачать снова "
+                                       f"в «{BTN_LIST}».", reply_markup=KEYBOARD)
+        else:
+            await query.edit_message_text("Хорошо, ничего не удаляю.")
+        return
+
     if action == "trial":
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text(OP_QUESTION, reply_markup=op_picker("opt"))
@@ -1045,7 +1076,7 @@ ABTN_RESEND = "📤 Разослать конфиги"
 ABTN_NEWS = "📢 Оповестить об обновлении"
 ABTN_TICKETS = "📨 Жалобы"
 ADMIN_KEYBOARD = ReplyKeyboardMarkup([[ABTN_PAY, ABTN_TICKETS], [ABTN_USERS, ABTN_GIVE], [ABTN_STATS, ABTN_RESEND],
-                                      [ABTN_NEWS]],
+                                      [ABTN_NEWS, BTN_CLEAR]],
                                      resize_keyboard=True)
 
 
@@ -1269,6 +1300,14 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return
     action, _, arg = query.data.partition(":")
+
+    if action == "clr":
+        if arg == "yes":
+            await clear_chat(ctx.bot, query.message.chat_id, query.message.message_id)
+            await ctx.bot.send_message(query.message.chat_id, "🧹 Чат очищен.", reply_markup=ADMIN_KEYBOARD)
+        else:
+            await query.edit_message_text("Хорошо, ничего не удаляю.")
+        return
 
     if action == "acc":
         verdict, _, uid = arg.partition(":")
@@ -1976,10 +2015,15 @@ async def on_error(update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+async def ask_clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(CLEAR_QUESTION, reply_markup=CLEAR_BUTTONS)
+
+
 def build_user_app():
     app = Application.builder().token(TOKEN).build()
     # Кнопки меню и команды выводят клиента из переписки по обращению.
-    app.add_handler(MessageHandler(filters.Text([BTN_BUY, BTN_LIST, BTN_HELP, BTN_NEWS, BTN_SUPPORT]) | filters.COMMAND,
+    app.add_handler(MessageHandler(filters.Text([BTN_BUY, BTN_LIST, BTN_HELP, BTN_NEWS, BTN_SUPPORT, BTN_CLEAR])
+                                   | filters.COMMAND,
                                    leave_ticket_on_menu), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
@@ -1991,6 +2035,7 @@ def build_user_app():
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_screenshot))
     # Старые кнопки из прошлой версии бота, оставшиеся у клиентов на экране.
     app.add_handler(MessageHandler(filters.Text([BTN_SUPPORT]), support_start))
+    app.add_handler(MessageHandler(filters.Text([BTN_CLEAR]), ask_clear))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, user_text))
     app.add_handler(CallbackQueryHandler(on_user_button))
     app.add_error_handler(on_error)
@@ -2012,6 +2057,7 @@ def build_admin_app():
     app.add_handler(MessageHandler(filters.Text([ABTN_RESEND]), admin_resend_ask))
     app.add_handler(MessageHandler(filters.Text([ABTN_NEWS]), admin_news_ask))
     app.add_handler(MessageHandler(filters.Text([ABTN_TICKETS]), admin_tickets))
+    app.add_handler(MessageHandler(filters.Text([BTN_CLEAR]), admin_only(ask_clear)))
     app.add_handler(CommandHandler("resend", admin_resend_ask))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text))
     app.add_handler(CallbackQueryHandler(on_admin_button))
