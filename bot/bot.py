@@ -82,8 +82,8 @@ FULL_TUNNEL = "0.0.0.0/0, ::/0"
 # обрабатывают плохо (зависания на Windows, обрыв правил на Linux, тормоза интерфейса).
 # Режимы конфига. full — весь трафик через вход в России; smart — только заблокированное;
 # game — только игры и напрямую на основной сервер, без входа в России: меньше пинг.
-MODES = {"full": "🌍 Весь трафик", "smart": "📱 Только заблокированное", "game": "🎮 Игровой",
-         "pcgame": "🎮 Игровой для ПК"}
+MODES = {"full": "🌍 Весь трафик", "smart": "📱 Только заблокированное", "game": "🎮 Игровой: телефон",
+         "pcgame": "🎮 Игровой: ПК"}
 # pcgame — весь трафик через VPN (один IP: античиты Easy Anti-Cheat и др. не рвут соединение,
 # Discord и Telegram работают), но напрямую на основной сервер, минуя вход в России: пинг ниже.
 # Порт основного сервера для игрового режима: 443 принимает alt-port.sh (как QUIC его режут реже).
@@ -200,20 +200,6 @@ HELP_TEXT = (
 )
 
 # Подробные инструкции для клиентов — открываются кнопками из «❓ Как подключить».
-# На компьютере игрового режима нет: игры с античитом (Easy Anti-Cheat и др.) рвут соединение, когда
-# часть трафика игры идёт через VPN, а часть напрямую, — у игрока оказывается два разных IP.
-PC_MODE_NOTE = (
-    "🌍 Весь трафик — через VPN идёт всё, через наш вход в России. Сайты, Discord, Telegram, игры.\n\n"
-    "📱 Только заблокированное — через VPN идут Telegram, Discord, YouTube, соцсети, остальное напрямую. "
-    "Для игр с античитом не подходит. Нужно приложение AmneziaWG (в AmneziaVPN на компьютере режим может "
-    "не применяться).\n\n"
-    "🎮 Игровой для ПК — для игр, в том числе с античитом (Easy Anti-Cheat, BattlEye и др.). Через VPN идёт "
-    "весь трафик с одного IP, поэтому античит не рвёт соединение, а Discord и Telegram работают. Подключение "
-    "идёт напрямую в Нидерланды, минуя российский сервер, — пинг ниже. zapret и другие обходы блокировок "
-    "на время VPN выключите: они не нужны и мешают. Если не подключается — у вашего провайдера не проходит "
-    "прямое подключение, используйте «Весь трафик»."
-)
-
 MODE_TEXT = (
     "Для сайтов и приложений — первые два режима, для игр — третий.\n\n"
     "🌍 Весь трафик — для сайтов и приложений. Через VPN идёт всё: и заблокированное, и российское "
@@ -222,16 +208,15 @@ MODE_TEXT = (
     "YouTube, Instagram, WhatsApp, X, TikTok и игры Supercell. А российские приложения и сайты — банки, Госуслуги, "
     "Ozon, Wildberries, VK — открываются напрямую с телефона, как без VPN: быстро и без ошибок. "
     "Нужно приложение AmneziaWG.\n\n"
-    "🎮 Игровой (для телефонов) — только для игр: Brawl Stars, Clash Royale, Clash of Clans, Hay Day, "
-    "Boom Beach, Roblox. "
-    "Через VPN идут игровые серверы, вход в Supercell ID, магазин и загрузка обновлений игр, а также "
-    "серверы Cloudflare — через них работают многие другие игры. Для компьютера есть отдельный "
-    "«Игровой для ПК». "
-    "Подключение идёт напрямую в Нидерланды, поэтому пинг самый низкий. Это режим НЕ для сайтов и приложений: "
-    "Telegram, YouTube, Instagram и другие заблокированные сайты в нём не откроются. Закончили играть — "
-    "переключитесь обратно на «Весь трафик» или «Только заблокированное». Если игра не подключается — "
-    "у вашего оператора не проходит прямое подключение, играйте в режиме «Только заблокированное». "
-    "Нужно приложение AmneziaWG."
+    "🎮 Игровой — для игр, два варианта:\n"
+    "• 📱 Для телефона — только игры: Brawl Stars, Clash Royale, Clash of Clans, Hay Day, Boom Beach, Roblox "
+    "(серверы, вход, магазин, обновления) и серверы Cloudflare. Сайты и приложения — Telegram, YouTube, "
+    "Instagram — в нём НЕ работают: закончили играть — переключитесь обратно.\n"
+    "• 💻 Для ПК — весь трафик с одного IP, поэтому античиты (Easy Anti-Cheat, BattlEye) не рвут соединение, "
+    "Discord и Telegram работают. zapret и другие обходы блокировок на время VPN выключите.\n"
+    "В обоих вариантах подключение идёт напрямую в Нидерланды, минуя российский сервер, — пинг самый низкий. "
+    "Если не подключается — у оператора не проходит прямое подключение: на телефоне играйте в «Только "
+    "заблокированное», на ПК — в «Весь трафик». Нужно приложение AmneziaWG."
 )
 
 # Список для клиентов: что идёт через VPN в режиме «только заблокированное».
@@ -323,7 +308,7 @@ GUIDES = {
     "mode": (
         "🔀 Режимы VPN\n\n"
         "У каждого конфига три режима:\n\n"
-        + MODE_TEXT + "\n\n💻 На компьютере вместо «Игрового» — «Игровой для ПК»:\n\n" + PC_MODE_NOTE.split("\n\n")[-1] +
+        + MODE_TEXT +
         "\n\nКак поменять:\n"
         f"1. «{BTN_LIST}» → под нужным конфигом «🔀 Режим» → выберите режим.\n"
         "2. Бот пришлёт новый файл.\n"
@@ -1349,18 +1334,32 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif action == "png":
         await query.message.reply_text(await check_peer(arg, peer))
     elif action == "mode":
+        # Три кнопки: весь трафик, только заблокированное, игровой; игровой — дальше телефон или ПК.
         cur = mode_of(peer)
-        pc = peer.get("os") == "pc"
-        # У компьютера свой игровой режим, у телефонов — свой; у старых конфигов без устройства — оба.
-        choices = {m: n for m, n in MODES.items()
-                   if not (pc and m == "game") and not (peer.get("os") in SMART_OS and m == "pcgame")}
+        mark = lambda on: "✅ " if on else ""
         await query.message.reply_text(
-            f"🔀 {html.escape(title(peer))}: сейчас «{MODES[cur]}». Какой режим нужен?\n\n"
-            + (PC_MODE_NOTE if pc else MODE_TEXT)
+            f"🔀 {html.escape(title(peer))}: сейчас «{MODES[cur]}». Какой режим нужен?\n\n" + MODE_TEXT
             + f"\n\nПодробнее: «{BTN_HELP}» → «🔀 Режимы».\n\n" + SMART_LIST,
-            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(("✅ " if m == cur else "") + n, callback_data=f"mset:{m}:{arg}")]
-                 for m, n in choices.items()]))
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(mark(cur == "full") + MODES["full"], callback_data=f"mset:full:{arg}")],
+                [InlineKeyboardButton(mark(cur == "smart") + MODES["smart"], callback_data=f"mset:smart:{arg}")],
+                [InlineKeyboardButton(mark(cur in ("game", "pcgame")) + "🎮 Игровой", callback_data=f"mgame:{arg}")],
+            ]))
+    elif action == "mgame":
+        cur = mode_of(peer)
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(("✅ " if cur == "game" else "") + "📱 Для телефона", callback_data=f"mset:game:{arg}")],
+            [InlineKeyboardButton(("✅ " if cur == "pcgame" else "") + "💻 Для ПК", callback_data=f"mset:pcgame:{arg}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data=f"mback:{arg}")],
+        ]))
+    elif action == "mback":
+        cur = mode_of(peer)
+        mark = lambda on: "✅ " if on else ""
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(mark(cur == "full") + MODES["full"], callback_data=f"mset:full:{arg}")],
+            [InlineKeyboardButton(mark(cur == "smart") + MODES["smart"], callback_data=f"mset:smart:{arg}")],
+            [InlineKeyboardButton(mark(cur in ("game", "pcgame")) + "🎮 Игровой", callback_data=f"mgame:{arg}")],
+        ]))
     elif action == "ads":
         async with lock:
             state = load_state()
