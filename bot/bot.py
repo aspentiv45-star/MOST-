@@ -21,6 +21,7 @@ import os
 import random
 import re
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -100,6 +101,9 @@ SMART_NETS = (
     "52.223.192.0/18", "99.181.64.0/18", "185.42.204.0/22",
     # Reddit и другие сайты на Fastly
     "151.101.0.0/16", "199.232.0.0/16",
+    # Игры Supercell (Brawl Stars, Clash Royale, Clash of Clans): их собственная сеть;
+    # адреса игровых серверов дополнительно узнаём через DNS (GAME_HOSTS)
+    "5.180.72.0/22",
     # DNS из конфига — чтобы адреса заблокированных сайтов не подменяли
     "1.1.1.1/32", "1.0.0.1/32",
     # IPv6 этих сервисов: у сервера IPv6 нет, так приложения сразу переходят на IPv4
@@ -189,9 +193,10 @@ SMART_LIST = (
     "• Discord\n"
     "• Twitch\n"
     "• Reddit и часть зарубежных сайтов на сервисе Fastly\n"
+    "• Игры Supercell: Brawl Stars, Clash Royale, Clash of Clans, Hay Day, Boom Beach\n"
     "• DNS Cloudflare (1.1.1.1), чтобы адреса сайтов не подменяли\n\n"
     "Всё остальное — напрямую, без VPN: банки, Госуслуги, Ozon, Wildberries, VK, Яндекс, "
-    "игры, ChatGPT и другие сайты. Если нужный заблокированный сайт не открывается — "
+    "остальные игры, ChatGPT и другие сайты. Если нужный заблокированный сайт не открывается — "
     "переключитесь на «весь трафик» или напишите в «🆘 Нужна помощь», добавим его в список.</blockquote>"
 )
 
@@ -588,7 +593,7 @@ def client_conf(peer, params, host):
         f"PublicKey = {run(['awg', 'pubkey'], params['PrivateKey'] + chr(10))}",
         f"Endpoint = {host}:{params['ListenPort']}",
         f"AllowedIPs = {router_allowed_ips(host) if peer.get('kind') in ROUTER_KINDS else
-                        ', '.join(SMART_NETS) if peer.get('mode') == 'smart' else allowed_ips()}",
+                        smart_allowed_ips() if peer.get('mode') == 'smart' else allowed_ips()}",
         "PersistentKeepalive = 25",
     ]
     return "\n".join(lines) + "\n"
@@ -636,6 +641,36 @@ async def refresh_split():
     os.chmod(tmp, 0o644)
     os.replace(tmp, SPLIT_FILE)
     log.info("раздельный туннель: %d российских сетей -> %d сетей через VPN", len(nets), len(tunnel))
+
+
+# Игровые серверы, недоступные из России: их адреса добавляются в режим «только заблокированное».
+GAME_HOSTS = ("game.brawlstarsgame.com", "game.clashroyaleapp.com", "gamea.clashofclans.com",
+              "game.clashofclans.com", "game.haydaygame.com", "game.boombeachgame.com")
+GAME_IPS = set()
+
+
+async def games_loop():
+    """Раз в 6 часов узнаёт адреса игровых серверов; новые файлы конфигов их уже содержат."""
+    loop = asyncio.get_running_loop()
+    while True:
+        found = set()
+        for host in GAME_HOSTS:
+            try:
+                infos = await asyncio.wait_for(loop.getaddrinfo(host, 9339, family=socket.AF_INET), 10)
+                found.update(i[4][0] for i in infos)
+            except Exception:
+                pass
+        if found:
+            GAME_IPS.clear()
+            GAME_IPS.update(found)
+        await asyncio.sleep(6 * 3600)
+
+
+def smart_allowed_ips():
+    nets = [ipaddress.ip_network(n) for n in SMART_NETS]
+    v4 = [n for n in nets if n.version == 4] + [ipaddress.ip_network(f"{ip}/32") for ip in GAME_IPS]
+    v6 = [n for n in nets if n.version == 6]
+    return ", ".join(map(str, [*ipaddress.collapse_addresses(v4), *ipaddress.collapse_addresses(v6)]))
 
 
 async def split_loop():
@@ -2422,7 +2457,8 @@ async def amain():
         for app in (user_app, admin_app):
             await app.start()
             await app.updater.start_polling()
-        tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop())]
+        tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop()),
+                 asyncio.create_task(games_loop())]
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
