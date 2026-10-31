@@ -1256,13 +1256,35 @@ async def admin_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(caption, reply_markup=payment_buttons(pid))
 
 
+def last_handshakes():
+    """Время последнего рукопожатия каждого конфига на сервере: {публичный ключ: unix-время, 0 — ни разу}."""
+    result = {}
+    for iface in [IFACE] + ([ROUTER_IFACE] if plain_routers() else []):
+        try:
+            dump = run(["awg", "show", iface, "dump"])
+        except Exception:
+            continue
+        for line in dump.splitlines()[1:]:
+            f = line.split("\t")
+            result[f[0]] = int(f[4])
+    return result
+
+
+def is_online(handshake):
+    # Пока туннель включён, рукопожатие повторяется каждые 2 минуты.
+    return bool(handshake) and time.time() - handshake < 180
+
+
 def user_groups(state):
-    """Конфиги по группам: действующие, закончившиеся или неоплаченные; и клиенты без конфигов."""
+    """Конфиги по группам: действующие (подключены сейчас и нет), закончившиеся или неоплаченные;
+    и клиенты без конфигов."""
     active = sorted(((k, p) for k, p in state["peers"].items() if peer_active(p)), key=lambda kv: kv[1]["until"])
+    hs = last_handshakes()
     off = sorted(((k, p) for k, p in state["peers"].items() if not peer_active(p)), key=lambda kv: -kv[1]["until"])
     with_peers = {p["user"] for p in state["peers"].values()}
     none = [uid for uid in state["users"] if uid not in with_peers and not is_admin(uid)]
-    return {"act": active, "off": off, "none": none}
+    return {"act": active, "on": [kv for kv in active if is_online(hs.get(kv[0], 0))],
+            "idle": [kv for kv in active if not is_online(hs.get(kv[0], 0))], "off": off, "none": none, "hs": hs}
 
 
 @admin_only
@@ -1280,7 +1302,15 @@ async def admin_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def show_user_group(message, group):
     state = load_state()
-    items = user_groups(state)[group]
+    groups = user_groups(state)
+    if group == "act":
+        await message.reply_text(f"🟢 Действуют: {len(groups['act'])}. Кого показать?", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🔌 Подключены сейчас ({len(groups['on'])})", callback_data="usr:on")],
+            [InlineKeyboardButton(f"💤 Не подключены ({len(groups['idle'])})", callback_data="usr:idle")],
+            [InlineKeyboardButton(f"📋 Все действующие ({len(groups['act'])})", callback_data="usr:all")],
+        ]))
+        return
+    items = groups["act" if group == "all" else group]
     if not items:
         await message.reply_text("Здесь пока никого.")
         return
@@ -1295,8 +1325,12 @@ async def show_user_group(message, group):
                                                                          copy_text=CopyTextButton(uid))]]))
     else:
         for pub, p in items[:40]:
+            hs = groups["hs"].get(pub, 0)
+            seen = "" if group == "off" else ("\n🔌 подключён сейчас" if is_online(hs) else
+                                               f"\n💤 не подключён, последний раз: {fmt_date(hs) if hs else 'ни разу'}")
             await message.reply_text(
-                peer_line(state, pub) + (f"\n📶 {OPERATORS[p['op']]}" if p.get("op") in OPERATORS else ""),
+                peer_line(state, pub) + seen
+                + (f"\n📶 {OPERATORS[p['op']]}" if p.get("op") in OPERATORS else ""),
                 reply_markup=None if is_admin(p["user"]) else peer_buttons(pub, p["user"]))
     if len(items) > 40:
         await message.reply_text(f"Показаны первые 40 из {len(items)}.")
