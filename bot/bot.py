@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import random
+import re
 import signal
 import subprocess
 import tempfile
@@ -557,15 +558,30 @@ async def split_loop():
 
 # ---------- клиентский бот ----------
 
+# Название туннеля в приложении: латиница без пробелов, на iOS не длиннее 15 символов (оставляем место под «-nl»).
+TUNNEL_NAME = re.compile(r"[A-Za-z0-9_.-]{1,12}")
+
+
+def title(peer):
+    """Как конфиг называется в сообщениях: название клиента, если он его задал."""
+    return f"{peer['label']} ({peer['name']})" if peer.get("label") else peer["name"]
+
+
+def file_base(peer):
+    """Имя файла конфига: название клиента, если оно годится для туннеля, иначе vpnN."""
+    label = peer.get("label") or ""
+    return label if TUNNEL_NAME.fullmatch(label) else peer["name"]
+
+
 async def send_peer(chat_id, peer):
     params = server_params(peer_iface(peer)[1])
     # Имя файла становится именем туннеля; на iOS оно не длиннее 15 символов.
     if RELAY_HOST:
-        variants = [(f"{peer['name']}.conf", RELAY_HOST)]
+        variants = [(f"{file_base(peer)}.conf", RELAY_HOST)]
         if SEND_DIRECT:
-            variants.append((f"{peer['name']}-nl.conf", ENDPOINT_HOST))
+            variants.append((f"{file_base(peer)}-nl.conf", ENDPOINT_HOST))
     else:
-        variants = [(f"{peer['name']}.conf", ENDPOINT_HOST)]
+        variants = [(f"{file_base(peer)}.conf", ENDPOINT_HOST)]
     for filename, host in variants:
         text = client_conf(peer, params, host)
         await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()), filename=filename,
@@ -598,9 +614,9 @@ def router_help(peer, params):
         fields = dict(line.split(" = ", 1) for line in text.splitlines() if " = " in line)
         host, _, port = fields["Endpoint"].rpartition(":")
         return (
-            f"📡 Настройка роутера для {peer['name']}\n\n"
+            f"📡 Настройка роутера для {title(peer)}\n\n"
             "1. Откройте настройки роутера → «VPN-клиент» (или «VPN», «Другие подключения») → «WireGuard».\n"
-            f"2. Загрузите файл {peer['name']}.conf. Если роутер не умеет загружать файл, впишите поля вручную:\n\n"
+            f"2. Загрузите файл {file_base(peer)}.conf. Если роутер не умеет загружать файл, впишите поля вручную:\n\n"
             f"Закрытый ключ: {fields['PrivateKey']}\n"
             f"IP-адрес: {fields['Address']}\n"
             f"DNS: {fields['DNS']}\n"
@@ -617,9 +633,9 @@ def router_help(peer, params):
         )
     asc = " ".join(params.get(k, "0") for k in ("Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"))
     return (
-        f"📡 Настройка роутера Keenetic для {peer['name']}\n\n"
+        f"📡 Настройка роутера Keenetic для {title(peer)}\n\n"
         "1. Откройте my.keenetic.net → «Интернет» → «Другие подключения» → «WireGuard» → "
-        f"«Загрузить из файла» и выберите файл {peer['name']}.conf.\n"
+        f"«Загрузить из файла» и выберите файл {file_base(peer)}.conf.\n"
         "2. В настройках подключения включите «Использовать для выхода в интернет».\n"
         "3. Откройте my.keenetic.net/a (командная строка) и выполните по очереди, "
         "заменив Wireguard0 на имя вашего подключения, если оно другое:\n\n"
@@ -649,7 +665,7 @@ def target_label(state, target):
     if target == NEW_ROUTER_AWG:
         return "новый конфиг для роутера (AmneziaWG)"
     peer = state["peers"].get(target)
-    return f"продление {peer['name']} ({peer_status(peer)})" if peer else "продление удалённого конфига"
+    return f"продление {title(peer)} ({peer_status(peer)})" if peer else "продление удалённого конфига"
 
 
 async def request_access(user):
@@ -752,7 +768,7 @@ async def start_trial(query, ctx):
 
     await query.edit_message_reply_markup(reply_markup=None)
     await USER_BOT.send_message(
-        user.id, f"🎁 Пробный период на {TRIAL_DAYS} дня: ваш конфиг {peer['name']} работает до "
+        user.id, f"🎁 Пробный период на {TRIAL_DAYS} дня: ваш конфиг {title(peer)} работает до "
                  f"{fmt_date(peer['until'])}.\n\nКак подключить — «{BTN_HELP}».\n"
                  f"Понравится — «{BTN_LIST}» → «🔄 Продлить» ({PRICE} ₽ за {DAYS} дней), "
                  "этот же конфиг продолжит работать.", reply_markup=KEYBOARD)
@@ -760,7 +776,7 @@ async def start_trial(query, ctx):
     for admin in ADMINS:
         try:
             await ADMIN_BOT.send_message(admin, f"🎁 Пробный период: {u['name']}, ID {user.id}, "
-                                                f"{peer['name']} до {fmt_date(peer['until'])}")
+                                                f"{title(peer)} до {fmt_date(peer['until'])}")
         except Exception:
             pass
 
@@ -910,14 +926,15 @@ async def list_configs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         row = [InlineKeyboardButton("⬇️ Скачать", callback_data=f"get:{pub}")]
         if not is_admin(p["user"]):
             row.append(InlineKeyboardButton(f"🔄 Продлить — {price_for(state, pub)} ₽", callback_data=f"renew:{pub}"))
-        rows = [row, [InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}")]]
+        rows = [row, [InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}"),
+                      InlineKeyboardButton("✏️ Название", callback_data=f"ren:{pub}")]]
         if p.get("kind") not in ROUTER_KINDS:
             rows.append([InlineKeyboardButton(f"📶 Оператор: {OPERATORS.get(p.get('op'), 'не выбран')}",
                                               callback_data=f"opc:{pub}")])
         rows.append([InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}")])
         buttons = InlineKeyboardMarkup(rows)
         icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
-        await update.message.reply_text(f"{icon} {p['name']} — {peer_status(p)}", reply_markup=buttons)
+        await update.message.reply_text(f"{icon} {title(p)} — {peer_status(p)}", reply_markup=buttons)
 
 
 async def news_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -980,7 +997,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             peer["op"] = op
             get_user(state, query.from_user)["op"] = op
             save_state(state)
-        await query.edit_message_text(f"📶 {peer['name']}: оператор {OPERATORS[op]}.")
+        await query.edit_message_text(f"📶 {title(peer)}: оператор {OPERATORS[op]}.")
         if not peer_active(peer):
             await query.message.reply_text("Срок конфига закончился: продлите его, и он заработает с новыми настройками.")
             return
@@ -1021,24 +1038,30 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if action == "renew":
         await ask_payment(query.message, ctx, arg, state)
+    elif action == "ren":
+        ctx.user_data["await"] = f"rename:{arg}"
+        await query.message.reply_text(
+            f"✏️ Как назвать {title(peer)}? Например: «Телефон мамы», «Ноутбук» (до 30 символов).\n\n"
+            "Чтобы туннель так же назывался и в приложении Amnezia, напишите латиницей без пробелов, "
+            "до 12 символов, например mama-phone.\n\nПередумали — напишите «отмена».")
     elif action == "png":
         await query.message.reply_text(await check_peer(arg, peer))
     elif action == "opc":
-        await query.message.reply_text(f"{peer['name']}: {OP_QUESTION}", reply_markup=op_picker("ops", f":{arg}"))
+        await query.message.reply_text(f"{title(peer)}: {OP_QUESTION}", reply_markup=op_picker("ops", f":{arg}"))
     elif action == "get":
         if not peer_active(peer):
-            await query.message.reply_text(f"{peer['name']}: срок закончился, сначала продлите его.")
+            await query.message.reply_text(f"{title(peer)}: срок закончился, сначала продлите его.")
             return
         await send_peer(query.message.chat_id, peer)
     elif action == "del":
         await query.edit_message_text(
-            f"Удалить {peer['name']}? Оплаченные дни не вернутся.",
+            f"Удалить {title(peer)}? Оплаченные дни не вернутся.",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("Да, удалить", callback_data=f"delyes:{arg}"),
                 InlineKeyboardButton("Отмена", callback_data=f"delno:{arg}"),
             ]]))
     elif action == "delno":
-        await query.edit_message_text(f"{peer['name']} — {peer_status(peer)}")
+        await query.edit_message_text(f"{title(peer)} — {peer_status(peer)}")
     elif action == "delyes":
         async with lock:
             state = load_state()
@@ -1046,7 +1069,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             state["peers"].pop(arg, None)
             apply_or_rollback(state, old_state)
             save_state(state)
-        await query.edit_message_text(f"{peer['name']} удалён.")
+        await query.edit_message_text(f"{title(peer)} удалён.")
 
 
 # ---------- админ-бот ----------
@@ -1099,7 +1122,7 @@ async def check_peer(pub, peer):
         f = line.split("\t")
         if f[0] == pub:
             handshake, rx, tx = int(f[4]), int(f[5]), int(f[6])
-    head = f"🏓 {peer['name']}\n"
+    head = f"🏓 {title(peer)}\n"
     if not peer_active(peer):
         return head + "⚪️ Срок закончился — конфиг отключён на сервере."
     # Рукопожатие повторяется каждые 2 минуты, пока туннель включён.
@@ -1144,18 +1167,18 @@ async def grant(uid, target, days, paid=True):
     head = "Оплата подтверждена!" if paid else "Подарок от администратора!"
     try:
         if target in KIND_BY_TARGET:
-            await USER_BOT.send_message(uid, f"{head} Ваш новый конфиг {peer['name']} "
+            await USER_BOT.send_message(uid, f"{head} Ваш новый конфиг {title(peer)} "
                                              f"активен до {fmt_date(peer['until'])}:", reply_markup=KEYBOARD)
             await send_peer(uid, peer)
         else:
-            await USER_BOT.send_message(uid, f"{head} {peer['name']} продлён до "
+            await USER_BOT.send_message(uid, f"{head} {title(peer)} продлён до "
                                              f"{fmt_date(peer['until'])}. Если он уже есть в приложении — "
                                              "просто включите его.", reply_markup=KEYBOARD)
         sent = ""
     except Exception:
         log.exception("не удалось отправить клиенту %s", uid)
         sent = "\nКлиенту написать не удалось — он ещё не нажимал /start в клиентском боте."
-    return f"{peer['name']}: {peer_status(peer)}{sent}"
+    return f"{title(peer)}: {peer_status(peer)}{sent}"
 
 
 async def take(pub):
@@ -1220,7 +1243,7 @@ async def admin_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     peers = sorted(state["peers"].items(), key=lambda kv: -kv[1]["until"])
     for pub, p in peers[:40]:
         await update.message.reply_text(
-            f"{user_name(state, p['user'])} · ID {p['user']}\n{p['name']} — {peer_status(p)}"
+            f"{user_name(state, p['user'])} · ID {p['user']}\n{title(p)} — {peer_status(p)}"
             + (f"\n📶 {OPERATORS[p['op']]}" if p.get("op") in OPERATORS else ""),
             reply_markup=None if is_admin(p["user"]) else peer_buttons(pub))
     if len(peers) > 40:
@@ -1359,15 +1382,15 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.answer(result.split("\n")[0][:190])
         else:
             await take(arg)
-            await query.answer(f"{peer['name']} отключён")
+            await query.answer(f"{title(peer)} отключён")
             try:
-                await USER_BOT.send_message(int(peer["user"]), f"Конфиг {peer['name']} отключён администратором.")
+                await USER_BOT.send_message(int(peer["user"]), f"Конфиг {title(peer)} отключён администратором.")
             except Exception:
                 pass
         state = load_state()
         peer = state["peers"].get(arg)
         await query.edit_message_text(
-            f"{user_name(state, peer['user'])} · ID {peer['user']}\n{peer['name']} — {peer_status(peer)}",
+            f"{user_name(state, peer['user'])} · ID {peer['user']}\n{title(peer)} — {peer_status(peer)}",
             reply_markup=peer_buttons(arg))
         return
 
@@ -1442,7 +1465,7 @@ async def resend_all(query, text):
     sent, failed = 0, []
     for uid, peers in by_user.items():
         # Не заваливаем чат файлами: кнопка на каждый конфиг, файлы — по нажатию.
-        buttons = InlineKeyboardMarkup([[InlineKeyboardButton(f"📥 Получить {p['name']}", callback_data=f"get:{pub}")]
+        buttons = InlineKeyboardMarkup([[InlineKeyboardButton(f"📥 Получить {title(p)}", callback_data=f"get:{pub}")]
                                         for pub, p in peers])
         try:
             await USER_BOT.send_message(
@@ -1462,7 +1485,7 @@ async def resend_all(query, text):
 @admin_only
 async def admin_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    names = {pub: f"{user_name(state, p['user'])} / {p['name']}" for pub, p in state["peers"].items()}
+    names = {pub: f"{user_name(state, p['user'])} / {title(p)}" for pub, p in state["peers"].items()}
     now = time.time()
     rows = []
     dumps = [run(["awg", "show", IFACE, "dump"])]
@@ -1549,7 +1572,7 @@ def ticket_dialog(t):
 
 def leave_ticket(ctx):
     """Клиент вышел из переписки по обращению: следующие сообщения в него не попадут."""
-    if (ctx.user_data.get("await") or "").startswith("ticket"):
+    if (ctx.user_data.get("await") or "").startswith(("ticket", "rename")):
         ctx.user_data.pop("await")
     ctx.user_data.pop("album", None)
 
@@ -1577,7 +1600,7 @@ def client_ticket_buttons(tid):
 def ticket_text(state, tid):
     t = state["tickets"][tid]
     peers = user_peers(state, t["user"])
-    configs = "\n".join(f"  {p['name']} — {peer_status(p)}" for p in peers.values()) or "  нет"
+    configs = "\n".join(f"  {title(p)} — {peer_status(p)}" for p in peers.values()) or "  нет"
     text = (f"📨 Обращение №{tid} от {fmt_date(t['created'])}\n"
             f"{user_name(state, t['user'])} · ID {t['user']}\n"
             f"Статус: {TICKET_STATUS[t['status']]}\n\n"
@@ -1752,9 +1775,42 @@ async def on_client_ticket_button(query, ctx, action, tid):
         await query.message.reply_text("Главное меню 👇", reply_markup=KEYBOARD)
 
 
+async def rename_peer(update, pub, label):
+    if label.lower() in ("отмена", "отменить", "cancel"):
+        await update.message.reply_text("Хорошо, название не меняю.", reply_markup=KEYBOARD)
+        return
+    label = " ".join(label.split())
+    if not 1 <= len(label) <= 30:
+        await update.message.reply_text("Название должно быть от 1 до 30 символов. Нажмите «✏️ Название» ещё раз.",
+                                        reply_markup=KEYBOARD)
+        return
+    async with lock:
+        state = load_state()
+        peer = state["peers"].get(pub)
+        if not peer or peer["user"] != str(update.effective_user.id):
+            await update.message.reply_text("Конфиг не найден.", reply_markup=KEYBOARD)
+            return
+        others = [p for k, p in user_peers(state, update.effective_user.id).items() if k != pub]
+        if any(p.get("label", "").lower() == label.lower() or p["name"].lower() == label.lower() for p in others):
+            await update.message.reply_text("Такое название уже есть у другого вашего конфига. Придумайте другое.",
+                                            reply_markup=KEYBOARD)
+            return
+        peer["label"] = label
+        save_state(state)
+    hint = (f"Чтобы название было и в приложении, скачайте файл заново («{BTN_LIST}» → «⬇️ Скачать»), "
+            "удалите старый туннель и добавьте новый — ключи те же."
+            if TUNNEL_NAME.fullmatch(label) else
+            f"В приложении туннель останется {peer['name']}: для названия в приложении нужна латиница без пробелов.")
+    await update.message.reply_text(f"✏️ Готово: {title(peer)}.\n\n{hint}", reply_markup=KEYBOARD)
+
+
 async def user_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Свободный текст клиента: обращение, реквизиты для возврата или просто возврат в меню."""
     waiting = ctx.user_data.get("await") or ""
+    if waiting.startswith("rename:"):
+        ctx.user_data.pop("await")
+        await rename_peer(update, waiting.partition(":")[2], update.message.text.strip())
+        return
     if waiting.startswith("ticket_more:"):
         if update.message.text.strip().lower() in ("отмена", "отменить", "cancel"):
             leave_ticket(ctx)
@@ -1937,14 +1993,14 @@ async def check_expiry():
             if left <= 0 and p["warned"] < 3:
                 p["warned"] = 3
                 expired = True
-                notify.append((p["user"], f"Срок конфига {p['name']} закончился, он отключён. {renew}"))
+                notify.append((p["user"], f"Срок конфига {title(p)} закончился, он отключён. {renew}"))
             elif 0 < left <= DAY and p["warned"] < 2:
                 p["warned"] = 2
-                notify.append((p["user"], f"Конфиг {p['name']} отключится {fmt_date(p['until'])} — "
+                notify.append((p["user"], f"Конфиг {title(p)} отключится {fmt_date(p['until'])} — "
                                           f"меньше чем через сутки. {renew}"))
             elif DAY < left <= 3 * DAY and p["warned"] < 1:
                 p["warned"] = 1
-                notify.append((p["user"], f"Конфиг {p['name']} работает до {fmt_date(p['until'])}. {renew}"))
+                notify.append((p["user"], f"Конфиг {title(p)} работает до {fmt_date(p['until'])}. {renew}"))
         if expired:
             apply_or_rollback(state, old_state)
         save_state(state)
