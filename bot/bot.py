@@ -1256,23 +1256,50 @@ async def admin_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(caption, reply_markup=payment_buttons(pid))
 
 
+def user_groups(state):
+    """Конфиги по группам: действующие, закончившиеся или неоплаченные; и клиенты без конфигов."""
+    active = sorted(((k, p) for k, p in state["peers"].items() if peer_active(p)), key=lambda kv: kv[1]["until"])
+    off = sorted(((k, p) for k, p in state["peers"].items() if not peer_active(p)), key=lambda kv: -kv[1]["until"])
+    with_peers = {p["user"] for p in state["peers"].values()}
+    none = [uid for uid in state["users"] if uid not in with_peers and not is_admin(uid)]
+    return {"act": active, "off": off, "none": none}
+
+
 @admin_only
 async def admin_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    with_peers = {p["user"] for p in state["peers"].values()}
-    active = {p["user"] for p in state["peers"].values() if peer_active(p)}
+    g = user_groups(state)
     await update.message.reply_text(
-        f"Клиентов: {len(state['users'])}, с конфигами: {len(with_peers)}, с активными: {len(active)}.\n"
-        f"Активных конфигов: {sum(1 for p in state['peers'].values() if peer_active(p))}.",
-        reply_markup=ADMIN_KEYBOARD)
-    peers = sorted(state["peers"].items(), key=lambda kv: -kv[1]["until"])
-    for pub, p in peers[:40]:
-        await update.message.reply_text(
-            f"{user_name(state, p['user'])} · ID {p['user']}\n{title(p)} — {peer_status(p)}"
-            + (f"\n📶 {OPERATORS[p['op']]}" if p.get("op") in OPERATORS else ""),
-            reply_markup=None if is_admin(p["user"]) else peer_buttons(pub, p["user"]))
-    if len(peers) > 40:
-        await update.message.reply_text(f"Показаны первые 40 конфигов из {len(peers)}.")
+        f"Клиентов: {len(state['users'])}.\nКого показать?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🟢 Действуют ({len(g['act'])})", callback_data="usr:act")],
+            [InlineKeyboardButton(f"⚪️ Закончились / не оплачены ({len(g['off'])})", callback_data="usr:off")],
+            [InlineKeyboardButton(f"👤 Без конфига ({len(g['none'])})", callback_data="usr:none")],
+        ]))
+
+
+async def show_user_group(message, group):
+    state = load_state()
+    items = user_groups(state)[group]
+    if not items:
+        await message.reply_text("Здесь пока никого.")
+        return
+    if group == "none":
+        for uid in items[:40]:
+            u = state["users"][uid]
+            notes = [n for n in ("пробный использован" if u.get("trial_used") else "",
+                                 "доступ не одобрен" if not is_approved(state, uid) else "") if n]
+            await message.reply_text(
+                f"{user_name(state, uid)} · ID {uid}" + (f"\n{', '.join(notes)}" if notes else ""),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"📋 ID {uid}",
+                                                                         copy_text=CopyTextButton(uid))]]))
+    else:
+        for pub, p in items[:40]:
+            await message.reply_text(
+                peer_line(state, pub) + (f"\n📶 {OPERATORS[p['op']]}" if p.get("op") in OPERATORS else ""),
+                reply_markup=None if is_admin(p["user"]) else peer_buttons(pub, p["user"]))
+    if len(items) > 40:
+        await message.reply_text(f"Показаны первые 40 из {len(items)}.")
 
 
 @admin_only
@@ -1406,6 +1433,11 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         if peer:
             await query.message.reply_text(f"{user_name(load_state(), peer['user'])}\n" + await check_peer(arg, peer))
+        return
+
+    if action == "usr":
+        await query.answer()
+        await show_user_group(query.message, arg)
         return
 
     if action in ("ext", "exd", "exc", "exb"):
