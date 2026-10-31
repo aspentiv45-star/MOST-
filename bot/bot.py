@@ -1107,14 +1107,37 @@ def access_buttons(uid):
     ]])
 
 
-def peer_buttons(pub, uid):
+def user_buttons(uid):
+    """Кнопки под карточкой клиента; если конфигов несколько, бот спросит, с каким из них работать."""
+    copy = InlineKeyboardButton(f"📋 ID {uid}", copy_text=CopyTextButton(str(uid)))
+    if is_admin(uid):
+        return InlineKeyboardMarkup([[copy]])
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("➕ Продлить", callback_data=f"ext:{pub}"),
-        InlineKeyboardButton("⛔️ Отключить", callback_data=f"take:{pub}"),
+        InlineKeyboardButton("➕ Продлить", callback_data=f"uact:ext:{uid}"),
+        InlineKeyboardButton("⛔️ Отключить", callback_data=f"uact:take:{uid}"),
     ], [
-        InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}"),
-        InlineKeyboardButton(f"📋 ID {uid}", copy_text=CopyTextButton(str(uid))),
+        InlineKeyboardButton("🏓 Пинг", callback_data=f"uact:png:{uid}"),
+        copy,
     ]])
+
+
+def user_card(state, uid, hs=None):
+    """Одно сообщение на клиента: все его конфиги со сроками, подключением и оператором."""
+    hs = last_handshakes() if hs is None else hs
+    lines = [f"{user_name(state, uid)} · ID {uid}"]
+    for pub, p in sorted(user_peers(state, uid).items(), key=lambda kv: kv[1]["name"]):
+        icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
+        lines.append(f"\n{icon} {title(p)} — {peer_status(p)}")
+        extra = []
+        if peer_active(p):
+            h = hs.get(pub, 0)
+            extra.append("🔌 подключён сейчас" if is_online(h)
+                         else f"💤 не подключён, последний раз: {fmt_date(h) if h else 'ни разу'}")
+        if p.get("op") in OPERATORS:
+            extra.append(f"📶 {OPERATORS[p['op']]}")
+        if extra:
+            lines.append("    " + " · ".join(extra))
+    return "\n".join(lines)
 
 
 def extend_buttons(pub):
@@ -1124,11 +1147,6 @@ def extend_buttons(pub):
         [InlineKeyboardButton("✏️ Своё число дней", callback_data=f"exc:{pub}"),
          InlineKeyboardButton("⬅️ Назад", callback_data=f"exb:{pub}")],
     ])
-
-
-def peer_line(state, pub):
-    peer = state["peers"][pub]
-    return f"{user_name(state, peer['user'])} · ID {peer['user']}\n{title(peer)} — {peer_status(peer)}"
 
 
 async def extend_peer(pub, days):
@@ -1324,14 +1342,10 @@ async def show_user_group(message, group):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"📋 ID {uid}",
                                                                          copy_text=CopyTextButton(uid))]]))
     else:
-        for pub, p in items[:40]:
-            hs = groups["hs"].get(pub, 0)
-            seen = "" if group == "off" else ("\n🔌 подключён сейчас" if is_online(hs) else
-                                               f"\n💤 не подключён, последний раз: {fmt_date(hs) if hs else 'ни разу'}")
-            await message.reply_text(
-                peer_line(state, pub) + seen
-                + (f"\n📶 {OPERATORS[p['op']]}" if p.get("op") in OPERATORS else ""),
-                reply_markup=None if is_admin(p["user"]) else peer_buttons(pub, p["user"]))
+        # Клиенты в порядке их конфигов в группе, каждый один раз.
+        items = list(dict.fromkeys(p["user"] for _, p in items))
+        for uid in items[:40]:
+            await message.reply_text(user_card(state, uid, groups["hs"]), reply_markup=user_buttons(uid))
     if len(items) > 40:
         await message.reply_text(f"Показаны первые 40 из {len(items)}.")
 
@@ -1377,7 +1391,7 @@ async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pub = waiting.partition(":")[2]
         result = await extend_peer(pub, int(text))
         state = load_state()
-        markup = peer_buttons(pub, state["peers"][pub]["user"]) if pub in state["peers"] else None
+        markup = user_buttons(state["peers"][pub]["user"]) if pub in state["peers"] else None
         await update.message.reply_text(result, reply_markup=markup)
         return
     if waiting != "give":
@@ -1462,16 +1476,38 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Рассылка отменена.")
         return
 
+    if action == "usr":
+        await query.answer()
+        await show_user_group(query.message, arg)
+        return
+
+    if action == "uact":
+        # Кнопка карточки клиента: один конфиг — сразу действие, несколько — выбор конфига.
+        what, _, uid = arg.partition(":")
+        state = load_state()
+        peers = user_peers(state, uid)
+        if what != "ext":
+            peers = {k: p for k, p in peers.items() if peer_active(p)}
+        if what == "back" or not peers:
+            await query.answer("Нет подходящих конфигов." if what != "back" else "")
+            await query.edit_message_text(user_card(state, uid), reply_markup=user_buttons(uid))
+            return
+        if len(peers) > 1:
+            await query.answer()
+            verb = {"ext": "продлить", "take": "отключить", "png": "проверить"}[what]
+            rows = [[InlineKeyboardButton(f"{title(p)} — {peer_status(p)}", callback_data=f"{what}:{k}")]
+                    for k, p in sorted(peers.items(), key=lambda kv: kv[1]["name"])]
+            rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"uact:back:{uid}")])
+            await query.edit_message_text(f"{user_card(state, uid)}\n\nКакой конфиг {verb}?",
+                                          reply_markup=InlineKeyboardMarkup(rows))
+            return
+        action, arg = what, next(iter(peers))
+
     if action == "png":
         peer = load_state()["peers"].get(arg)
         await query.answer()
         if peer:
             await query.message.reply_text(f"{user_name(load_state(), peer['user'])}\n" + await check_peer(arg, peer))
-        return
-
-    if action == "usr":
-        await query.answer()
-        await show_user_group(query.message, arg)
         return
 
     if action in ("ext", "exd", "exc", "exb"):
@@ -1483,7 +1519,7 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         if action == "ext":
             await query.answer()
-            await query.edit_message_text(f"{peer_line(state, pub)}\n\nНа сколько продлить?",
+            await query.edit_message_text(f"{user_card(state, peer['user'])}\n\nНа сколько продлить {title(peer)}?",
                                           reply_markup=extend_buttons(pub))
         elif action == "exc":
             await query.answer()
@@ -1491,11 +1527,11 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"На сколько дней продлить {title(peer)}? Пришлите число, например 45.")
         elif action == "exb":
             await query.answer()
-            await query.edit_message_text(peer_line(state, pub), reply_markup=peer_buttons(pub, peer["user"]))
+            await query.edit_message_text(user_card(state, peer["user"]), reply_markup=user_buttons(peer["user"]))
         else:
             result = await extend_peer(pub, int(days))
             await query.answer(result.split("\n")[0][:190])
-            await query.edit_message_text(peer_line(load_state(), pub), reply_markup=peer_buttons(pub, peer["user"]))
+            await query.edit_message_text(user_card(load_state(), peer["user"]), reply_markup=user_buttons(peer["user"]))
         return
 
     if action in ("give", "take"):
@@ -1516,7 +1552,7 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
         state = load_state()
         peer = state["peers"].get(arg)
-        await query.edit_message_text(peer_line(state, arg), reply_markup=peer_buttons(arg, peer["user"]))
+        await query.edit_message_text(user_card(state, peer["user"]), reply_markup=user_buttons(peer["user"]))
         return
 
     async with lock:
