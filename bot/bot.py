@@ -2203,6 +2203,10 @@ async def report_error(title, exc):
 
 
 async def on_error(update, ctx: ContextTypes.DEFAULT_TYPE):
+    # Нажатие кнопки, на которое бот не успел ответить (был выключен или долго работал):
+    # действие уже выполнено, а сама ошибка ничего не значит.
+    if "query is too old" in str(ctx.error).lower() or "query id is invalid" in str(ctx.error).lower():
+        return
     await report_error("Ошибка в боте", ctx.error)
     if isinstance(update, Update) and update.effective_chat:
         try:
