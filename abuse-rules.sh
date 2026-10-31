@@ -49,6 +49,8 @@ up() {
     iptables -I FORWARD 1 -i "$iface" -j "$CHAIN"
   done
 
+  # Ограничение MSS временно выключено: после его появления был массовый сбой.
+  [[ "${MOST_MSS:-0}" == 1 ]] || return 0
   # MTU 1280 минус 40 байт заголовков IPv4 и TCP.
   iptables -t mangle -N "$MSS_CHAIN"
   for iface in $IFACES; do
