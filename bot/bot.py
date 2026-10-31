@@ -191,7 +191,7 @@ MODE_TEXT = (
     "🌍 Весь трафик — для сайтов и приложений. Через VPN идёт всё: и заблокированное, и российское "
     "(российские сайты — через наш российский сервер). Работает в любом приложении, в том числе в AmneziaVPN.\n\n"
     "📱 Только заблокированное — для сайтов и приложений. Через VPN идут только заблокированные: Telegram, "
-    "YouTube, Instagram, WhatsApp, X и игры Supercell. А российские приложения и сайты — банки, Госуслуги, "
+    "YouTube, Instagram, WhatsApp, X, TikTok и игры Supercell. А российские приложения и сайты — банки, Госуслуги, "
     "Ozon, Wildberries, VK — открываются напрямую с телефона, как без VPN: быстро и без ошибок. "
     "Нужно приложение AmneziaWG.\n\n"
     "🎮 Игровой — только для игр: Brawl Stars, Clash Royale, Clash of Clans, Hay Day, Boom Beach. "
@@ -214,6 +214,7 @@ SMART_LIST = (
     "• Discord\n"
     "• Twitch\n"
     "• Reddit и часть зарубежных сайтов на сервисе Fastly\n"
+    "• TikTok — с зарубежной лентой\n"
     "• Игры Supercell: Brawl Stars, Clash Royale, Clash of Clans, Hay Day, Boom Beach\n"
     "• DNS Cloudflare (1.1.1.1), чтобы адреса сайтов не подменяли\n\n"
     "Всё остальное — напрямую, без VPN: банки, Госуслуги, Ozon, Wildberries, VK, Яндекс, "
@@ -606,7 +607,7 @@ def client_conf(peer, params, host, port=None):
         f"Endpoint = {host}:{port or params['ListenPort']}",
         f"AllowedIPs = {router_allowed_ips(host) if peer.get('kind') in ROUTER_KINDS else
                         smart_allowed_ips() if mode_of(peer) == 'smart' else
-                        smart_allowed_ips(GAME_NETS) if mode_of(peer) == 'game' else allowed_ips()}",
+                        smart_allowed_ips(game_only=True) if mode_of(peer) == 'game' else allowed_ips()}",
         "PersistentKeepalive = 25",
     ]
     return "\n".join(lines) + "\n"
@@ -656,26 +657,61 @@ async def refresh_split():
     log.info("раздельный туннель: %d российских сетей -> %d сетей через VPN", len(nets), len(tunnel))
 
 
-# Игровые серверы, недоступные из России: их адреса добавляются в режим «только заблокированное».
+# Адреса, которые бот узнаёт сам и добавляет в режимы (новые файлы конфигов их уже содержат).
+# Игровые серверы Supercell — по DNS раз в 6 часов.
 GAME_HOSTS = ("game.brawlstarsgame.com", "game.clashroyaleapp.com", "gamea.clashofclans.com",
               "game.clashofclans.com", "game.haydaygame.com", "game.boombeachgame.com")
 GAME_IPS = set()
+# TikTok: сети TikTok и ByteDance (RIPEstat, раз в сутки) и адреса его серверов по DNS.
+# Сетей у них много, берём самые крупные — общий список должен остаться около ста.
+TIKTOK_ASNS = (138699, 396986)
+TIKTOK_MAX = 15
+TIKTOK_SEED = ("71.18.16.0/22", "71.18.247.0/24", "71.18.248.0/21", "101.45.200.0/23", "101.45.248.0/22",
+               "103.136.220.0/23", "2404:9dc0::/32")
+TIKTOK_HOSTS = ("www.tiktok.com", "m.tiktok.com", "api.tiktokv.com", "api16-normal-c-useast1a.tiktokv.com",
+                "api16-normal-c-alisg.tiktokv.com", "api22-normal-c-alisg.tiktokv.com",
+                "api16-normal-useast5.tiktokv.us", "log.tiktokv.com", "mon.tiktokv.com")
+TIKTOK_NETS = set(TIKTOK_SEED)
+TIKTOK_IPS = set()
 
 
-async def games_loop():
-    """Раз в 6 часов узнаёт адреса игровых серверов; новые файлы конфигов их уже содержат."""
+async def resolve(hosts):
     loop = asyncio.get_running_loop()
+    found = set()
+    for host in hosts:
+        try:
+            infos = await asyncio.wait_for(loop.getaddrinfo(host, 443, family=socket.AF_INET), 10)
+            found.update(i[4][0] for i in infos)
+        except Exception:
+            pass
+    return found
+
+
+async def dynamic_loop():
+    """Раз в 6 часов: адреса игр и TikTok по DNS; раз в сутки: сети TikTok из RIPEstat."""
+    rounds = 0
     while True:
-        found = set()
-        for host in GAME_HOSTS:
-            try:
-                infos = await asyncio.wait_for(loop.getaddrinfo(host, 9339, family=socket.AF_INET), 10)
-                found.update(i[4][0] for i in infos)
-            except Exception:
-                pass
-        if found:
-            GAME_IPS.clear()
-            GAME_IPS.update(found)
+        for hosts, target in ((GAME_HOSTS, GAME_IPS), (TIKTOK_HOSTS, TIKTOK_IPS)):
+            found = await resolve(hosts)
+            if found:
+                target.clear()
+                target.update(found)
+        if rounds % 4 == 0:
+            nets = []
+            for asn in TIKTOK_ASNS:
+                try:
+                    nets += await asyncio.to_thread(split.fetch_asn_prefixes, asn)
+                except Exception as e:
+                    log.warning("сети TikTok AS%s не скачались: %s", asn, e)
+            if nets:
+                # Самые крупные сети: IPv4 — до TIKTOK_MAX, IPv6 — до 3.
+                v4 = sorted((n for n in nets if n.version == 4), key=lambda n: n.prefixlen)[:TIKTOK_MAX]
+                v6 = sorted((n for n in nets if n.version == 6), key=lambda n: n.prefixlen)[:3]
+                TIKTOK_NETS.clear()
+                TIKTOK_NETS.update(TIKTOK_SEED)
+                TIKTOK_NETS.update(str(n) for n in v4 + v6)
+                log.info("TikTok: взято %d сетей из %d", len(v4) + len(v6), len(nets))
+        rounds += 1
         await asyncio.sleep(6 * 3600)
 
 
@@ -683,9 +719,12 @@ def mode_of(peer):
     return peer.get("mode") if peer.get("mode") in MODES else "full"
 
 
-def smart_allowed_ips(nets=SMART_NETS):
+def smart_allowed_ips(game_only=False):
+    """Список сетей для «только заблокированное» (или только игры для игрового режима)."""
+    nets = [*GAME_NETS] if game_only else [*SMART_NETS, *TIKTOK_NETS]
+    ips = GAME_IPS if game_only else GAME_IPS | TIKTOK_IPS
     nets = [ipaddress.ip_network(n) for n in nets]
-    v4 = [n for n in nets if n.version == 4] + [ipaddress.ip_network(f"{ip}/32") for ip in GAME_IPS]
+    v4 = [n for n in nets if n.version == 4] + [ipaddress.ip_network(f"{ip}/32") for ip in ips]
     v6 = [n for n in nets if n.version == 6]
     return ", ".join(map(str, [*ipaddress.collapse_addresses(v4), *ipaddress.collapse_addresses(v6)]))
 
@@ -2475,7 +2514,7 @@ async def amain():
             await app.start()
             await app.updater.start_polling()
         tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop()),
-                 asyncio.create_task(games_loop())]
+                 asyncio.create_task(dynamic_loop())]
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()

@@ -76,6 +76,17 @@ def fetch_ru_networks(timeout=60):
     raise RuntimeError(f"не удалось скачать список российских сетей: {last_error}")
 
 
+def fetch_asn_prefixes(asn, timeout=30):
+    """Сети, которые сейчас анонсирует автономная система (RIPEstat), в свёрнутом виде."""
+    url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
+    req = urllib.request.Request(url, headers={"User-Agent": "most-bot"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        prefixes = json.loads(resp.read().decode())["data"]["prefixes"]
+    nets = [ipaddress.ip_network(p["prefix"], strict=False) for p in prefixes]
+    return (list(ipaddress.collapse_addresses(n for n in nets if n.version == 4))
+            + list(ipaddress.collapse_addresses(n for n in nets if n.version == 6)))
+
+
 def _complement(direct):
     """Всё IPv4-пространство минус direct, в виде минимального списка префиксов."""
     out = []
