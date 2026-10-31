@@ -12,6 +12,7 @@
 изменения применяются через `awg syncconf` без перезапуска туннеля.
 """
 import asyncio
+import html
 import io
 import ipaddress
 import json
@@ -176,6 +177,24 @@ HELP_TEXT = (
 )
 
 # Подробные инструкции для клиентов — открываются кнопками из «❓ Как подключить».
+# Список для клиентов: что идёт через VPN в режиме «только заблокированное».
+# Сворачиваемая цитата Telegram — показывается свёрнутой, по нажатию разворачивается (parse_mode=HTML).
+SMART_LIST = (
+    "<blockquote expandable>📋 Что идёт через VPN в режиме «только заблокированное» (нажмите, чтобы развернуть)\n\n"
+    "• Telegram\n"
+    "• YouTube\n"
+    "• Google: поиск, Gmail, Карты, Диск, Play Маркет\n"
+    "• Instagram, WhatsApp, Facebook, Threads\n"
+    "• X (Twitter)\n"
+    "• Discord\n"
+    "• Twitch\n"
+    "• Reddit и часть зарубежных сайтов на сервисе Fastly\n"
+    "• DNS Cloudflare (1.1.1.1), чтобы адреса сайтов не подменяли\n\n"
+    "Всё остальное — напрямую, без VPN: банки, Госуслуги, Ozon, Wildberries, VK, Яндекс, "
+    "игры, ChatGPT и другие сайты. Если нужный заблокированный сайт не открывается — "
+    "переключитесь на «весь трафик» или напишите в «🆘 Нужна помощь», добавим его в список.</blockquote>"
+)
+
 GUIDES = {
     "what": (
         "🛒 Что купить?\n\n"
@@ -259,7 +278,8 @@ GUIDES = {
         "3. В приложении удалите старый туннель и добавьте новый файл.\n"
         "Ключи и срок подписки те же, платить заново не нужно. Вернуть режим можно так же.\n\n"
         "Какой выбрать? Пользуетесь в основном Telegram, YouTube, соцсетями — «только заблокированное». "
-        "Какой-то сайт не открывается — переключитесь на «весь трафик»."
+        "Какой-то сайт не открывается — переключитесь на «весь трафик».\n\n"
+        + SMART_LIST
     ),
     "trouble": (
         "🆘 Не работает?\n\n"
@@ -1099,7 +1119,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "help":
-        await query.message.reply_text(GUIDES.get(arg, HELP_TEXT), reply_markup=HELP_BUTTONS)
+        await query.message.reply_text(GUIDES.get(arg, HELP_TEXT), reply_markup=HELP_BUTTONS,
+                                       parse_mode="HTML" if arg == "mode" else None)
         return
 
     if action == "buy":
@@ -1144,7 +1165,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("✅ Да, переключить", callback_data=f"modeyes:{arg}"),
             InlineKeyboardButton("Отмена", callback_data=f"modeno:{arg}")]]))
         await query.message.reply_text(
-            f"🔀 {title(peer)}: переключить на «{'только заблокированное' if smart else 'весь трафик'}»?\n\n"
+            f"🔀 {html.escape(title(peer))}: переключить на «{'только заблокированное' if smart else 'весь трафик'}»?\n\n"
             + ("Через VPN пойдут только Telegram, YouTube и Google, Instagram, WhatsApp, Facebook, X, Discord, "
                "Twitch, Reddit. Всё остальное — российские сайты, банки, Госуслуги, игры — напрямую, "
                "быстро и с вашим обычным IP.\n\n"
@@ -1154,7 +1175,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                "не примениться — тогда через VPN пойдёт всё, как раньше."
                if smart else
                "Через VPN снова пойдёт весь трафик, российские сайты — через наш российский сервер.")
-            + f"\n\nПодробнее: «{BTN_HELP}» → «🔀 Режимы».")
+            + f"\n\nПодробнее: «{BTN_HELP}» → «🔀 Режимы».\n\n" + SMART_LIST, parse_mode="HTML")
     elif action in ("modeyes", "modeno"):
         if action == "modeyes":
             async with lock:
