@@ -57,6 +57,8 @@ RELAY_HOST = os.environ.get("RELAY_HOST", "")
 # зарубежному серверу российские провайдеры часто режут. SEND_DIRECT=1 — выдавать и прямой.
 SEND_DIRECT = os.environ.get("SEND_DIRECT", "0") == "1"
 CLIENT_DNS = os.environ.get("CLIENT_DNS", "1.1.1.1, 1.0.0.1")
+# DNS на VPN-сервере с блокировкой рекламы (ставит adblock.sh); пусто — блокировки нет.
+ADBLOCK_DNS = os.environ.get("ADBLOCK_DNS", "")
 MAX_PEERS = int(os.environ.get("MAX_PEERS", "5"))
 PRICE = int(os.environ.get("PRICE", "100"))
 ROUTER_PRICE = int(os.environ.get("ROUTER_PRICE", "500"))
@@ -309,7 +311,9 @@ GUIDES = {
         "другого оператора из списка: настройки у них разные.\n"
         "   Обновите приложение AmneziaVPN / AmneziaWG до последней версии.\n"
         "5. Один конфиг нельзя включать на двух устройствах одновременно — будут обрывы.\n"
-        "6. Торренты через VPN заблокированы — это не ошибка.\n\n"
+        "6. Торренты через VPN заблокированы — это не ошибка.\n"
+        f"   Не открывается какой-то сайт или приложение — попробуйте выключить «🛡 Реклама» в «{BTN_LIST}» "
+        "(блокировщик рекламы иногда задевает нужное).\n\n"
         "7. Роутер: если после включения VPN пропадает Wi-Fi или интернет — в «Разрешённых IP» стоит 0.0.0.0/0. "
         "Скачайте конфиг заново и импортируйте файл или вставьте список из сообщения бота.\n\n"
         "Не помогло — напишите администратору, приложите скриншот ошибки."
@@ -591,12 +595,24 @@ def obfs_params(peer, params):
     return params
 
 
+def ads_blocked(peer):
+    """Блокируется ли реклама у конфига: DNS с блокировкой есть, клиент её не выключал.
+    В игровом режиме и у роутеров — обычный DNS (у них он не идёт через VPN или настраивается иначе)."""
+    return (bool(ADBLOCK_DNS) and peer.get("ads") != "off" and mode_of(peer) != "game"
+            and peer.get("kind") not in ROUTER_KINDS)
+
+
 def client_conf(peer, params, host, port=None):
+    allowed = (router_allowed_ips(host) if peer.get("kind") in ROUTER_KINDS else
+               smart_allowed_ips() if mode_of(peer) == "smart" else
+               smart_allowed_ips(game_only=True) if mode_of(peer) == "game" else allowed_ips())
+    if ads_blocked(peer) and mode_of(peer) == "smart":
+        allowed += f", {ADBLOCK_DNS}/32"  # DNS с блокировкой — на VPN-сервере, запросы к нему идут через VPN
     lines = [
         "[Interface]",
         f"PrivateKey = {peer['priv']}",
         f"Address = {peer['ip']}/32",
-        f"DNS = {CLIENT_DNS}",
+        f"DNS = {ADBLOCK_DNS if ads_blocked(peer) else CLIENT_DNS}",
         "MTU = 1280",
     ]
     lines += [f"{k} = {v}" for k, v in obfs_params(peer, params).items()]
@@ -605,9 +621,7 @@ def client_conf(peer, params, host, port=None):
         "[Peer]",
         f"PublicKey = {run(['awg', 'pubkey'], params['PrivateKey'] + chr(10))}",
         f"Endpoint = {host}:{port or params['ListenPort']}",
-        f"AllowedIPs = {router_allowed_ips(host) if peer.get('kind') in ROUTER_KINDS else
-                        smart_allowed_ips() if mode_of(peer) == 'smart' else
-                        smart_allowed_ips(game_only=True) if mode_of(peer) == 'game' else allowed_ips()}",
+        f"AllowedIPs = {allowed}",
         "PersistentKeepalive = 25",
     ]
     return "\n".join(lines) + "\n"
@@ -1128,6 +1142,9 @@ async def list_configs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                               callback_data=f"opc:{pub}")])
         if p.get("kind") not in ROUTER_KINDS:
             rows.append([InlineKeyboardButton(f"🔀 Режим: {MODES[mode_of(p)]}", callback_data=f"mode:{pub}")])
+        if ADBLOCK_DNS and p.get("kind") not in ROUTER_KINDS and mode_of(p) != "game":
+            rows.append([InlineKeyboardButton("🛡 Реклама: " + ("блокируется" if ads_blocked(p) else "не блокируется"),
+                                              callback_data=f"ads:{pub}")])
         rows.append([InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}")])
         buttons = InlineKeyboardMarkup(rows)
         icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
@@ -1285,6 +1302,25 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML", reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton(("✅ " if m == cur else "") + n, callback_data=f"mset:{m}:{arg}")]
                  for m, n in MODES.items()]))
+    elif action == "ads":
+        async with lock:
+            state = load_state()
+            p = state["peers"].get(arg)
+            if p.get("ads") == "off":
+                p.pop("ads")
+            else:
+                p["ads"] = "off"
+            save_state(state)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            f"🛡 {title(p)}: реклама " + ("блокируется." if ads_blocked(p) else "не блокируется.")
+            + ("\n\nБлокируются рекламные и следящие серверы на сайтах и в приложениях. Если какой-то сайт "
+               "или приложение перестали работать — выключите блокировку этой же кнопкой."
+               if ads_blocked(p) else ""))
+        if peer_active(p):
+            await query.message.reply_text("Вот новый файл. Удалите старый туннель в приложении и добавьте этот "
+                                           "(ключи и срок те же).")
+            await send_peer(query.message.chat_id, p)
     elif action == "opc":
         await query.message.reply_text(f"{title(peer)}: {OP_QUESTION}", reply_markup=op_picker("ops", f":{arg}"))
     elif action == "get":
