@@ -8,6 +8,7 @@
 #
 #   sudo bash ru-route.sh 'СТРОКА-КЛЮЧ из ru-node.sh'
 #   sudo bash ru-route.sh off      — отключить
+#   sudo bash ru-route.sh watchdog — поставить только сторожа туннеля (на уже настроенный сервер)
 set -euo pipefail
 
 AWG_DIR=/etc/amnezia/amneziawg
@@ -20,9 +21,72 @@ die() { echo "Ошибка: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "запустите через sudo"
 [[ $# -eq 1 ]] || die "использование: sudo bash ru-route.sh 'СТРОКА-КЛЮЧ' (её печатает ru-node.sh)"
 
+# Сторож: если туннель до российского сервера перестал отвечать (например, соединение
+# заблокировали по дороге), перезапускает его — он выходит с нового порта. Не помогло —
+# выключает туннель, и российские сайты идут из Нидерландов, а не зависают у всех клиентов.
+# Раз в минуту пробует поднять туннель снова.
+install_watchdog() {
+  cat >/usr/local/sbin/most-ru-watch <<'WEOF'
+#!/bin/bash
+CONF=/etc/amnezia/amneziawg/awg1.conf
+OFF=/run/most-ru-watch.off   # туннель выключил сторож, а не администратор
+[[ -f $CONF ]] || exit 0
+alive() { ping -c 3 -i 0.5 -W 2 -q 10.66.0.1 >/dev/null 2>&1; }
+log() { logger -t most-ru-watch "$*"; echo "$(date '+%F %T') $*" >>/var/log/most-ru-watch.log; }
+
+if ip link show awg1 >/dev/null 2>&1; then
+  alive && exit 0
+  log "туннель не отвечает — перезапускаю"
+else
+  [[ -f $OFF ]] || exit 0   # выключен вручную — не трогаем
+fi
+systemctl restart awg-quick@awg1
+sleep 6
+if alive; then
+  rm -f "$OFF"
+  log "туннель снова работает"
+else
+  systemctl stop awg-quick@awg1
+  if [[ ! -f $OFF ]]; then log "не поднялся — выключен, российские сайты пока идут из Нидерландов"; fi
+  touch "$OFF"
+fi
+WEOF
+  chmod 755 /usr/local/sbin/most-ru-watch
+  cat >/etc/systemd/system/most-ru-watch.service <<'WEOF'
+[Unit]
+Description=MOST: проверка туннеля до российского сервера
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/most-ru-watch
+WEOF
+  cat >/etc/systemd/system/most-ru-watch.timer <<'WEOF'
+[Unit]
+Description=MOST: проверять туннель до российского сервера раз в минуту
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+[Install]
+WantedBy=timers.target
+WEOF
+  systemctl daemon-reload
+  systemctl enable --now most-ru-watch.timer >/dev/null 2>&1
+}
+
+if [[ "$1" == "watchdog" ]]; then
+  [[ -f "$CONF" ]] || die "туннель до российского сервера ещё не настроен"
+  install_watchdog
+  # Туннель могли выключить вручную во время сбоя — пусть сторож сам решит, поднимать ли его.
+  ip link show awg1 >/dev/null 2>&1 || touch /run/most-ru-watch.off
+  /usr/local/sbin/most-ru-watch
+  if ip link show awg1 >/dev/null 2>&1; then echo "Сторож поставлен. Туннель работает."
+  else echo "Сторож поставлен. Туннель сейчас не отвечает и выключен — сторож будет пробовать раз в минуту."; fi
+  echo "Журнал: /var/log/most-ru-watch.log"
+  exit 0
+fi
+
 if [[ "$1" == "off" ]]; then
-  systemctl disable --now most-ru-update.timer awg-quick@awg1 2>/dev/null || true
-  rm -f /etc/systemd/system/most-ru-update.{service,timer} "$CONF"
+  systemctl disable --now most-ru-watch.timer most-ru-update.timer awg-quick@awg1 2>/dev/null || true
+  rm -f /etc/systemd/system/most-ru-{update,watch}.{service,timer} /usr/local/sbin/most-ru-watch "$CONF"
   systemctl daemon-reload
   # Возвращаем раздельный туннель в конфигах клиентов.
   sed -i '/^SPLIT_RU=/d' /etc/most/bot.env 2>/dev/null && systemctl restart most-bot || true
@@ -147,6 +211,8 @@ WantedBy=timers.target
 EOF
 systemctl daemon-reload
 systemctl enable --now most-ru-update.timer >/dev/null 2>&1
+
+install_watchdog
 
 echo "==> Проверяю туннель"
 sleep 3
