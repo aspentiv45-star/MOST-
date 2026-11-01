@@ -538,7 +538,8 @@ def next_free_ip(state, params):
     iface = ipaddress.ip_interface(params["Address"].split(",")[0].strip())
     used = {p["ip"] for p in state["peers"].values()} | {str(iface.ip)}
     for host in iface.network.hosts():
-        if str(host) not in used:
+        # Адреса на .0 и .255 в сетях больше /24 формально годятся, но некоторые устройства их не любят.
+        if str(host) not in used and host.packed[-1] not in (0, 255):
             return str(host)
     raise RuntimeError("в подсети закончились адреса")
 

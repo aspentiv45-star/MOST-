@@ -153,7 +153,7 @@ EOF
   cat >"$AWG_CONF" <<EOF
 [Interface]
 PrivateKey = $PRIV
-Address = $SUBNET.1/24
+Address = $SUBNET.1/22
 ListenPort = $PORT
 Jc = $JC
 Jmin = $JMIN
@@ -164,14 +164,20 @@ H1 = $H1
 H2 = $H2
 H3 = $H3
 H4 = $H4
-PostUp = iptables -I FORWARD -i %i -j ACCEPT; iptables -I FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s $SUBNET.0/24 -o $WAN -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -s $SUBNET.0/24 -o $WAN -j MASQUERADE
+PostUp = iptables -I FORWARD -i %i -j ACCEPT; iptables -I FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s $SUBNET.0/22 -o $WAN -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -s $SUBNET.0/22 -o $WAN -j MASQUERADE
 EOF
   umask 022
 fi
 
 # MTU 1280 и у сервера: иначе он шлёт клиентам (у них 1280) пакеты крупнее, и на мобильном
 # интернете они теряются — сайты «висят», игры лагают.
+# Сеть клиентов: была /24 (253 конфига), теперь /22 (1021). Старые адреса 10.8.0.x в неё входят.
+if grep -q "^Address = $SUBNET.1/24" "$AWG_CONF"; then
+  echo "==> Расширяю сеть клиентов до $SUBNET.0/22 (до 1021 конфига)"
+  sed -i "s|^Address = $SUBNET.1/24|Address = $SUBNET.1/22|; s|-s $SUBNET.0/24 |-s $SUBNET.0/22 |g" "$AWG_CONF"
+fi
+
 # (временно выключено: после этого изменения был массовый сбой)
 # grep -q '^MTU' "$AWG_CONF" || sed -i '/^ListenPort/a MTU = 1280' "$AWG_CONF"
 
