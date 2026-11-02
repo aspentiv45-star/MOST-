@@ -623,7 +623,7 @@ def client_conf(peer, params, host, port=None):
                smart_allowed_ips() if mode_of(peer) == "smart" else
                smart_allowed_ips(game_only=True) if mode_of(peer) == "game" else allowed_ips())
     if ads_blocked(peer) and mode_of(peer) == "smart":
-        allowed += f", {ADBLOCK_DNS}/32"  # DNS с блокировкой — на VPN-сервере, запросы к нему идут через VPN
+        allowed += f",{ADBLOCK_DNS}/32"  # DNS с блокировкой — на VPN-сервере, запросы к нему идут через VPN
     lines = [
         "[Interface]",
         f"PrivateKey = {peer['priv']}",
@@ -777,7 +777,7 @@ def smart_allowed_ips(game_only=False):
     nets = [ipaddress.ip_network(n) for n in nets]
     v4 = [n for n in nets if n.version == 4] + [ipaddress.ip_network(f"{ip}/32") for ip in ips]
     v6 = [n for n in nets if n.version == 6]
-    return ", ".join(map(str, [*ipaddress.collapse_addresses(v4), *ipaddress.collapse_addresses(v6)]))
+    return ",".join(map(str, [*ipaddress.collapse_addresses(v4), *ipaddress.collapse_addresses(v6)]))
 
 
 async def split_loop():
@@ -807,6 +807,20 @@ def file_base(peer):
     return label if TUNNEL_NAME.fullmatch(label) else peer["name"]
 
 
+def qr_png(text):
+    """QR-код конфига или None, если он не помещается даже в самый ёмкий QR (около 2900 символов)."""
+    try:
+        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, border=2)
+        qr.add_data(text)
+        qr.make(fit=True)
+    except Exception:
+        return None
+    png = io.BytesIO()
+    qr.make_image().save(png, format="PNG")
+    png.seek(0)
+    return png
+
+
 async def send_peer(chat_id, peer):
     params = server_params(peer_iface(peer)[1])
     # Имя файла становится именем туннеля; на iOS оно не длиннее 15 символов.
@@ -825,12 +839,12 @@ async def send_peer(chat_id, peer):
                                      caption=f"{filename} — {peer_status(peer)}")
         if peer.get("kind") in ROUTER_KINDS:
             continue
-        # Конфиг с раздельным туннелем не помещается в QR-код — тогда только файл.
-        if len(text) < 2900:
-            png = io.BytesIO()
-            qrcode.make(text).save(png, format="PNG")
-            png.seek(0)
+        png = qr_png(text)
+        if png:
             await USER_BOT.send_photo(chat_id, photo=png, caption=f"QR-код: {filename}")
+        else:
+            await USER_BOT.send_message(chat_id, f"{filename}: в этом режиме список сетей слишком длинный для QR-кода — "
+                                                 "добавьте туннель из файла выше («Импорт из файла»).")
     if peer.get("kind") in ROUTER_KINDS:
         await USER_BOT.send_message(chat_id, router_help(peer, params))
 
