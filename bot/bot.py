@@ -392,6 +392,9 @@ def load_state():
     state.setdefault("tickets", {})
     state.setdefault("next_ticket", 1)
     state.setdefault("news", [])  # история обновлений для «Что нового»: [{"date": ts, "text": ...}]
+    # Опросы: {id: {"q", "opts", "votes": {uid: номер варианта}, "created", "closed"}}
+    state.setdefault("polls", {})
+    state.setdefault("next_poll", 1)
     # Переход со старой схемы «подписка на человека»: срок переносится на его конфиги.
     for p in state["peers"].values():
         if "until" not in p:
@@ -1216,11 +1219,59 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, reply_markup=HELP_BUTTONS)
 
 
+# ---------- опросы ----------
+
+def poll_results(poll, mine=None):
+    """Результаты опроса с процентами и полосками; mine — номер варианта, за который голосовал этот человек."""
+    votes = list(poll["votes"].values())
+    total = len(votes)
+    lines = []
+    for i, opt in enumerate(poll["opts"]):
+        n = votes.count(i)
+        pct = round(100 * n / total) if total else 0
+        bar = "▓" * round(pct / 10) + "░" * (10 - round(pct / 10))
+        lines.append(f"{'✅ ' if i == mine else ''}{opt}\n{bar} {pct}% ({n})")
+    return "\n\n".join(lines) + f"\n\nВсего голосов: {total}" + (" · опрос закрыт" if poll.get("closed") else "")
+
+
+def poll_buttons(pid, poll):
+    if poll.get("closed"):
+        return None
+    rows = [[InlineKeyboardButton(opt, callback_data=f"pv:{pid}:{i}")] for i, opt in enumerate(poll["opts"])]
+    rows.append([InlineKeyboardButton("🔄 Обновить результаты", callback_data=f"pv:{pid}:r")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def on_poll_vote(query, arg):
+    """Голос клиента: записываем и показываем ему общие результаты в процентах. Голос можно поменять."""
+    pid, _, choice = arg.partition(":")
+    uid = str(query.from_user.id)
+    async with lock:
+        state = load_state()
+        poll = state["polls"].get(pid)
+        if not poll:
+            await query.answer("Опрос не найден.")
+            return
+        if choice.isdigit() and not poll.get("closed") and int(choice) < len(poll["opts"]):
+            poll["votes"][uid] = int(choice)
+            save_state(state)
+    await query.answer("Голос учтён" if choice.isdigit() and not poll.get("closed") else "")
+    text = f"🗳 {poll['q']}\n\n" + poll_results(poll, poll["votes"].get(uid))
+    try:
+        await query.edit_message_text(text, reply_markup=poll_buttons(pid, poll))
+    except Exception:
+        pass  # результаты не изменились — Telegram не даёт отредактировать сообщение на тот же текст
+
+
 async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
     action, _, arg = query.data.partition(":")
     await query.answer()
+
+    if action == "pv":
+        await on_poll_vote(query, arg)
+        return
 
     if action == "tku":
         kind, _, tid = arg.partition(":")
@@ -1429,8 +1480,9 @@ ABTN_STATS = "📊 Статистика"
 ABTN_RESEND = "📤 Разослать конфиги"
 ABTN_NEWS = "📢 Оповестить об обновлении"
 ABTN_TICKETS = "📨 Жалобы"
+ABTN_POLL = "🗳 Опрос"
 ADMIN_KEYBOARD = ReplyKeyboardMarkup([[ABTN_PAY, ABTN_TICKETS], [ABTN_USERS, ABTN_GIVE], [ABTN_STATS, ABTN_RESEND],
-                                      [ABTN_NEWS, BTN_CLEAR]],
+                                      [ABTN_NEWS, ABTN_POLL], [BTN_CLEAR]],
                                      resize_keyboard=True)
 
 
@@ -1716,6 +1768,21 @@ async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if waiting and waiting.startswith(("tk_reply:", "tk_give:", "tk_spam:")):
         await admin_ticket_text(update, ctx, waiting)
         return
+    if waiting == "poll":
+        lines = [l.strip() for l in update.message.text.splitlines() if l.strip()]
+        if len(lines) < 3 or len(lines) > 11:
+            ctx.user_data["await"] = "poll"
+            await update.message.reply_text("Нужно: первая строка — вопрос, дальше от 2 до 10 вариантов, каждый с новой "
+                                            "строки. Пришлите ещё раз.")
+            return
+        ctx.user_data["poll_draft"] = {"q": lines[0][:250], "opts": [o[:60] for o in lines[1:]]}
+        draft = ctx.user_data["poll_draft"]
+        await update.message.reply_text(
+            f"Клиенты получат:\n\n🗳 {draft['q']}\n\n" + "\n".join(f"• {o}" for o in draft["opts"])
+            + f"\n\nРазослать {len(load_state()['users'])} клиентам?",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗳 Да, разослать", callback_data="poll:yes"),
+                                                InlineKeyboardButton("Отмена", callback_data="poll:no")]]))
+        return
     if waiting == "news":
         ctx.user_data["news_text"] = update.message.text.strip()
         users = len(load_state()["users"])
@@ -1786,6 +1853,10 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if action == "tk":
         kind, _, tid = arg.partition(":")
         await on_ticket_button(query, ctx, kind, tid)
+        return
+
+    if action == "poll":
+        await on_admin_poll(query, ctx, arg)
         return
 
     if action == "news":
@@ -1928,6 +1999,89 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_caption(f"{query.message.caption}\n\n{result}")
     else:
         await query.edit_message_text(f"{query.message.text}\n\n{result}")
+
+
+@admin_only
+async def admin_poll(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """«🗳 Опрос»: результаты последнего опроса или сразу создание нового."""
+    polls = load_state()["polls"]
+    if not polls:
+        await poll_new_ask(update.message, ctx)
+        return
+    pid = max(polls, key=int)
+    await update.message.reply_text(admin_poll_text(pid, polls[pid]), reply_markup=admin_poll_buttons(pid, polls[pid]))
+
+
+def admin_poll_text(pid, poll):
+    voted = len(poll["votes"])
+    return (f"🗳 Опрос №{pid} от {fmt_day(poll['created'])}: {poll['q']}\n"
+            f"Разослан: {poll.get('sent', 0)}, проголосовали: {voted}\n\n" + poll_results(poll))
+
+
+def admin_poll_buttons(pid, poll):
+    row = [InlineKeyboardButton("🔄 Обновить", callback_data=f"poll:show:{pid}")]
+    if not poll.get("closed"):
+        row.append(InlineKeyboardButton("🔒 Закрыть", callback_data=f"poll:close:{pid}"))
+    return InlineKeyboardMarkup([row, [InlineKeyboardButton("🆕 Новый опрос", callback_data="poll:new")]])
+
+
+async def poll_new_ask(message, ctx):
+    ctx.user_data["await"] = "poll"
+    await message.reply_text("Пришлите опрос одним сообщением: первая строка — вопрос, дальше варианты ответа, "
+                             "каждый с новой строки (от 2 до 10). Например:\n\n"
+                             "Чем пользуетесь чаще?\nТелефон\nКомпьютер\nОбоими")
+
+
+async def on_admin_poll(query, ctx, arg):
+    what, _, pid = arg.partition(":")
+    await query.answer()
+    if what == "new":
+        await poll_new_ask(query.message, ctx)
+        return
+    if what == "no":
+        ctx.user_data.pop("poll_draft", None)
+        await query.edit_message_text("Опрос отменён.")
+        return
+    if what == "yes":
+        draft = ctx.user_data.pop("poll_draft", None)
+        if not draft:
+            await query.edit_message_text(f"Опрос потерялся — нажмите «{ABTN_POLL}» ещё раз.")
+            return
+        async with lock:
+            state = load_state()
+            pid = str(state["next_poll"])
+            state["next_poll"] += 1
+            state["polls"][pid] = {**draft, "votes": {}, "created": int(time.time()), "closed": False}
+            save_state(state)
+        await query.edit_message_text("🗳 Рассылаю опрос…")
+        poll = state["polls"][pid]
+        sent = 0
+        for uid in list(state["users"]):
+            try:
+                await USER_BOT.send_message(int(uid), f"🗳 Опрос\n\n{poll['q']}", reply_markup=poll_buttons(pid, poll))
+                sent += 1
+            except Exception:
+                pass
+        async with lock:
+            state = load_state()
+            state["polls"][pid]["sent"] = sent
+            save_state(state)
+        poll = state["polls"][pid]
+        await query.edit_message_text(admin_poll_text(pid, poll), reply_markup=admin_poll_buttons(pid, poll))
+        return
+    async with lock:
+        state = load_state()
+        poll = state["polls"].get(pid)
+        if not poll:
+            await query.edit_message_text("Опрос не найден.")
+            return
+        if what == "close":
+            poll["closed"] = True
+            save_state(state)
+    try:
+        await query.edit_message_text(admin_poll_text(pid, poll), reply_markup=admin_poll_buttons(pid, poll))
+    except Exception:
+        pass  # ничего не изменилось
 
 
 @admin_only
@@ -2602,6 +2756,7 @@ def build_admin_app():
     app.add_handler(MessageHandler(filters.Text([ABTN_STATS]), admin_stats))
     app.add_handler(MessageHandler(filters.Text([ABTN_RESEND]), admin_resend_ask))
     app.add_handler(MessageHandler(filters.Text([ABTN_NEWS]), admin_news_ask))
+    app.add_handler(MessageHandler(filters.Text([ABTN_POLL]), admin_poll))
     app.add_handler(MessageHandler(filters.Text([ABTN_TICKETS]), admin_tickets))
     app.add_handler(MessageHandler(filters.Text([BTN_CLEAR]), admin_only(clear_and_start)))
     app.add_handler(CommandHandler("resend", admin_resend_ask))
