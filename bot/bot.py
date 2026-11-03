@@ -242,7 +242,9 @@ SMART_LIST = (
     "• Twitch\n"
     "• Reddit и часть зарубежных сайтов на сервисе Fastly\n"
     "• TikTok — с зарубежной лентой\n"
-    "• ChatGPT, Claude, Gemini\n"
+    "• Нейросети: ChatGPT, Sora, Claude, Gemini, Copilot, Grok, Perplexity, Mistral, DeepSeek, Poe, "
+    "Character.AI, Midjourney, Suno, Udio, Runway, Leonardo, ElevenLabs, Ideogram, Pika, Cursor, "
+    "GitHub Copilot, Meta AI, Hugging Face (кроме Алисы и GigaChat — они работают напрямую)\n"
     "• Signal, Viber\n"
     "• Netflix, Spotify, SoundCloud\n"
     "• LinkedIn, Medium, Patreon, Notion\n"
@@ -741,8 +743,18 @@ EXTRA_ASNS = {"Spotify": 8403, "LinkedIn": 14413}
 EXTRA_NETS = set()
 # На общих облаках (Cloudflare, AWS) — только точные адреса по DNS, чтобы не тянуть через VPN чужие сайты.
 SMART_HOSTS = (
+    # Нейросети (кроме российских — Алисы и GigaChat: они работают напрямую и могут не пустить с иностранного IP)
     "chatgpt.com", "chat.openai.com", "openai.com", "api.openai.com", "cdn.oaistatic.com", "ab.chatgpt.com",
-    "claude.ai", "gemini.google.com",
+    "sora.com", "sora.chatgpt.com",
+    "claude.ai", "api.anthropic.com", "anthropic.com",
+    "gemini.google.com", "aistudio.google.com", "notebooklm.google.com",
+    "copilot.microsoft.com", "www.bing.com", "sydney.bing.com",
+    "grok.com", "x.ai", "api.x.ai",
+    "www.perplexity.ai", "perplexity.ai",
+    "chat.mistral.ai", "chat.deepseek.com", "poe.com", "character.ai", "huggingface.co",
+    "www.midjourney.com", "cdn.midjourney.com", "suno.com", "studio-api.prod.suno.com", "www.udio.com",
+    "app.runwayml.com", "app.leonardo.ai", "elevenlabs.io", "ideogram.ai", "pika.art",
+    "cursor.com", "api2.cursor.sh", "api.githubcopilot.com", "meta.ai",
     "signal.org", "chat.signal.org", "storage.signal.org", "cdn.signal.org", "cdn2.signal.org",
     "viber.com", "www.viber.com", "dl-media.viber.com",
     "soundcloud.com", "api-v2.soundcloud.com", "cf-media.sndcdn.com",
