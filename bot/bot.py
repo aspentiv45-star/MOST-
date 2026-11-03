@@ -207,167 +207,87 @@ async def clear_chat(bot, chat_id, last_id):
                 break
 
 HELP_TEXT = (
-    "Как подключиться — коротко:\n\n"
-    "1. Установите AmneziaVPN или AmneziaWG (App Store / Google Play / amnezia.org).\n"
-    f"2. Нажмите «{BTN_BUY}», оплатите и пришлите скриншот перевода.\n"
-    "3. После подтверждения бот пришлёт файл конфига.\n"
-    "4. В приложении: «+» → импорт из файла (на iPhone: нажмите на файл → «Поделиться» → Amnezia).\n"
-    "5. Включите туннель и проверьте на ipinfo.io — должны быть Нидерланды.\n\n"
-    + ("Российские сайты и приложения работают напрямую, VPN выключать не нужно.\n\n" if SPLIT_RU else "")
-    + ("Если конфиг с «-nl» в названии не подключается — пользуйтесь основным.\n\n"
-       if RELAY_HOST and SEND_DIRECT else "")
-    + f"Цены на {DAYS} дней: конфиг для себя (одно устройство) — {PRICE} ₽, для роутера (весь дом) — {ROUTER_PRICE} ₽.\n"
-    "Для второго устройства купите ещё один конфиг.\n"
-    f"Продлить конфиг: «{BTN_LIST}» → «🔄 Продлить».\n\n"
-    "👇 Подробные инструкции для вашего устройства:"
+    "Как подключиться:\n"
+    "1. Установите приложение AmneziaWG (App Store / Google Play).\n"
+    f"2. «{BTN_BUY}» → оплатите → пришлите скриншот перевода.\n"
+    "3. Бот пришлёт конфиг — добавьте его в приложение и включите.\n\n"
+    f"{PRICE} ₽ за {DAYS} дней на устройство, роутер — {ROUTER_PRICE} ₽.\n"
+    "👇 Инструкция для вашего устройства:"
 )
 
 # Подробные инструкции для клиентов — открываются кнопками из «❓ Как подключить».
 MODE_TEXT = (
-    "Для сайтов и приложений — первые два режима, для игр — третий.\n\n"
-    "🌍 Весь трафик — для сайтов и приложений. Через VPN идёт всё: и заблокированное, и российское "
-    "(российские сайты — через наш российский сервер). Работает в любом приложении, в том числе в AmneziaVPN.\n\n"
-    "📱 Только заблокированное — для сайтов и приложений. Через VPN идут только заблокированные: Telegram, "
-    "YouTube, Instagram, WhatsApp, X, TikTok и игры Supercell. А российские приложения и сайты — банки, Госуслуги, "
-    "Ozon, Wildberries, VK — открываются напрямую с телефона, как без VPN: быстро и без ошибок. "
-    "Подключение идёт напрямую в Нидерланды, поэтому пинг ниже. Если не подключается — у вашего оператора "
-    "не проходит прямое подключение, выберите «Весь трафик». Нужно приложение AmneziaWG.\n\n"
-    "🎮 Игровой — для игр, два варианта:\n"
-    "• 📱 Для телефона — только игры: Brawl Stars, Clash Royale, Clash of Clans, Hay Day, Boom Beach, Roblox "
-    "(серверы, вход, магазин, обновления) и серверы Cloudflare. Чтобы было удобно во время игры, через VPN "
-    "работают ещё Telegram, Discord и YouTube (ответить, позвать команду, посмотреть гайд). Остальные "
-    "заблокированные сайты и приложения (Instagram, TikTok и др.) в нём НЕ работают: закончили играть — "
-    "переключитесь обратно.\n"
-    "• 💻 Для ПК — всё через VPN, кроме того, что лучше работает напрямую из России: Steam, CS2, Dota 2, "
-    "Faceit, КиберШок, Яндекс Музыка и российские сайты. Discord, Spotify, Telegram и серверы Cloudflare — "
-    "через VPN с минимальной задержкой, античиты (кроме Faceit) — тоже через VPN. zapret и другие обходы "
-    "блокировок на время VPN выключите.\n"
-    "В обоих вариантах подключение идёт напрямую в Нидерланды, минуя российский сервер, — пинг самый низкий. "
-    "Если не подключается — у оператора не проходит прямое подключение: на телефоне играйте в «Только "
-    "заблокированное», на ПК — в «Весь трафик». Нужно приложение AmneziaWG."
+    "🌍 Весь трафик — через VPN идёт всё. Работает везде, в любом приложении.\n\n"
+    "📱 Только заблокированное — через VPN Telegram, YouTube, Instagram, TikTok, нейросети и др., "
+    "а банки, Госуслуги и российские приложения — напрямую. Лучший вариант для телефона.\n\n"
+    "🎮 Игровой — минимальный пинг:\n"
+    "• телефон: игры + Telegram, Discord и YouTube;\n"
+    "• ПК: всё через VPN, кроме Steam, CS2, Dota 2, Faceit и российских сайтов.\n\n"
+    "Не подключается «Только заблокированное» или «Игровой» — выберите «Весь трафик»."
 )
 
 # Список для клиентов: что идёт через VPN в режиме «только заблокированное».
 # Сворачиваемая цитата Telegram — показывается свёрнутой, по нажатию разворачивается (parse_mode=HTML).
 SMART_LIST = (
-    "<blockquote expandable>📋 Что идёт через VPN в режиме «только заблокированное» (нажмите, чтобы развернуть)\n\n"
-    "• Telegram\n"
-    "• YouTube\n"
-    "• Google: поиск, Gmail, Карты, Диск, Play Маркет\n"
-    "• Instagram, WhatsApp, Facebook, Threads\n"
-    "• X (Twitter)\n"
-    "• Discord\n"
-    "• Twitch\n"
-    "• Reddit и часть зарубежных сайтов на сервисе Fastly\n"
-    "• TikTok — с зарубежной лентой\n"
-    "• Нейросети: ChatGPT, Sora, Claude, Gemini, Copilot, Grok, Perplexity, Mistral, DeepSeek, Poe, "
-    "Character.AI, Midjourney, Suno, Udio, Runway, Leonardo, ElevenLabs, Ideogram, Pika, Cursor, "
-    "GitHub Copilot, Meta AI, Hugging Face (кроме Алисы и GigaChat — они работают напрямую)\n"
-    "• Signal, Viber\n"
-    "• Netflix, Spotify, SoundCloud\n"
-    "• LinkedIn, Medium, Patreon, Notion\n"
-    "• Игры: Brawl Stars, Clash Royale, Clash of Clans, Hay Day, Boom Beach, Roblox\n"
-    "• DNS Cloudflare (1.1.1.1), чтобы адреса сайтов не подменяли\n\n"
-    "Всё остальное — напрямую, без VPN: банки, Госуслуги, Ozon, Wildberries, VK, Яндекс, "
-    "остальные игры и другие сайты. Если нужный заблокированный сайт не открывается — "
-    "переключитесь на «весь трафик» или напишите в «🆘 Нужна помощь», добавим его в список.</blockquote>"
+    "<blockquote expandable>📋 Что идёт через VPN в «Только заблокированное» (нажмите)\n\n"
+    "Telegram, YouTube, Google, Instagram, WhatsApp, Facebook, X, Discord, Twitch, Reddit, TikTok, "
+    "Netflix, Spotify, SoundCloud, Signal, Viber, LinkedIn, Medium, Patreon, Notion, нейросети "
+    "(ChatGPT, Claude, Gemini, Grok, Perplexity, Midjourney и др.), игры Supercell и Roblox.\n\n"
+    "Остальное — напрямую. Чего-то не хватает — напишите в «🆘 Нужна помощь».</blockquote>"
 )
 
 GUIDES = {
     "what": (
         "🛒 Что купить?\n\n"
-        f"📱 «Для себя» — {PRICE} ₽\n"
-        "Телефон, планшет или компьютер. Один конфиг — одно устройство. "
-        "Для двух телефонов купите два конфига.\n\n"
-        f"📡 «Роутер AmneziaWG» — {ROUTER_PRICE} ₽\n"
-        "Для роутеров Keenetic (KeeneticOS 4.2 и новее) и OpenWrt. VPN работает сразу на всех устройствах дома. "
-        "Соединение замаскировано, провайдеры его не режут.\n\n"
-        "❗ Другие роутеры (TP-Link, Asus, Xiaomi, MikroTik, роутеры провайдеров) умеют только обычный WireGuard, "
-        "а его провайдеры режут — VPN на них работать не будет. Для них купите конфиг «Для себя» на каждое устройство.\n\n"
-        "Не уверены — берите «Для себя»: работает у всех."
+        f"📱 Для себя — {PRICE} ₽: одно устройство (телефон или компьютер).\n"
+        f"📡 Роутер — {ROUTER_PRICE} ₽: весь дом. Только Keenetic (KeeneticOS 4.2+) и OpenWrt.\n\n"
+        "Другие роутеры (TP-Link, Asus и др.) не подойдут. Не уверены — берите «Для себя»."
     ),
     "ios": (
         "🍏 iPhone и iPad\n\n"
-        "1. Установите из App Store приложение AmneziaWG (или AmneziaVPN).\n"
-        f"2. В боте: «{BTN_LIST}» → «⬇️ Скачать». Придёт файл vpn1.conf.\n"
-        "3. Нажмите на файл → значок «Поделиться» (квадрат со стрелкой) → выберите AmneziaWG.\n"
-        "   Если AmneziaWG нет в списке: «Сохранить в Файлы», затем в AmneziaWG «+» → «Создать из файла или архива» → выберите vpn1.conf.\n"
-        "4. iPhone спросит «Разрешить добавление конфигураций VPN?» → «Разрешить», подтвердите код или Face ID.\n"
-        "5. Включите переключатель напротив vpn1.\n"
-        "6. Проверка: откройте YouTube и Telegram — должны работать.\n\n"
-        "📱 На телефоне через VPN идут только заблокированные сервисы (Telegram, YouTube, Instagram, "
-        "WhatsApp и др.), а российские приложения, банки и игры — напрямую, быстро и без отключения VPN. "
-        "Поэтому ipinfo.io и 2ip.ru покажут ваш обычный IP — это нормально. Нужен VPN для всего — "
-        f"«{BTN_LIST}» → «🔀 Режим». Используйте приложение AmneziaWG: в AmneziaVPN этот режим может не работать.\n\n"
-        "❗ Включайте только один конфиг и выключите другие VPN-приложения."
+        "1. Установите AmneziaWG из App Store.\n"
+        f"2. «{BTN_LIST}» → «⬇️ Скачать» → «iPhone».\n"
+        "3. Нажмите на файл → «Поделиться» → AmneziaWG → «Разрешить».\n"
+        "4. Включите переключатель."
     ),
     "android": (
         "🤖 Android\n\n"
-        "1. Установите из Google Play приложение AmneziaWG (или AmneziaVPN).\n"
-        f"2. В боте: «{BTN_LIST}» → «⬇️ Скачать». Придёт файл vpn1.conf.\n"
-        "3. Нажмите на файл → «⋮» → «Сохранить в загрузки» (или «Сохранить в музыку/файлы»).\n"
-        "4. В AmneziaWG нажмите «+» → «Импорт из файла» → папка «Загрузки» → vpn1.conf.\n"
-        "   Вместо шагов 3–4 можно нажать «+» → «Сканировать QR-код» и навести камеру на QR из бота (если он пришёл).\n"
-        "   Файл открывается как текст и не сохраняется? Установите AmneziaVPN, скопируйте 🔑 ключ из сообщения бота "
-        "(нажмите на него) и в AmneziaVPN нажмите «➕» → «Вставить ключ».\n"
-        "5. Включите переключатель напротив vpn1, на вопрос о VPN-подключении нажмите «ОК».\n"
-        "6. Проверка: откройте YouTube и Telegram — должны работать.\n\n"
-        "📱 На телефоне через VPN идут только заблокированные сервисы (Telegram, YouTube, Instagram, "
-        "WhatsApp и др.), а российские приложения, банки и игры — напрямую, быстро и без отключения VPN. "
-        "Поэтому ipinfo.io и 2ip.ru покажут ваш обычный IP — это нормально. Нужен VPN для всего — "
-        f"«{BTN_LIST}» → «🔀 Режим». Используйте приложение AmneziaWG: в AmneziaVPN этот режим может не работать.\n\n"
-        "❗ Включайте только один конфиг и выключите другие VPN-приложения."
+        "1. Установите AmneziaVPN из Google Play.\n"
+        f"2. «{BTN_LIST}» → «⬇️ Скачать» → «Android» → «🔑 Ключ».\n"
+        "3. Нажмите на ключ (он скопируется) → в AmneziaVPN «➕» → «Вставить ключ».\n"
+        "4. Нажмите «Подключиться».\n\n"
+        "Или файлом в AmneziaWG: «➕» → «Импорт из файла»."
     ),
     "pc": (
-        "💻 Компьютер (Windows, macOS, Linux)\n\n"
-        "1. Скачайте AmneziaVPN с сайта amnezia.org и установите.\n"
-        f"2. В боте (Telegram на компьютере): «{BTN_LIST}» → «⬇️ Скачать» → сохраните vpn1.conf.\n"
-        "3. В AmneziaVPN: «+» (или «Добавить сервер») → «Файл с настройками» → выберите vpn1.conf.\n"
-        "4. Нажмите «Подключиться».\n"
-        "5. Проверка: откройте ipinfo.io — должны быть Нидерланды (Netherlands).\n\n"
-        "❗ Один конфиг — одно устройство. Для компьютера и телефона нужны два конфига."
+        "💻 Компьютер\n\n"
+        "1. Установите AmneziaWG (amnezia.org).\n"
+        f"2. «{BTN_LIST}» → «⬇️ Скачать» → «Windows, Mac» → сохраните файл.\n"
+        "3. В AmneziaWG: «Импорт из файла» → выберите файл → «Подключить»."
     ),
     "router-awg": (
-        "📡 Роутер AmneziaWG (Keenetic, OpenWrt)\n\n"
-        "Keenetic (KeeneticOS 4.2 и новее):\n"
-        "1. Откройте my.keenetic.net → «Интернет» → «Другие подключения» → «WireGuard» → «Загрузить из файла» → rtr1.conf.\n"
-        "2. Включите у подключения «Использовать для выхода в интернет».\n"
-        "3. Откройте my.keenetic.net/a и выполните команду, которую бот прислал вместе с конфигом "
-        "(начинается с «interface Wireguard0 wireguard asc»), затем «system configuration save».\n"
-        "4. Выключите и включите подключение.\n\n"
-        "OpenWrt:\n"
-        "1. System → Software: установите kmod-amneziawg, amneziawg-tools, luci-proto-amneziawg.\n"
-        "2. Network → Interfaces → Add new interface → протокол AmneziaWG → «Import configuration» → rtr1.conf.\n"
-        "3. Добавьте интерфейс в зону wan и включите его.\n\n"
-        "Проверка: с любого устройства дома ipinfo.io — Нидерланды."
+        "📡 Роутер (Keenetic, OpenWrt)\n\n"
+        "Keenetic:\n"
+        "1. my.keenetic.net → «Интернет» → «Другие подключения» → «WireGuard» → «Загрузить из файла».\n"
+        "2. Включите «Использовать для выхода в интернет».\n"
+        "3. Выполните на my.keenetic.net/a команду из сообщения бота, затем «system configuration save».\n\n"
+        "OpenWrt: установите amneziawg-tools и luci-proto-amneziawg, добавьте интерфейс AmneziaWG "
+        "→ «Import configuration» → файл, затем зону wan."
     ),
     "mode": (
-        "🔀 Режимы VPN\n\n"
-        "У каждого конфига три режима:\n\n"
+        "🔀 Режимы\n\n"
         + MODE_TEXT +
-        "\n\nКак поменять:\n"
-        f"1. «{BTN_LIST}» → под нужным конфигом «🔀 Режим» → выберите режим.\n"
-        "2. Бот пришлёт новый файл.\n"
-        "3. В приложении удалите старый туннель и добавьте новый файл.\n"
-        "Ключи и срок подписки те же, платить заново не нужно.\n\n"
+        f"\n\nПоменять: «{BTN_LIST}» → «🔀 Режим». Бот пришлёт новый файл — замените им старый.\n\n"
         + SMART_LIST
     ),
     "trouble": (
         "🆘 Не работает?\n\n"
-        f"1. Проверьте срок: «{BTN_LIST}» — у конфига должен быть 🟢. Если ⚪️ — продлите.\n"
-        "2. Выключите и включите VPN. Выключите другие VPN-приложения.\n"
-        f"3. Скачайте конфиг заново («{BTN_LIST}» → «⬇️ Скачать»), удалите старый в приложении и импортируйте новый.\n"
-        f"4. Не подключается или тормозит на мобильном интернете — «{BTN_LIST}» → «📶 Оператор» → выберите своего "
-        "оператора (или «Другой»), удалите старый туннель и импортируйте новый файл. Не помогло — попробуйте "
-        "другого оператора из списка: настройки у них разные.\n"
-        "   Обновите приложение AmneziaVPN / AmneziaWG до последней версии.\n"
-        "5. Один конфиг нельзя включать на двух устройствах одновременно — будут обрывы.\n"
-        "6. Торренты через VPN заблокированы — это не ошибка.\n"
-        f"   Не открывается какой-то сайт или приложение — попробуйте выключить «🛡 Реклама» в «{BTN_LIST}» "
-        "(блокировщик рекламы иногда задевает нужное).\n\n"
-        "7. Роутер: если после включения VPN пропадает Wi-Fi или интернет — в «Разрешённых IP» стоит 0.0.0.0/0. "
-        "Скачайте конфиг заново и импортируйте файл или вставьте список из сообщения бота.\n\n"
-        "Не помогло — напишите администратору, приложите скриншот ошибки."
+        f"1. Проверьте срок в «{BTN_LIST}» (🟢 — активен).\n"
+        "2. Выключите и включите VPN, закройте другие VPN.\n"
+        "3. Скачайте конфиг заново и замените старый.\n"
+        "4. Не открывается какой-то сайт — выключите «🛡 Реклама».\n"
+        "5. Не подключается «Только заблокированное» или «Игровой» — выберите «Весь трафик».\n"
+        "6. Один конфиг — одно устройство.\n\n"
+        f"Не помогло — «{BTN_SUPPORT}»."
     ),
 }
 
@@ -1101,13 +1021,10 @@ async def deliver_peer(chat_id, peer, how):
             key = vpn_key(peer, params, host, port or params["ListenPort"], text)
             # Кнопка «Скопировать» в Telegram вмещает только 256 символов, а ключ длиннее,
             # поэтому ключ — моноширинным текстом: одно нажатие на него копирует целиком.
-            await USER_BOT.send_message(chat_id, f"🔑 Ключ {html.escape(title(peer))} — нажмите на него, чтобы "
-                                                 f"скопировать:\n\n<code>{key}</code>", parse_mode="HTML")
-            await USER_BOT.send_message(
-                chat_id, "✅ Ключ скопирован? Теперь:\n"
-                         "1. Откройте приложение AmneziaVPN (нет — установите из Google Play).\n"
-                         "2. Нажмите «➕» (или «Добавить VPN») → «Вставить ключ» / «Ключ из буфера обмена».\n"
-                         "3. Нажмите «Подключиться».")
+            await USER_BOT.send_message(chat_id, f"🔑 Нажмите на ключ, чтобы скопировать:\n\n<code>{key}</code>",
+                                        parse_mode="HTML")
+            await USER_BOT.send_message(chat_id, "Скопировали? Откройте AmneziaVPN → «➕» → «Вставить ключ» → "
+                                                 "«Подключиться».")
     if peer.get("kind") in ROUTER_KINDS:
         await USER_BOT.send_message(chat_id, router_help(peer, params))
 
@@ -1211,8 +1128,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mine = user_peers(state, update.effective_user.id)
     active = sum(1 for p in mine.values() if peer_active(p))
     await update.message.reply_text(
-        f"Привет! Это VPN на AmneziaWG.\nНа {DAYS} дней: для себя (одно устройство) — {PRICE} ₽, "
-        f"для роутера (весь дом) — {ROUTER_PRICE} ₽.\n\n"
+        f"Привет! Это VPN MOST.\n{PRICE} ₽ за {DAYS} дней на устройство, роутер — {ROUTER_PRICE} ₽.\n\n"
         + (f"Ваших конфигов: {len(mine)}, активных: {active}. Подробнее — «{BTN_LIST}»." if mine
            else f"🎁 Попробуйте бесплатно {TRIAL_DAYS} дня: «{BTN_BUY}» → «Попробовать бесплатно»."
            if trial_available(state, update.effective_user.id)
@@ -1282,10 +1198,9 @@ async def start_trial(query, ctx):
 
     await query.edit_message_reply_markup(reply_markup=None)
     await USER_BOT.send_message(
-        user.id, f"🎁 Пробный период на {TRIAL_DAYS} дня: ваш конфиг {title(peer)} работает до "
-                 f"{fmt_date(peer['until'])}.\n\nКак подключить — «{BTN_HELP}».\n"
-                 f"Понравится — «{BTN_LIST}» → «🔄 Продлить» ({PRICE} ₽ за {DAYS} дней), "
-                 "этот же конфиг продолжит работать.", reply_markup=KEYBOARD)
+        user.id, f"🎁 Пробный период до {fmt_date(peer['until'])}.\n"
+                 f"Понравится — «{BTN_LIST}» → «🔄 Продлить», этот же конфиг продолжит работать.",
+        reply_markup=KEYBOARD)
     await send_peer(user.id, peer)
     for admin in ADMINS:
         try:
@@ -1554,10 +1469,9 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"{title(peer)}: срок закончился, сначала продлите его.")
             return
         if how == "and":
-            await query.edit_message_text(f"🤖 {title(peer)}: как добавить в приложение?\n\n"
-                                          "🔑 Ключ — проще всего: скопировать и вставить в AmneziaVPN.\n"
-                                          "📄 Файл — для AmneziaWG («Импорт из файла»).\n"
-                                          "🔳 QR-код — отсканировать камерой с другого экрана.",
+            await query.edit_message_text(f"🤖 {title(peer)}: как добавить?\n"
+                                          "🔑 Ключ — для AmneziaVPN, проще всего.\n"
+                                          "📄 Файл — для AmneziaWG.",
                                           reply_markup=android_buttons(pub))
         elif how == "back":
             await query.edit_message_text(f"📥 {title(peer)}: на каком устройстве подключаете?",
@@ -1636,16 +1550,12 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             save_state(state)
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text(
-            f"🔀 {title(p)}: режим «{MODES[mode]}»."
-            + ("\n\n⚠️ Это режим для игр: кроме игр через VPN работают только Telegram, Discord и YouTube. "
-               "Instagram, TikTok и другие заблокированные сайты в нём не откроются — для них переключитесь на "
-               "«🌍 Весь трафик» или «📱 Только заблокированное»." if mode == "game" else
-               "\n\n🎮 Весь трафик идёт через VPN с одного IP — античиты не рвут соединение, Discord и Telegram "
-               "работают. zapret и другие обходы блокировок на время VPN выключите. Если не подключается — "
-               "у провайдера не проходит прямое подключение, выберите «🌍 Весь трафик»." if mode == "pcgame" else ""))
+            f"🔀 {title(p)}: режим «{MODES[mode]}». Замените старый туннель новым."
+            + ("\n\n🎮 Работают игры, Telegram, Discord и YouTube. Для остального — «🌍 Весь трафик» или "
+               "«📱 Только заблокированное»." if mode == "game" else
+               "\n\n🎮 zapret на время VPN выключите. Не подключается — выберите «🌍 Весь трафик»."
+               if mode == "pcgame" else ""))
         if peer_active(p):
-            await query.message.reply_text("Вот новый файл. Удалите старый туннель в приложении и добавьте этот "
-                                           "(ключи и срок те же).")
             await send_peer(query.message.chat_id, p)
         return
 
@@ -1664,8 +1574,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not peer_active(peer):
             await query.message.reply_text("Срок конфига закончился: продлите его, и он заработает с новыми настройками.")
             return
-        await query.message.reply_text("Вот обновлённый файл. Удалите старый туннель в приложении и добавьте этот "
-                                       "(ключи те же, платить заново не нужно).")
+        await query.message.reply_text("Замените старый туннель новым:")
         await send_peer(query.message.chat_id, peer)
         return
 
@@ -1719,8 +1628,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cur = mode_of(peer)
         mark = lambda on: "✅ " if on else ""
         await query.message.reply_text(
-            f"🔀 {html.escape(title(peer))}: сейчас «{MODES[cur]}». Какой режим нужен?\n\n" + MODE_TEXT
-            + f"\n\nПодробнее: «{BTN_HELP}» → «🔀 Режимы».\n\n" + SMART_LIST,
+            f"🔀 {html.escape(title(peer))}: сейчас «{MODES[cur]}».\n\n" + MODE_TEXT + "\n\n" + SMART_LIST,
             parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(mark(cur == "full") + MODES["full"], callback_data=f"mset:full:{arg}")],
                 [InlineKeyboardButton(mark(cur == "smart") + MODES["smart"], callback_data=f"mset:smart:{arg}")],
@@ -1753,12 +1661,9 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text(
             f"🛡 {title(p)}: реклама " + ("блокируется." if ads_blocked(p) else "не блокируется.")
-            + ("\n\nБлокируются рекламные и следящие серверы на сайтах и в приложениях. Если какой-то сайт "
-               "или приложение перестали работать — выключите блокировку этой же кнопкой."
-               if ads_blocked(p) else ""))
+            + (" Сломался какой-то сайт — выключите этой же кнопкой." if ads_blocked(p) else "")
+            + " Замените старый туннель новым:")
         if peer_active(p):
-            await query.message.reply_text("Вот новый файл. Удалите старый туннель в приложении и добавьте этот "
-                                           "(ключи и срок те же).")
             await send_peer(query.message.chat_id, p)
     elif action == "opc":
         await query.message.reply_text(f"{title(peer)}: {OP_QUESTION}", reply_markup=op_picker("ops", f":{arg}"))
