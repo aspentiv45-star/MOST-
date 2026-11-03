@@ -1053,9 +1053,11 @@ async def deliver_peer(chat_id, peer, how):
             # Кнопка «Скопировать» в Telegram вмещает только 256 символов, а ключ длиннее,
             # поэтому ключ — моноширинным текстом: одно нажатие на него копирует целиком.
             # Отдельным сообщением только ключ — его удобно скопировать целиком, без лишнего текста.
-            await USER_BOT.send_message(chat_id, f"<code>{key}</code>", parse_mode="HTML")
+            key_msg = await USER_BOT.send_message(chat_id, f"<code>{key}</code>", parse_mode="HTML")
             await USER_BOT.send_message(chat_id, "👆 Нажмите на ключ — он скопируется.\n"
-                                                 "Затем AmneziaVPN → «➕» → «Вставить ключ» → «Подключиться».")
+                                                 "Затем AmneziaVPN → «➕» → «Вставить ключ» → «Подключиться».",
+                                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                                            "✅ Готово", callback_data=f"kdone:{key_msg.message_id}")]]))
     if peer.get("kind") in ROUTER_KINDS:
         await USER_BOT.send_message(chat_id, router_help(peer, params))
 
@@ -1535,6 +1537,15 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # Сначала экран конфига (с пометкой), потом файлы под ним.
             await show_card(query, pub, "✅ Отправил ниже 👇")
             await deliver_peer(query.message.chat_id, peer, how)
+        return
+
+    if action == "kdone":
+        # «✅ Готово» под ключом: убираем и ключ, и подсказку — ключ в чате больше не нужен.
+        ids = [query.message.message_id] + ([int(arg)] if arg.isdigit() else [])
+        try:
+            await ctx.bot.delete_messages(query.message.chat_id, ids)
+        except Exception:
+            pass
         return
 
     if action == "cfgl":
