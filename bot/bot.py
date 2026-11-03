@@ -232,7 +232,7 @@ MODE_TEXT = (
 SMART_LIST = (
     "<blockquote expandable>📋 Что идёт через VPN в «Только заблокированное» (нажмите)\n\n"
     "Telegram, YouTube, Google, Instagram, WhatsApp, Facebook, X, Discord, Twitch, Reddit, TikTok, "
-    "Netflix, Spotify, SoundCloud, Signal, Viber, LinkedIn, Medium, Patreon, Notion, нейросети "
+    "Netflix, Spotify, SoundCloud, Signal, Viber, LinkedIn, Medium, Patreon, Notion, Speedtest, нейросети "
     "(ChatGPT, Claude, Gemini, Grok, Perplexity, Midjourney и др.), игры Supercell и Roblox.\n\n"
     "Остальное — напрямую. Чего-то не хватает — напишите в «🆘 Нужна помощь».</blockquote>"
 )
@@ -741,6 +741,10 @@ SMART_SERVICES = {
     "Spotify": ("open.spotify.com", "spclient.wg.spotify.com", "audio-ak-spotify-com.akamaized.net"),
     "LinkedIn": ("www.linkedin.com",), "Medium": ("medium.com",), "Patreon": ("www.patreon.com",),
     "Notion": ("www.notion.so",),
+    # Speedtest (Ookla) — в России ограничен. Через VPN сайт и выбор сервера; сам замер идёт к выбранному
+    # серверу проверки (их тысячи у разных провайдеров, в список не уместить).
+    "Speedtest": ("www.speedtest.net", "speedtest.net", "b.cdn.speedtest.net", "c.speedtest.net",
+                  "api.speedtest.net", "www.ookla.com"),
 }
 SERVICE_IPS = {}  # сервис -> текущие адреса
 SMART_IPS = set()
