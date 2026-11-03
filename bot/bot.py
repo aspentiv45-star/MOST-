@@ -1038,18 +1038,25 @@ async def deliver_peer(chat_id, peer, how):
     params = server_params(peer_iface(peer)[1])
     for filename, host, port in peer_variants(peer):
         text = client_conf(peer, params, host, port)
+        file_msg = None
         if how in ("file", "ios", "all"):
-            await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()), filename=filename,
-                                         caption=f"{filename} — {peer_status(peer)}")
+            file_msg = await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()), filename=filename,
+                                                    caption=f"{filename} — {peer_status(peer)}",
+                                                    reply_markup=InlineKeyboardMarkup([[CLOSE_BUTTON]]))
         if peer.get("kind") in ROUTER_KINDS:
             continue
         if how in ("qr", "ios"):
             png = qr_png(text)
             if png:
-                await USER_BOT.send_photo(chat_id, photo=png, caption=f"QR-код: {filename}")
+                # Файл и QR пришли вместе (iPhone) — одна кнопка под QR убирает оба.
+                done = (InlineKeyboardButton("✅ Готово — убрать файл и QR", callback_data=f"kdone:{file_msg.message_id}")
+                        if file_msg else CLOSE_BUTTON)
+                await USER_BOT.send_photo(chat_id, photo=png, caption=f"QR-код: {filename}",
+                                          reply_markup=InlineKeyboardMarkup([[done]]))
             elif how == "qr":
                 await USER_BOT.send_message(chat_id, f"{filename}: в этом режиме конфиг слишком длинный для QR-кода — "
-                                                     "возьмите ключ или файл.")
+                                                     "возьмите ключ или файл.",
+                                            reply_markup=InlineKeyboardMarkup([[CLOSE_BUTTON]]))
         if how == "key":
             key = vpn_key(peer, params, host, port or params["ListenPort"], text)
             # Кнопка «Скопировать» в Telegram вмещает только 256 символов, а ключ длиннее,
