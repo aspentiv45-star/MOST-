@@ -20,6 +20,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -1517,8 +1518,9 @@ ABTN_RESEND = "📤 Разослать конфиги"
 ABTN_NEWS = "📢 Оповестить об обновлении"
 ABTN_TICKETS = "📨 Жалобы"
 ABTN_POLL = "🗳 Опрос"
+ABTN_SERVERS = "🖥 Серверы"
 ADMIN_KEYBOARD = ReplyKeyboardMarkup([[ABTN_PAY, ABTN_TICKETS], [ABTN_USERS, ABTN_GIVE], [ABTN_STATS, ABTN_RESEND],
-                                      [ABTN_NEWS, ABTN_POLL], [BTN_CLEAR]],
+                                      [ABTN_NEWS, ABTN_POLL], [ABTN_SERVERS, BTN_CLEAR]],
                                      resize_keyboard=True)
 
 
@@ -1891,6 +1893,15 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await on_ticket_button(query, ctx, kind, tid)
         return
 
+    if action == "srv":
+        await query.answer()
+        text, _ = await server_status()
+        try:
+            await query.edit_message_text(text, reply_markup=SERVERS_BUTTON)
+        except Exception:
+            pass  # ничего не изменилось
+        return
+
     if action == "poll":
         await on_admin_poll(query, ctx, arg)
         return
@@ -2035,6 +2046,135 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_caption(f"{query.message.caption}\n\n{result}")
     else:
         await query.edit_message_text(f"{query.message.text}\n\n{result}")
+
+
+# ---------- состояние серверов ----------
+
+SERVERS_BUTTON = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Обновить", callback_data="srv:")]])
+
+
+async def sh(*cmd, timeout=15):
+    """Команда без оболочки: код возврата и вывод (не блокирует бота)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.DEVNULL)
+        out = (await asyncio.wait_for(proc.communicate(), timeout))[0].decode(errors="replace")
+        return proc.returncode, out
+    except Exception:
+        return 1, ""
+
+
+async def unit_active(unit):
+    return (await sh("systemctl", "is-active", "--quiet", unit))[0] == 0
+
+
+async def ping_host(host, count=3):
+    """Средний пинг в мс или None, если не отвечает."""
+    rc, out = await sh("ping", "-c", str(count), "-i", "0.3", "-W", "2", "-q", host)
+    for line in out.splitlines():
+        if "min/avg" in line:
+            return round(float(line.split("=")[1].split("/")[1]))
+    return None
+
+
+def _cpu_times():
+    with open("/proc/stat") as f:
+        v = [int(x) for x in f.readline().split()[1:]]
+    return sum(v), v[3] + v[4]  # всего, простой (idle + iowait)
+
+
+def _net_bytes(iface):
+    with open("/proc/net/dev") as f:
+        for line in f:
+            if line.strip().startswith(iface + ":"):
+                v = line.split(":", 1)[1].split()
+                return int(v[0]), int(v[8])
+    return 0, 0
+
+
+async def server_status():
+    """Текст экрана «🖥 Серверы» и список проблем (для уведомлений)."""
+    problems = []
+    rc, out = await sh("ip", "-4", "route", "show", "default")
+    iface = out.split(" dev ")[1].split()[0] if " dev " in out else ""
+    t1, i1 = _cpu_times()
+    n1 = _net_bytes(iface)
+    await asyncio.sleep(1)
+    t2, i2 = _cpu_times()
+    n2 = _net_bytes(iface)
+    cpu = round(100 * (1 - (i2 - i1) / max(1, t2 - t1)))
+    mem = {}
+    with open("/proc/meminfo") as f:
+        for line in f:
+            k, v = line.split(":")
+            mem[k] = int(v.split()[0])
+    mem_pct = round(100 * (1 - mem["MemAvailable"] / mem["MemTotal"]))
+    du = shutil.disk_usage("/")
+    disk_pct = round(100 * du.used / du.total)
+    down, up = (n2[0] - n1[0]) * 8 / 1e6, (n2[1] - n1[1]) * 8 / 1e6
+    total_gb = (n2[0] + n2[1]) / 1e9
+
+    hs = last_handshakes()
+    online = sum(1 for h in hs.values() if is_online(h))
+    vpn_ok = await unit_active(f"awg-quick@{IFACE}")
+    if not vpn_ok:
+        problems.append("VPN (AmneziaWG) на основном сервере не работает")
+    if cpu >= 90:
+        problems.append(f"процессор основного сервера загружен на {cpu}%")
+    if disk_pct >= 90:
+        problems.append(f"диск основного сервера заполнен на {disk_pct}%")
+
+    lines = [f"🖥 Серверы · {datetime.now(TZ).strftime('%H:%M')}", "",
+             f"🇳🇱 Основной ({ENDPOINT_HOST})",
+             f"{'🟢 VPN работает' if vpn_ok else '🔴 VPN не работает'} · подключены сейчас: {online}",
+             f"Процессор {cpu}% · память {mem_pct}% · диск {disk_pct}%",
+             f"Канал сейчас: ↓{down:.0f} ↑{up:.0f} Мбит/с · с запуска сервера {total_gb:.0f} ГБ"]
+
+    if RELAY_HOST:
+        rping = await ping_host(RELAY_HOST)
+        lines += ["", f"🇷🇺 Вход ({RELAY_HOST})",
+                  f"🟢 отвечает · пинг {rping} мс" if rping is not None else "🔴 не отвечает на пинг"]
+        if rping is None:
+            problems.append(f"вход {RELAY_HOST} не отвечает")
+    if os.path.exists(os.path.join(os.path.dirname(CONF), "awg1.conf")):
+        tping = await ping_host("10.66.0.1") if await unit_active("awg-quick@awg1") else None
+        lines.append(f"🟢 туннель для российских сайтов работает · {tping} мс" if tping is not None else
+                     "🔴 туннель для российских сайтов не работает (сторож пробует поднять)")
+        if tping is None:
+            problems.append("туннель для российских сайтов не работает — российские сайты идут из Нидерландов")
+    if ADBLOCK_DNS:
+        ok = await unit_active("dnsmasq")
+        lines += ["", "🛡 Блокировка рекламы: " + ("работает" if ok else "🔴 не работает")]
+        if not ok:
+            problems.append("DNS с блокировкой рекламы не работает — у клиентов с ней не открываются сайты")
+    return "\n".join(lines), problems
+
+
+@admin_only
+async def admin_servers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text, _ = await server_status()
+    await update.message.reply_text(text, reply_markup=SERVERS_BUTTON)
+
+
+async def monitor_loop():
+    """Раз в 2 минуты проверяет серверы; о проблеме, которая держится 2 проверки подряд, и о её
+    исправлении пишет администратору."""
+    seen, alerted = set(), set()
+    while True:
+        await asyncio.sleep(120)
+        try:
+            _, problems = await server_status()
+        except Exception:
+            log.exception("проверка серверов не удалась")
+            continue
+        now = set(problems)
+        for p in sorted((now & seen) - alerted):
+            await notify_admins(f"🔴 {p}\n\nПодробнее: «{ABTN_SERVERS}».")
+            alerted.add(p)
+        for p in sorted(alerted - now):
+            await notify_admins(f"🟢 Снова в порядке: {p}")
+            alerted.discard(p)
+        seen = now
 
 
 @admin_only
@@ -2837,7 +2977,7 @@ def build_user_app():
 def build_admin_app():
     app = Application.builder().bot(ScreenBot(token=ADMIN_TOKEN)).build()
     menu = filters.Text([ABTN_PAY, ABTN_USERS, ABTN_GIVE, ABTN_STATS, ABTN_RESEND, ABTN_NEWS, ABTN_TICKETS,
-                         ABTN_POLL, BTN_CLEAR]) | filters.Command(["start", "help"])
+                         ABTN_POLL, ABTN_SERVERS, BTN_CLEAR]) | filters.Command(["start", "help"])
     admin_menu = filters.User(user_id=ADMINS, allow_empty=True) & menu
     app.add_handler(MessageHandler(admin_menu, screen_begin), group=-1)
     app.add_handler(MessageHandler(admin_menu, screen_end), group=1)
@@ -2854,6 +2994,7 @@ def build_admin_app():
     app.add_handler(MessageHandler(filters.Text([ABTN_RESEND]), admin_resend_ask))
     app.add_handler(MessageHandler(filters.Text([ABTN_NEWS]), admin_news_ask))
     app.add_handler(MessageHandler(filters.Text([ABTN_POLL]), admin_poll))
+    app.add_handler(MessageHandler(filters.Text([ABTN_SERVERS]), admin_servers))
     app.add_handler(MessageHandler(filters.Text([ABTN_TICKETS]), admin_tickets))
     app.add_handler(MessageHandler(filters.Text([BTN_CLEAR]), admin_only(clear_and_start)))
     app.add_handler(CommandHandler("resend", admin_resend_ask))
@@ -2875,7 +3016,7 @@ async def amain():
             await app.start()
             await app.updater.start_polling()
         tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop()),
-                 asyncio.create_task(dynamic_loop())]
+                 asyncio.create_task(dynamic_loop()), asyncio.create_task(monitor_loop())]
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
