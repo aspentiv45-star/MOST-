@@ -931,7 +931,38 @@ def download_buttons(pub):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🍏 iPhone / 💻 Windows, Mac", callback_data=f"dl:ios:{pub}")],
         [InlineKeyboardButton("🤖 Android", callback_data=f"dl:and:{pub}")],
+        [InlineKeyboardButton("⬅️ К конфигу", callback_data=f"cfg:{pub}")],
     ])
+
+
+def back_button(pub):
+    return InlineKeyboardButton("⬅️ Назад", callback_data=f"cfg:{pub}")
+
+
+async def show_card(query, pub, note=""):
+    """Возвращает сообщение к экрану конфига (note — строка сверху: что сейчас изменилось)."""
+    state = load_state()
+    p = state["peers"].get(pub)
+    if not p:
+        await query.edit_message_text("Конфиг не найден.")
+        return
+    text, buttons = config_card(state, pub, p, back=len(user_peers(state, p["user"])) > 1)
+    try:
+        await query.edit_message_text((f"{note}\n\n" if note else "") + text, reply_markup=buttons)
+    except Exception:
+        pass
+
+
+async def show_download(query, pub, note=""):
+    """Экран «скачать новый файл» в том же сообщении — после смены режима, оператора, рекламы."""
+    p = load_state()["peers"].get(pub)
+    if not p:
+        return
+    if not peer_active(p):
+        await show_card(query, pub, f"{note}\nСрок закончился — продлите, и конфиг заработает с новыми настройками.")
+        return
+    await query.edit_message_text(f"{note}\n\n📥 Скачайте новый файл и замените им старый туннель. "
+                                  "На каком устройстве?", reply_markup=download_buttons(pub))
 
 
 def android_buttons(pub):
@@ -1136,15 +1167,18 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=KEYBOARD)
 
 
-async def ask_payment(message, ctx, target, state):
+async def ask_payment(message, ctx, target, state, query=None):
+    """Реквизиты для оплаты; с query — в том же сообщении (продление с экрана конфига, с кнопкой «Назад»)."""
     ctx.user_data["pay_for"] = target
     leave_ticket(ctx)
     warning = f"{router_requirements(target)}\n\n" if target in (NEW_ROUTER, NEW_ROUTER_AWG) else ""
-    await message.reply_text(
-        f"Оплата: {target_label(state, target)} — {price_for(state, target)} ₽ за {DAYS} дней.\n\n"
-        f"{warning}{pay_text()}\n\n"
-        "После оплаты пришлите сюда скриншот перевода одним фото. "
-        "Администратор проверит его, и бот сразу пришлёт результат.")
+    text = (f"Оплата: {target_label(state, target)} — {price_for(state, target)} ₽ за {DAYS} дней.\n\n"
+            f"{warning}{pay_text()}\n\n"
+            "После оплаты пришлите сюда скриншот перевода одним фото.")
+    if query:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back_button(target)]]))
+    else:
+        await message.reply_text(text)
 
 
 async def buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1498,7 +1532,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"📥 {title(peer)}: на каком устройстве подключаете?",
                                           reply_markup=download_buttons(pub))
         elif how in ("ios", "key", "file", "qr"):
-            await query.edit_message_reply_markup(reply_markup=None)
+            # Сначала экран конфига (с пометкой), потом файлы под ним.
+            await show_card(query, pub, "✅ Отправил ниже 👇")
             await deliver_peer(query.message.chat_id, peer, how)
         return
 
@@ -1578,15 +1613,9 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             else:
                 p["mode"] = mode
             save_state(state)
-        await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text(
-            f"🔀 {title(p)}: режим «{MODES[mode]}». Замените старый туннель новым."
-            + ("\n\n🎮 Работают игры, Telegram, Discord и YouTube. Для остального — «🌍 Весь трафик» или "
-               "«📱 Только заблокированное»." if mode == "game" else
-               "\n\n🎮 zapret на время VPN выключите. Не подключается — выберите «🌍 Весь трафик»."
-               if mode == "pcgame" else ""))
-        if peer_active(p):
-            await send_peer(query.message.chat_id, p)
+        await show_download(query, pub, f"✅ Режим: {MODES[mode]}."
+                            + (" Работают игры, Telegram, Discord и YouTube." if mode == "game" else
+                               " zapret на время VPN выключите." if mode == "pcgame" else ""))
         return
 
     if action == "ops":
@@ -1600,12 +1629,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             peer["op"] = op
             get_user(state, query.from_user)["op"] = op
             save_state(state)
-        await query.edit_message_text(f"📶 {title(peer)}: оператор {OPERATORS[op]}.")
-        if not peer_active(peer):
-            await query.message.reply_text("Срок конфига закончился: продлите его, и он заработает с новыми настройками.")
-            return
-        await query.message.reply_text("Замените старый туннель новым:")
-        await send_peer(query.message.chat_id, peer)
+        await show_download(query, pub, f"✅ Оператор: {OPERATORS[op]}.")
         return
 
     if action == "help":
@@ -1644,29 +1668,32 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Конфиг не найден.")
         return
     if action == "renew":
-        await ask_payment(query.message, ctx, arg, state)
+        await ask_payment(query.message, ctx, arg, state, query=query)
     elif action == "ren":
         ctx.user_data["await"] = f"rename:{arg}"
-        await query.message.reply_text(
-            f"✏️ Как назвать {title(peer)}? Например: «Телефон мамы», «Ноутбук» (до 30 символов).\n\n"
-            "Чтобы туннель так же назывался и в приложении Amnezia, напишите латиницей без пробелов, "
-            "до 12 символов, например mama-phone.\n\nПередумали — напишите «отмена».")
+        ctx.user_data["rename_msg"] = (query.message.chat_id, query.message.message_id)
+        await query.edit_message_text(
+            f"✏️ Напишите новое название для {title(peer)}, например «Телефон мамы».\n"
+            "Латиницей без пробелов (mama-phone) — так же будет называться и туннель в приложении.",
+            reply_markup=InlineKeyboardMarkup([[back_button(arg)]]))
     elif action == "cfg":
         many = len(user_peers(state, uid)) > 1
         text, buttons = config_card(state, arg, peer, back=many)
         await query.edit_message_text(text, reply_markup=buttons)
     elif action == "png":
-        await query.message.reply_text(await check_peer(arg, peer))
+        await query.edit_message_text(await check_peer(arg, peer), reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔄 Ещё раз", callback_data=f"png:{arg}"), back_button(arg)]]))
     elif action == "mode":
         # Три кнопки: весь трафик, только заблокированное, игровой; игровой — дальше телефон или ПК.
         cur = mode_of(peer)
         mark = lambda on: "✅ " if on else ""
-        await query.message.reply_text(
+        await query.edit_message_text(
             f"🔀 {html.escape(title(peer))}: сейчас «{MODES[cur]}».\n\n" + MODE_TEXT + "\n\n" + SMART_LIST,
             parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(mark(cur == "full") + MODES["full"], callback_data=f"mset:full:{arg}")],
                 [InlineKeyboardButton(mark(cur == "smart") + MODES["smart"], callback_data=f"mset:smart:{arg}")],
                 [InlineKeyboardButton(mark(cur in ("game", "pcgame")) + "🎮 Игровой", callback_data=f"mgame:{arg}")],
+                [back_button(arg)],
             ]))
     elif action == "mgame":
         cur = mode_of(peer)
@@ -1682,6 +1709,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(mark(cur == "full") + MODES["full"], callback_data=f"mset:full:{arg}")],
             [InlineKeyboardButton(mark(cur == "smart") + MODES["smart"], callback_data=f"mset:smart:{arg}")],
             [InlineKeyboardButton(mark(cur in ("game", "pcgame")) + "🎮 Игровой", callback_data=f"mgame:{arg}")],
+            [back_button(arg)],
         ]))
     elif action == "ads":
         async with lock:
@@ -1692,20 +1720,17 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             else:
                 p["ads"] = "off"
             save_state(state)
-        await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text(
-            f"🛡 {title(p)}: реклама " + ("блокируется." if ads_blocked(p) else "не блокируется.")
-            + (" Сломался какой-то сайт — выключите этой же кнопкой." if ads_blocked(p) else "")
-            + " Замените старый туннель новым:")
-        if peer_active(p):
-            await send_peer(query.message.chat_id, p)
+        await show_download(query, arg, "✅ Реклама " + ("блокируется." if ads_blocked(p) else "не блокируется."))
     elif action == "opc":
-        await query.message.reply_text(f"{title(peer)}: {OP_QUESTION}", reply_markup=op_picker("ops", f":{arg}"))
+        buttons = op_picker("ops", f":{arg}")
+        await query.edit_message_text(f"📶 {title(peer)}: какой у вас оператор?", reply_markup=InlineKeyboardMarkup(
+            [*buttons.inline_keyboard, [back_button(arg)]]))
     elif action == "get":
         if not peer_active(peer):
-            await query.message.reply_text(f"{title(peer)}: срок закончился, сначала продлите его.")
+            await show_card(query, arg, "Срок закончился — сначала продлите.")
             return
-        await send_peer(query.message.chat_id, peer)
+        await query.edit_message_text(f"📥 {title(peer)}: на каком устройстве подключаете?",
+                                      reply_markup=download_buttons(arg))
     elif action == "del":
         await query.edit_message_text(
             f"Удалить {title(peer)}? Оплаченные дни не вернутся.",
@@ -1714,7 +1739,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("Отмена", callback_data=f"delno:{arg}"),
             ]]))
     elif action == "delno":
-        await query.edit_message_text(f"{title(peer)} — {peer_status(peer)}")
+        await show_card(query, arg)
     elif action == "delyes":
         async with lock:
             state = load_state()
@@ -1722,7 +1747,12 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             state["peers"].pop(arg, None)
             apply_or_rollback(state, old_state)
             save_state(state)
-        await query.edit_message_text(f"{title(peer)} удалён.")
+        state = load_state()
+        if user_peers(state, uid):
+            text, buttons = config_list(state, uid)
+            await query.edit_message_text(f"🗑 {title(peer)} удалён.\n\n{text}", reply_markup=buttons)
+        else:
+            await query.edit_message_text(f"🗑 {title(peer)} удалён.")
 
 
 # ---------- админ-бот ----------
@@ -2827,33 +2857,55 @@ async def on_client_ticket_button(query, ctx, action, tid):
         await query.message.reply_text("Главное меню 👇", reply_markup=KEYBOARD)
 
 
-async def rename_peer(update, pub, label):
-    if label.lower() in ("отмена", "отменить", "cancel"):
-        await update.message.reply_text("Хорошо, название не меняю.", reply_markup=KEYBOARD)
-        return
+async def rename_peer(update, ctx, pub, label):
+    """Новое название конфига. Ответ клиента удаляется, исходное сообщение снова становится экраном конфига."""
+    chat_id, msg_id = ctx.user_data.pop("rename_msg", (update.effective_chat.id, None))
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    async def show(note, again=False):
+        if again:  # ждём название ещё раз
+            ctx.user_data["await"] = f"rename:{pub}"
+            ctx.user_data["rename_msg"] = (chat_id, msg_id)
+        state = load_state()
+        peer = state["peers"].get(pub)
+        if not peer:
+            return
+        if again:
+            text, buttons = f"{note}\n\n✏️ Напишите другое название.", InlineKeyboardMarkup([[back_button(pub)]])
+        else:
+            text, buttons = config_card(state, pub, peer, back=len(user_peers(state, peer["user"])) > 1)
+            text = f"{note}\n\n{text}"
+        try:
+            if msg_id:
+                await ctx.bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id, reply_markup=buttons)
+            else:
+                await ctx.bot.send_message(chat_id, text, reply_markup=buttons)
+        except Exception:
+            pass
+
     label = " ".join(label.split())
+    if label.lower() in ("отмена", "отменить", "cancel"):
+        await show("Название не изменено.")
+        return
     if not 1 <= len(label) <= 30:
-        await update.message.reply_text("Название должно быть от 1 до 30 символов. Нажмите «✏️ Название» ещё раз.",
-                                        reply_markup=KEYBOARD)
+        await show("Название — от 1 до 30 символов.", again=True)
         return
     async with lock:
         state = load_state()
         peer = state["peers"].get(pub)
         if not peer or peer["user"] != str(update.effective_user.id):
-            await update.message.reply_text("Конфиг не найден.", reply_markup=KEYBOARD)
             return
         others = [p for k, p in user_peers(state, update.effective_user.id).items() if k != pub]
         if any(p.get("label", "").lower() == label.lower() or p["name"].lower() == label.lower() for p in others):
-            await update.message.reply_text("Такое название уже есть у другого вашего конфига. Придумайте другое.",
-                                            reply_markup=KEYBOARD)
+            await show("Такое название уже есть у другого конфига.", again=True)
             return
         peer["label"] = label
         save_state(state)
-    hint = (f"Чтобы название было и в приложении, скачайте файл заново («{BTN_LIST}» → «⬇️ Скачать»), "
-            "удалите старый туннель и добавьте новый — ключи те же."
-            if TUNNEL_NAME.fullmatch(label) else
-            f"В приложении туннель останется {peer['name']}: для названия в приложении нужна латиница без пробелов.")
-    await update.message.reply_text(f"✏️ Готово: {title(peer)}.\n\n{hint}", reply_markup=KEYBOARD)
+    await show("✅ Название изменено." + (" Чтобы оно появилось и в приложении — скачайте файл заново."
+                                          if TUNNEL_NAME.fullmatch(label) else ""))
 
 
 async def user_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2861,7 +2913,7 @@ async def user_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     waiting = ctx.user_data.get("await") or ""
     if waiting.startswith("rename:"):
         ctx.user_data.pop("await")
-        await rename_peer(update, waiting.partition(":")[2], update.message.text.strip())
+        await rename_peer(update, ctx, waiting.partition(":")[2], update.message.text.strip())
         return
     if waiting.startswith("ticket_more:"):
         if update.message.text.strip().lower() in ("отмена", "отменить", "cancel"):
