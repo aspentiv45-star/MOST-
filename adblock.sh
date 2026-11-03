@@ -73,11 +73,20 @@ cat >"$UPDATE" <<'EOF'
 # MOST: обновить список рекламных доменов (фильтр AdGuard DNS) для dnsmasq.
 LIST=/var/lib/most/adblock.conf
 URL=https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
+# Не блокировать (домен и все его поддомены): плеер YouTube ждёт рекламную вставку от серверов Google
+# и зависает, пока её не перемотать. Свои исключения — по одному домену на строку в /etc/most/adblock-allow.txt.
+ALLOW="youtube.com youtu.be youtube-nocookie.com googlevideo.com ytimg.com ggpht.com googleapis.com gstatic.com
+google.com doubleclick.net googlesyndication.com googleadservices.com googletagservices.com"
+allow_re() {
+  { printf '%s\n' $ALLOW; [[ -f /etc/most/adblock-allow.txt ]] && grep -oE '^[a-z0-9._-]+' /etc/most/adblock-allow.txt; } \
+    | sed 's/\./\\./g' | paste -sd'|' | sed 's/.*/(^|\\.)(&)$/'
+}
 tmp=$(mktemp); raw=$(mktemp)
 # «||домен^» — блокировать домен и поддомены; «@@||домен^» — исключение, такие не блокируем.
 if curl -fsSL --max-time 60 "$URL" -o "$raw" \
    && sed -nE 's/^\|\|([a-z0-9._-]+)\^$/\1/p' "$raw" | sort -u \
       | grep -vxF -f <(sed -nE 's/^@@\|\|([a-z0-9._-]+)\^.*$/\1/p' "$raw"; echo .) \
+      | grep -vE "$(allow_re)" \
       | sed 's|.*|address=/&/#|' >"$tmp" \
    && [[ $(wc -l <"$tmp") -gt 10000 ]]; then
   install -m 644 "$tmp" "$LIST"
