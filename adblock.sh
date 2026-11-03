@@ -56,7 +56,7 @@ domain-needed
 bogus-priv
 conf-file=$LIST
 EOF
-apt-get install -y -qq dnsmasq curl >/dev/null 2>&1 || apt-get install -y dnsmasq curl
+apt-get -o DPkg::Lock::Timeout=600 install -y -qq dnsmasq curl >/dev/null 2>&1 || apt-get -o DPkg::Lock::Timeout=600 install -y dnsmasq curl
 
 cat >"$UPDATE" <<'EOF'
 #!/bin/bash
