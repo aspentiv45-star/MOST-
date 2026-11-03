@@ -588,8 +588,10 @@ def client_conf(peer, params, host, port=None):
                smart_allowed_ips() if mode_of(peer) == "smart" else
                smart_allowed_ips(game_only=True) if mode_of(peer) == "game" else
                PCGAME_NETS[0] if mode_of(peer) == "pcgame" and PCGAME_NETS[0] else allowed_ips())
-    if ads_blocked(peer) and mode_of(peer) == "smart":
-        allowed += f",{ADBLOCK_DNS}/32"  # DNS с блокировкой — на VPN-сервере, запросы к нему идут через VPN
+    # DNS с блокировкой — на VPN-сервере, запросы к нему должны идти через VPN. В списках сетей
+    # («только заблокированное», игровой ПК, раздельный туннель) локальные адреса 10.x вырезаны — добавляем.
+    if ads_blocked(peer) and "0.0.0.0/0" not in allowed:
+        allowed += f",{ADBLOCK_DNS}/32"
     lines = [
         "[Interface]",
         f"PrivateKey = {peer['priv']}",
