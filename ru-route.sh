@@ -11,6 +11,10 @@
 #   sudo bash ru-route.sh watchdog — поставить только сторожа туннеля (на уже настроенный сервер)
 set -euo pipefail
 
+# Ubuntu после установки пакетов спрашивает (needrestart), какие службы перезапустить; в тихом режиме
+# вопрос не виден и установка висит вечно — пусть перезапускает сама и ни о чём не спрашивает.
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
+
 AWG_DIR=/etc/amnezia/amneziawg
 CONF="$AWG_DIR/awg1.conf"
 RULES=/usr/local/sbin/most-ru-route

@@ -9,6 +9,10 @@
 # обновляются только код бота и его настройки.
 set -euo pipefail
 
+# Ubuntu после установки пакетов спрашивает (needrestart), какие службы перезапустить; в тихом режиме
+# вопрос не виден и установка висит вечно — пусть перезапускает сама и ни о чём не спрашивает.
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IFACE=awg0
 AWG_DIR=/etc/amnezia/amneziawg

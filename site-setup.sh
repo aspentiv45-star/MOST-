@@ -10,6 +10,10 @@
 # а не в репозитории. Перед запуском домен должен указывать на IP этого сервера (A-запись).
 set -euo pipefail
 
+# Ubuntu после установки пакетов спрашивает (needrestart), какие службы перезапустить; в тихом режиме
+# вопрос не виден и установка висит вечно — пусть перезапускает сама и ни о чём не спрашивает.
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
+
 die() { echo "Ошибка: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "запустите через sudo"
 cd "$(dirname "$0")"
