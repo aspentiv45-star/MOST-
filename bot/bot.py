@@ -37,6 +37,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    ExtBot,
     MessageHandler,
     filters,
 )
@@ -1209,13 +1210,28 @@ async def list_configs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"{icon} {title(p)} — {peer_status(p)}{device}", reply_markup=buttons)
 
 
-async def news_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    news = load_state()["news"][-10:][::-1]
+def news_screen(show_all=False):
+    """«Что нового»: последние 3 записи или все (сколько влезет в сообщение) и кнопка переключения."""
+    news = load_state()["news"][::-1]
     if not news:
-        await update.message.reply_text("Пока обновлений не было.", reply_markup=KEYBOARD)
-        return
-    text = "🆕 Что нового\n\n" + "\n\n".join(f"📅 {fmt_day(n['date'])}\n{n['text']}" for n in news)
-    await update.message.reply_text(text[:4000], reply_markup=KEYBOARD)
+        return "Пока обновлений не было.", None
+    shown = news if show_all else news[:3]
+    text = "🆕 Что нового\n\n"
+    for n in shown:
+        item = f"📅 {fmt_day(n['date'])}\n{n['text']}\n\n"
+        if len(text) + len(item) > 3900:
+            break
+        text += item
+    if len(news) <= 3:
+        return text.strip(), None
+    button = (InlineKeyboardButton("🔼 Только последние", callback_data="newsv:short") if show_all else
+              InlineKeyboardButton(f"📜 Показать все ({len(news)})", callback_data="newsv:all"))
+    return text.strip(), InlineKeyboardMarkup([[button]])
+
+
+async def news_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text, buttons = news_screen()
+    await update.message.reply_text(text, reply_markup=buttons or KEYBOARD)
 
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1271,6 +1287,14 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = query.from_user.id
     action, _, arg = query.data.partition(":")
     await query.answer()
+
+    if action == "newsv":
+        text, buttons = news_screen(show_all=arg == "all")
+        try:
+            await query.edit_message_text(text, reply_markup=buttons)
+        except Exception:
+            pass
+        return
 
     if action == "refresh":
         # «🔄 Обновить меню» под оповещением: присылаем свежую клавиатуру с кнопками.
@@ -1367,8 +1391,12 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "help":
-        await query.message.reply_text(GUIDES.get(arg, HELP_TEXT), reply_markup=HELP_BUTTONS,
-                                       parse_mode="HTML" if arg == "mode" else None)
+        # Инструкция открывается в том же сообщении, а не новым — чат не засоряется.
+        try:
+            await query.edit_message_text(GUIDES.get(arg, HELP_TEXT), reply_markup=HELP_BUTTONS,
+                                          parse_mode="HTML" if arg == "mode" else None)
+        except Exception:
+            pass  # та же инструкция уже открыта
         return
 
     if action == "buy":
@@ -2248,10 +2276,6 @@ def leave_ticket(ctx):
     ctx.user_data.pop("album", None)
 
 
-async def leave_ticket_on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    leave_ticket(ctx)
-
-
 def open_ticket_buttons(tid):
     """Кнопки под сообщением «обращение принято»: клиент ещё пишет, ответа пока нет."""
     return InlineKeyboardMarkup([
@@ -2727,12 +2751,59 @@ async def clear_and_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await (admin_start if ctx.bot.id == ADMIN_BOT.id else start)(update, ctx)
 
 
+# ---------- чистый чат ----------
+# Нажатие кнопки меню удаляет само нажатие и прошлый экран бота (его текстовые ответы на прошлое
+# нажатие). Файлы конфигов, QR-коды, оплаты, оповещения и переписка поддержки не удаляются:
+# запоминаются только текстовые сообщения, отправленные, пока обрабатывается кнопка меню.
+
+class ScreenBot(ExtBot):
+    """Бот, который запоминает свои ответы на кнопку меню, чтобы удалить их при следующем нажатии."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._active = {}   # chat_id -> id сообщений, отправленных в ответ на текущее нажатие
+        self._screens = {}  # chat_id -> id сообщений прошлого экрана
+
+    async def send_message(self, *args, **kwargs):
+        msg = await super().send_message(*args, **kwargs)
+        if msg.chat_id in self._active:
+            self._active[msg.chat_id].append(msg.message_id)
+        return msg
+
+    async def screen_begin(self, chat_id, user_msg_id):
+        old = self._screens.pop(chat_id, []) + [user_msg_id]
+        try:
+            await self.delete_messages(chat_id, old)
+        except Exception:
+            pass  # старше 48 часов или уже удалены
+        self._active[chat_id] = []
+
+    def screen_end(self, chat_id):
+        self._screens[chat_id] = self._active.pop(chat_id, [])
+
+
+async def screen_begin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.message and isinstance(ctx.bot, ScreenBot):
+        await ctx.bot.screen_begin(update.effective_chat.id, update.message.message_id)
+
+
+async def screen_end(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.message and isinstance(ctx.bot, ScreenBot):
+        ctx.bot.screen_end(update.effective_chat.id)
+
+
+async def user_menu_begin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    leave_ticket(ctx)
+    await screen_begin(update, ctx)
+
+
 def build_user_app():
-    app = Application.builder().token(TOKEN).build()
-    # Кнопки меню и команды выводят клиента из переписки по обращению.
-    app.add_handler(MessageHandler(filters.Text([BTN_BUY, BTN_LIST, BTN_HELP, BTN_NEWS, BTN_SUPPORT, BTN_CLEAR])
-                                   | filters.COMMAND,
-                                   leave_ticket_on_menu), group=-1)
+    app = Application.builder().bot(ScreenBot(token=TOKEN)).build()
+    # Кнопки меню и команды: выход из переписки по обращению и чистый чат (прошлый экран удаляется).
+    menu = filters.Text([BTN_BUY, BTN_LIST, BTN_HELP, BTN_NEWS, BTN_SUPPORT, BTN_CLEAR]) \
+        | filters.Command(["start", "help", "news"])
+    app.add_handler(MessageHandler(menu, user_menu_begin), group=-1)
+    app.add_handler(MessageHandler(menu, screen_end), group=1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(MessageHandler(filters.Text([BTN_BUY]), buy))
@@ -2751,7 +2822,12 @@ def build_user_app():
 
 
 def build_admin_app():
-    app = Application.builder().token(ADMIN_TOKEN).build()
+    app = Application.builder().bot(ScreenBot(token=ADMIN_TOKEN)).build()
+    menu = filters.Text([ABTN_PAY, ABTN_USERS, ABTN_GIVE, ABTN_STATS, ABTN_RESEND, ABTN_NEWS, ABTN_TICKETS,
+                         ABTN_POLL, BTN_CLEAR]) | filters.Command(["start", "help"])
+    admin_menu = filters.User(user_id=ADMINS, allow_empty=True) & menu
+    app.add_handler(MessageHandler(admin_menu, screen_begin), group=-1)
+    app.add_handler(MessageHandler(admin_menu, screen_end), group=1)
     app.add_handler(CommandHandler(["start", "help"], admin_start))
     app.add_handler(CommandHandler("users", admin_users))
     app.add_handler(CommandHandler("stats", admin_stats))
