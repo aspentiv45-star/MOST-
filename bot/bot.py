@@ -120,6 +120,11 @@ GAME_EXTRA_NETS = (
 )
 # Режимы, которые подключаются напрямую к основному серверу (UDP GAME_PORT), минуя вход в России:
 # меньше пинг. «Только заблокированное» тоже — выключить: SMART_DIRECT=0 в bot.env.
+# «Только заблокированное» = весь трафик через VPN, но подключение сразу к основному серверу (без входа
+# в России). Российские адреса основной сервер сам отправляет через российский выход (ru-route.sh),
+# так что банки и Госуслуги работают. Списки сервисов не нужны — ничего не устаревает.
+# Вернуть старый режим со списком сервисов: SMART_FULL=0 в bot.env.
+SMART_FULL = os.environ.get("SMART_FULL", "1") == "1"
 DIRECT_MODES = ("game", "pcgame") + (("smart",) if os.environ.get("SMART_DIRECT", "1") == "1" else ())  # собственная сеть Supercell; адреса серверов ещё и из DNS (GAME_HOSTS)
 
 # Устройства и какой режим им подходит. На телефонах приложение AmneziaWG понимает список сетей,
@@ -218,8 +223,9 @@ HELP_TEXT = (
 # Подробные инструкции для клиентов — открываются кнопками из «❓ Как подключить».
 MODE_TEXT = (
     "🌍 Весь трафик — через VPN идёт всё. Работает везде, в любом приложении.\n\n"
-    "📱 Только заблокированное — через VPN Telegram, YouTube, Instagram, TikTok, нейросети и др., "
-    "а банки, Госуслуги и российские приложения — напрямую. Лучший вариант для телефона.\n\n"
+    "📱 Только заблокированное — всё через VPN сразу в Нидерланды, без сервера в Москве: быстрее. "
+    "Российские сайты и приложения (банки, Госуслуги) VPN сам отправляет через Россию. "
+    "Лучший вариант для телефона.\n\n"
     "🎮 Игровой — минимальный пинг:\n"
     "• телефон: игры (Brawl Stars, Roblox, CoD Mobile, Pokémon GO, Fortnite и др.) + Telegram, Discord и YouTube; "
     "App Store и Google Play — напрямую, чтобы игры качались быстро;\n"
@@ -277,8 +283,8 @@ GUIDES = {
     "mode": (
         "🔀 Режимы\n\n"
         + MODE_TEXT +
-        f"\n\nПоменять: «{BTN_LIST}» → «🔀 Режим». Бот пришлёт новый файл — замените им старый.\n\n"
-        + SMART_LIST
+        f"\n\nПоменять: «{BTN_LIST}» → «🔀 Режим». Бот пришлёт новый файл — замените им старый."
+        + ("" if SMART_FULL else "\n\n" + SMART_LIST)
     ),
     "trouble": (
         "🆘 Не работает?\n\n"
@@ -585,7 +591,7 @@ def ads_blocked(peer):
 
 def client_conf(peer, params, host, port=None):
     allowed = (router_allowed_ips(host) if peer.get("kind") in ROUTER_KINDS else
-               smart_allowed_ips() if mode_of(peer) == "smart" else
+               (FULL_TUNNEL if SMART_FULL else smart_allowed_ips()) if mode_of(peer) == "smart" else
                smart_allowed_ips(game_only=True) if mode_of(peer) == "game" else
                PCGAME_NETS[0] if mode_of(peer) == "pcgame" and PCGAME_NETS[0] else allowed_ips())
     # DNS с блокировкой — на VPN-сервере, запросы к нему должны идти через VPN. В списках сетей
@@ -803,7 +809,7 @@ async def dynamic_loop():
     """Раз в 6 часов: адреса игр и TikTok по DNS; раз в сутки: сети TikTok из RIPEstat."""
     rounds = 0
     while True:
-        for hosts, target in ((GAME_HOSTS, GAME_IPS), (TIKTOK_HOSTS, TIKTOK_IPS)):
+        for hosts, target in ((GAME_HOSTS, GAME_IPS),) + (() if SMART_FULL else ((TIKTOK_HOSTS, TIKTOK_IPS),)):
             found = await resolve(hosts)
             if target is GAME_IPS:
                 found |= await resolve([h for hs in GAME_SERVICES.values() for h in hs], GAME_IP_MAX)
@@ -814,7 +820,7 @@ async def dynamic_loop():
         if found:
             STORE_IPS.clear()
             STORE_IPS.update(found)
-        for name, hosts in SMART_SERVICES.items():
+        for name, hosts in ({} if SMART_FULL else SMART_SERVICES).items():
             found = await resolve(hosts)
             if found:
                 SERVICE_IPS[name] = found
@@ -1056,7 +1062,7 @@ async def send_peer(chat_id, peer):
 
 async def remember_smart_snapshot(peer):
     """Запоминает адреса сервисов, попавшие в файл «Только заблокированное», — чтобы потом понять, что устарели."""
-    if mode_of(peer) != "smart":
+    if mode_of(peer) != "smart" or SMART_FULL:
         return
     pub = peer_pub(peer)
     async with lock:
@@ -1071,6 +1077,8 @@ async def remember_smart_snapshot(peer):
 async def notify_stale_smart():
     """Клиентам «Только заблокированное», у которых в файле не осталось ни одного текущего адреса сервиса,
     бот предлагает скачать файл заново (не чаще раза в 3 дня)."""
+    if SMART_FULL:
+        return
     async with lock:
         state = load_state()
         todo = []
@@ -1783,7 +1791,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cur = mode_of(peer)
         mark = lambda on: "✅ " if on else ""
         await query.edit_message_text(
-            f"🔀 {html.escape(title(peer))}: сейчас «{MODES[cur]}».\n\n" + MODE_TEXT + "\n\n" + SMART_LIST,
+            f"🔀 {html.escape(title(peer))}: сейчас «{MODES[cur]}».\n\n" + MODE_TEXT + ("" if SMART_FULL else "\n\n" + SMART_LIST),
             parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(mark(cur == "full") + MODES["full"], callback_data=f"mset:full:{arg}")],
                 [InlineKeyboardButton(mark(cur == "smart") + MODES["smart"], callback_data=f"mset:smart:{arg}")],
