@@ -864,37 +864,79 @@ def qr_png(text):
     return png
 
 
-async def send_peer(chat_id, peer):
-    params = server_params(peer_iface(peer)[1])
+def peer_variants(peer):
+    """Файлы конфига: имя, адрес и порт подключения."""
     # Имя файла становится именем туннеля; на iOS оно не длиннее 15 символов.
     if mode_of(peer) in ("game", "pcgame") and peer.get("kind") not in ROUTER_KINDS:
         # Игровой режим — напрямую на основной сервер, минуя вход в России.
-        variants = [(f"{file_base(peer)}.conf", ENDPOINT_HOST, GAME_PORT)]
-    elif RELAY_HOST:
+        return [(f"{file_base(peer)}.conf", ENDPOINT_HOST, GAME_PORT)]
+    if RELAY_HOST:
         variants = [(f"{file_base(peer)}.conf", RELAY_HOST, None)]
         if SEND_DIRECT:
             variants.append((f"{file_base(peer)}-nl.conf", ENDPOINT_HOST, None))
-    else:
-        variants = [(f"{file_base(peer)}.conf", ENDPOINT_HOST, None)]
-    for filename, host, port in variants:
+        return variants
+    return [(f"{file_base(peer)}.conf", ENDPOINT_HOST, None)]
+
+
+def peer_pub(peer):
+    """Публичный ключ конфига (по нему кнопки находят конфиг)."""
+    return next((k for k, p in load_state()["peers"].items() if p.get("priv") == peer.get("priv")), None)
+
+
+def download_buttons(pub):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🍏 iPhone / 💻 Windows, Mac", callback_data=f"dl:ios:{pub}")],
+        [InlineKeyboardButton("🤖 Android", callback_data=f"dl:and:{pub}")],
+    ])
+
+
+def android_buttons(pub):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Ключ (рекомендуется)", callback_data=f"dl:key:{pub}")],
+        [InlineKeyboardButton("📄 Файл", callback_data=f"dl:file:{pub}"),
+         InlineKeyboardButton("🔳 QR-код", callback_data=f"dl:qr:{pub}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"dl:back:{pub}")],
+    ])
+
+
+async def send_peer(chat_id, peer):
+    """Выдача конфига: роутеру — сразу файл; телефону и компьютеру — сначала выбор устройства."""
+    pub = peer_pub(peer)
+    if peer.get("kind") in ROUTER_KINDS or not pub:
+        await deliver_peer(chat_id, peer, "all")
+        return
+    await USER_BOT.send_message(chat_id, f"📥 {title(peer)}: на каком устройстве подключаете?",
+                                reply_markup=download_buttons(pub))
+
+
+async def deliver_peer(chat_id, peer, how):
+    """how: file — файл; qr — QR-код; key — ключ для AmneziaVPN; ios — файл и QR; all — всё (роутеры)."""
+    params = server_params(peer_iface(peer)[1])
+    for filename, host, port in peer_variants(peer):
         text = client_conf(peer, params, host, port)
-        await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()), filename=filename,
-                                     caption=f"{filename} — {peer_status(peer)}")
+        if how in ("file", "ios", "all"):
+            await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()), filename=filename,
+                                         caption=f"{filename} — {peer_status(peer)}")
         if peer.get("kind") in ROUTER_KINDS:
             continue
-        png = qr_png(text)
-        if png:
-            await USER_BOT.send_photo(chat_id, photo=png, caption=f"QR-код: {filename}")
-        else:
-            await USER_BOT.send_message(chat_id, f"{filename}: в этом режиме список сетей слишком длинный для QR-кода — "
-                                                 "добавьте туннель из файла выше («Импорт из файла»).")
-        # Ключ — на случай, если файл не открывается (бывает на Android): скопировать и вставить в AmneziaVPN.
-        key = vpn_key(peer, params, host, port or params["ListenPort"], text)
-        if len(key) < 3900:
+        if how in ("qr", "ios"):
+            png = qr_png(text)
+            if png:
+                await USER_BOT.send_photo(chat_id, photo=png, caption=f"QR-код: {filename}")
+            elif how == "qr":
+                await USER_BOT.send_message(chat_id, f"{filename}: в этом режиме конфиг слишком длинный для QR-кода — "
+                                                     "возьмите ключ или файл.")
+        if how == "key":
+            key = vpn_key(peer, params, host, port or params["ListenPort"], text)
+            # Кнопка «Скопировать» в Telegram вмещает только 256 символов, а ключ длиннее,
+            # поэтому ключ — моноширинным текстом: одно нажатие на него копирует целиком.
+            await USER_BOT.send_message(chat_id, f"🔑 Ключ {html.escape(title(peer))} — нажмите на него, чтобы "
+                                                 f"скопировать:\n\n<code>{key}</code>", parse_mode="HTML")
             await USER_BOT.send_message(
-                chat_id, f"🔑 Ключ {html.escape(filename)} — если файл не открывается:\n"
-                         "нажмите на ключ, чтобы скопировать, затем в AmneziaVPN «➕» → «Вставить ключ».\n\n"
-                         f"<code>{key}</code>", parse_mode="HTML")
+                chat_id, "✅ Ключ скопирован? Теперь:\n"
+                         "1. Откройте приложение AmneziaVPN (нет — установите из Google Play).\n"
+                         "2. Нажмите «➕» (или «Добавить VPN») → «Вставить ключ» / «Ключ из буфера обмена».\n"
+                         "3. Нажмите «Подключиться».")
     if peer.get("kind") in ROUTER_KINDS:
         await USER_BOT.send_message(chat_id, router_help(peer, params))
 
@@ -1330,6 +1372,29 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = query.from_user.id
     action, _, arg = query.data.partition(":")
     await query.answer()
+
+    if action == "dl":
+        how, _, pub = arg.partition(":")
+        peer = load_state()["peers"].get(pub)
+        if not peer or peer["user"] != str(uid):
+            await query.edit_message_text("Конфиг не найден.")
+            return
+        if not peer_active(peer):
+            await query.edit_message_text(f"{title(peer)}: срок закончился, сначала продлите его.")
+            return
+        if how == "and":
+            await query.edit_message_text(f"🤖 {title(peer)}: как добавить в приложение?\n\n"
+                                          "🔑 Ключ — проще всего: скопировать и вставить в AmneziaVPN.\n"
+                                          "📄 Файл — для AmneziaWG («Импорт из файла»).\n"
+                                          "🔳 QR-код — отсканировать камерой с другого экрана.",
+                                          reply_markup=android_buttons(pub))
+        elif how == "back":
+            await query.edit_message_text(f"📥 {title(peer)}: на каком устройстве подключаете?",
+                                          reply_markup=download_buttons(pub))
+        elif how in ("ios", "key", "file", "qr"):
+            await query.edit_message_reply_markup(reply_markup=None)
+            await deliver_peer(query.message.chat_id, peer, how)
+        return
 
     if action == "newsv":
         text, buttons = news_screen(show_all=arg == "all")
