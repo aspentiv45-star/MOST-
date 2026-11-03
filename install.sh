@@ -178,8 +178,8 @@ if grep -q "^Address = $SUBNET.1/24" "$AWG_CONF"; then
   sed -i "s|^Address = $SUBNET.1/24|Address = $SUBNET.1/22|; s|-s $SUBNET.0/24 |-s $SUBNET.0/22 |g" "$AWG_CONF"
 fi
 
-# (временно выключено: после этого изменения был массовый сбой)
-# grep -q '^MTU' "$AWG_CONF" || sed -i '/^ListenPort/a MTU = 1280' "$AWG_CONF"
+# Сбой 31.10 был из-за заблокированного IP, а не из-за MTU: без него у YouTube и TikTok (QUIC) зависает видео.
+grep -q '^MTU' "$AWG_CONF" || sed -i '/^ListenPort/a MTU = 1280' "$AWG_CONF"
 
 echo "==> Включаю маршрутизацию"
 cat >/etc/sysctl.d/99-most.conf <<EOF
