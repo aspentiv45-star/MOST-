@@ -221,7 +221,8 @@ MODE_TEXT = (
     "📱 Только заблокированное — через VPN Telegram, YouTube, Instagram, TikTok, нейросети и др., "
     "а банки, Госуслуги и российские приложения — напрямую. Лучший вариант для телефона.\n\n"
     "🎮 Игровой — минимальный пинг:\n"
-    "• телефон: игры + Telegram, Discord и YouTube;\n"
+    "• телефон: игры (Brawl Stars, Roblox, CoD Mobile, Pokémon GO, Fortnite и др.) + Telegram, Discord и YouTube; "
+    "App Store и Google Play — напрямую, чтобы игры качались быстро;\n"
     "• ПК: всё через VPN, кроме Steam, CS2, Dota 2, Faceit и российских сайтов.\n\n"
     "Не подключается «Только заблокированное» или «Игровой» — выберите «Весь трафик»."
 )
@@ -660,7 +661,42 @@ GAME_HOSTS = ("game.brawlstarsgame.com", "game.clashroyaleapp.com", "gamea.clash
               "id.supercell.com", "security.supercell.com", "accounts.supercell.com", "store.supercell.com",
               "game-assets.brawlstarsgame.com", "game-assets.clashroyaleapp.com",
               "game-assets.clashofclans.com", "game-assets.haydaygame.com", "game-assets.boombeachgame.com")
+# Ещё игры для игрового режима на телефоне: в России недоступны, режут вход или покупки. Только серверы
+# входа и API — по адресам из DNS (по одной строке на адрес), а не целыми сетями: список для AmneziaWG
+# остаётся коротким. Сама игра (матчи) часто идёт с других серверов — они в России не заблокированы.
+GAME_SERVICES = {
+    "Call of Duty Mobile": ("prod.demonware.net", "profile.callofduty.com", "s.activision.com",
+                            "www.callofduty.com", "www.activision.com"),
+    "Pokémon GO и Monster Hunter Now": ("pgorelease.nianticlabs.com", "sso.pokemon.com", "access.pokemon.com",
+                                        "nianticlabs.com", "auth.nianticlabs.com"),
+    "Fortnite (Epic Games)": ("account-public-service-prod.ol.epicgames.com",
+                              "fortnite-public-service-prod11.ol.epicgames.com",
+                              "lightswitch-public-service-prod.ol.epicgames.com",
+                              "launcher-public-service-prod06.ol.epicgames.com", "store.epicgames.com"),
+    "EA (FC Mobile, The Sims, Apex)": ("accounts.ea.com", "gateway.ea.com", "signin.ea.com", "www.ea.com"),
+    "Blizzard (Hearthstone, Diablo Immortal, Warcraft Rumble)": (
+        "eu.actual.battle.net", "us.actual.battle.net", "account.battle.net", "eu.battle.net",
+        "eu.version.battle.net"),
+    "Minecraft и Xbox": ("user.auth.xboxlive.com", "xsts.auth.xboxlive.com", "api.minecraftservices.com",
+                         "sessionserver.mojang.com", "authserver.mojang.com", "login.live.com"),
+    "Riot (Wild Rift, LoL, TFT, Valorant)": ("auth.riotgames.com", "authenticate.riotgames.com",
+                                             "entitlements.auth.riotgames.com",
+                                             "clientconfig.rpg.riotgames.com"),
+    "Ubisoft": ("public-ubiservices.ubi.com", "connect.ubisoft.com"),
+    "PlayStation App": ("ca.account.sony.com", "my.account.sony.com", "web.np.playstation.com"),
+    "Nintendo": ("accounts.nintendo.com", "api.accounts.nintendo.com"),
+}
+GAME_IP_MAX = 4      # адресов с одного имени: у CDN их бывает десятки
 GAME_IPS = set()
+# Магазины приложений — мимо VPN в игровом режиме: игры и обновления скачиваются напрямую, на полной
+# скорости. Google Play раздаёт файлы с тех же серверов Google, что и YouTube, поэтому из туннеля
+# вырезаются только подсети /24 с адресами магазина; App Store (сети Apple) и так идёт мимо.
+STORE_HOSTS = ("play.googleapis.com", "play-lh.googleusercontent.com", "play-fe.googleapis.com",
+               "android.clients.google.com", "play.google.com", "dl.google.com", "edgedl.me.gvt1.com",
+               "redirector.gvt1.com", "apps.apple.com", "itunes.apple.com", "iosapps.itunes.apple.com",
+               "apps.mzstatic.com", "is1-ssl.mzstatic.com", "updates.cdn-apple.com", "appldnld.apple.com")
+STORE_IPS = set()
+GAME_LIST_MAX = 250  # длиннее список AmneziaWG на телефоне принимает плохо
 # TikTok: сети TikTok и ByteDance (RIPEstat, раз в сутки) и адреса его серверов по DNS.
 # Сетей у них много, берём самые крупные — общий список должен остаться около ста.
 TIKTOK_ASNS = (138699, 396986)
@@ -745,13 +781,13 @@ async def refresh_pcgame():
              len(nets), len(direct))
 
 
-async def resolve(hosts):
+async def resolve(hosts, per_host=None):
     loop = asyncio.get_running_loop()
     found = set()
     for host in hosts:
         try:
             infos = await asyncio.wait_for(loop.getaddrinfo(host, 443, family=socket.AF_INET), 10)
-            found.update(i[4][0] for i in infos)
+            found.update(sorted({i[4][0] for i in infos})[:per_host])
         except Exception:
             pass
     return found
@@ -763,9 +799,15 @@ async def dynamic_loop():
     while True:
         for hosts, target in ((GAME_HOSTS, GAME_IPS), (TIKTOK_HOSTS, TIKTOK_IPS)):
             found = await resolve(hosts)
+            if target is GAME_IPS:
+                found |= await resolve([h for hs in GAME_SERVICES.values() for h in hs], GAME_IP_MAX)
             if found:
                 target.clear()
                 target.update(found)
+        found = await resolve(STORE_HOSTS)
+        if found:
+            STORE_IPS.clear()
+            STORE_IPS.update(found)
         for name, hosts in SMART_SERVICES.items():
             found = await resolve(hosts)
             if found:
@@ -833,9 +875,29 @@ def smart_allowed_ips(game_only=False):
             [*SMART_NETS, *TIKTOK_NETS, *NETFLIX_NETS, *EXTRA_NETS, *ROBLOX_NETS])
     ips = GAME_IPS if game_only else GAME_IPS | TIKTOK_IPS | SMART_IPS
     nets = [ipaddress.ip_network(n) for n in nets]
-    v4 = [n for n in nets if n.version == 4] + [ipaddress.ip_network(f"{ip}/32") for ip in ips]
-    v6 = [n for n in nets if n.version == 6]
-    return ",".join(map(str, [*ipaddress.collapse_addresses(v4), *ipaddress.collapse_addresses(v6)]))
+    v4 = list(ipaddress.collapse_addresses(
+        [n for n in nets if n.version == 4] + [ipaddress.ip_network(f"{ip}/32") for ip in ips]))
+    v6 = list(ipaddress.collapse_addresses(n for n in nets if n.version == 6))
+    if game_only:
+        v4 = without_stores(v4, GAME_LIST_MAX - len(v6))
+    return ",".join(map(str, [*v4, *v6]))
+
+
+def without_stores(v4, limit):
+    """Вырезать из списка подсети /24 магазинов приложений — пока список не длиннее limit."""
+    for ip in sorted(STORE_IPS):
+        cut = ipaddress.ip_network(f"{ip}/24", strict=False)
+        nxt = []
+        for n in v4:
+            if n.supernet_of(cut) and n != cut:
+                nxt += n.address_exclude(cut)
+            elif not cut.supernet_of(n):
+                nxt.append(n)
+        nxt = list(ipaddress.collapse_addresses(nxt))
+        if len(nxt) > limit:
+            break
+        v4 = nxt
+    return v4
 
 
 async def split_loop():
