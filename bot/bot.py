@@ -242,10 +242,14 @@ SMART_LIST = (
     "• Twitch\n"
     "• Reddit и часть зарубежных сайтов на сервисе Fastly\n"
     "• TikTok — с зарубежной лентой\n"
-    "• Игры Supercell: Brawl Stars, Clash Royale, Clash of Clans, Hay Day, Boom Beach\n"
+    "• ChatGPT, Claude, Gemini\n"
+    "• Signal, Viber\n"
+    "• Netflix, Spotify, SoundCloud\n"
+    "• LinkedIn, Medium, Patreon, Notion\n"
+    "• Игры: Brawl Stars, Clash Royale, Clash of Clans, Hay Day, Boom Beach, Roblox\n"
     "• DNS Cloudflare (1.1.1.1), чтобы адреса сайтов не подменяли\n\n"
     "Всё остальное — напрямую, без VPN: банки, Госуслуги, Ozon, Wildberries, VK, Яндекс, "
-    "остальные игры, ChatGPT и другие сайты. Если нужный заблокированный сайт не открывается — "
+    "остальные игры и другие сайты. Если нужный заблокированный сайт не открывается — "
     "переключитесь на «весь трафик» или напишите в «🆘 Нужна помощь», добавим его в список.</blockquote>"
 )
 
@@ -729,6 +733,23 @@ TIKTOK_NETS = set(TIKTOK_SEED)
 ROBLOX_ASNS = (22697,)
 ROBLOX_SEED = ("128.116.0.0/17",)
 ROBLOX_NETS = set(ROBLOX_SEED)
+# Ещё популярные сервисы для «Только заблокированное».
+# Со своими сетями — сетями (Netflix — постоянный список; Spotify и LinkedIn — из RIPEstat, по 5 крупнейших):
+NETFLIX_NETS = ("23.246.0.0/18", "37.77.184.0/21", "45.57.0.0/17", "64.120.128.0/17", "66.197.128.0/17",
+                "108.175.32.0/20", "192.173.64.0/18", "198.38.96.0/19", "198.45.48.0/20")
+EXTRA_ASNS = {"Spotify": 8403, "LinkedIn": 14413}
+EXTRA_NETS = set()
+# На общих облаках (Cloudflare, AWS) — только точные адреса по DNS, чтобы не тянуть через VPN чужие сайты.
+SMART_HOSTS = (
+    "chatgpt.com", "chat.openai.com", "openai.com", "api.openai.com", "cdn.oaistatic.com", "ab.chatgpt.com",
+    "claude.ai", "gemini.google.com",
+    "signal.org", "chat.signal.org", "storage.signal.org", "cdn.signal.org", "cdn2.signal.org",
+    "viber.com", "www.viber.com", "dl-media.viber.com",
+    "soundcloud.com", "api-v2.soundcloud.com", "cf-media.sndcdn.com",
+    "open.spotify.com", "spclient.wg.spotify.com", "audio-ak-spotify-com.akamaized.net",
+    "www.linkedin.com", "medium.com", "www.patreon.com", "www.notion.so",
+)
+SMART_IPS = set()
 TIKTOK_IPS = set()
 
 
@@ -782,7 +803,7 @@ async def dynamic_loop():
     """Раз в 6 часов: адреса игр и TikTok по DNS; раз в сутки: сети TikTok из RIPEstat."""
     rounds = 0
     while True:
-        for hosts, target in ((GAME_HOSTS, GAME_IPS), (TIKTOK_HOSTS, TIKTOK_IPS)):
+        for hosts, target in ((GAME_HOSTS, GAME_IPS), (TIKTOK_HOSTS, TIKTOK_IPS), (SMART_HOSTS, SMART_IPS)):
             found = await resolve(hosts)
             if found:
                 target.clear()
@@ -802,6 +823,16 @@ async def dynamic_loop():
                 TIKTOK_NETS.update(TIKTOK_SEED)
                 TIKTOK_NETS.update(str(n) for n in v4 + v6)
                 log.info("TikTok: взято %d сетей из %d", len(v4) + len(v6), len(nets))
+            extra = set()
+            for name, asn in EXTRA_ASNS.items():
+                try:
+                    got = [n for n in await asyncio.to_thread(split.fetch_asn_prefixes, asn) if n.version == 4]
+                    extra.update(str(n) for n in sorted(got, key=lambda n: n.prefixlen)[:5])
+                except Exception as e:
+                    log.warning("сети %s не скачались: %s", name, e)
+            if extra:
+                EXTRA_NETS.clear()
+                EXTRA_NETS.update(extra)
             nets = []
             for asn in ROBLOX_ASNS:
                 try:
@@ -830,8 +861,9 @@ def mode_of(peer):
 
 def smart_allowed_ips(game_only=False):
     """Список сетей для «только заблокированное» (или только игры для игрового режима)."""
-    nets = [*GAME_NETS, *CLOUDFLARE_NETS, *ROBLOX_NETS] if game_only else [*SMART_NETS, *TIKTOK_NETS]
-    ips = GAME_IPS if game_only else GAME_IPS | TIKTOK_IPS
+    nets = ([*GAME_NETS, *CLOUDFLARE_NETS, *ROBLOX_NETS] if game_only else
+            [*SMART_NETS, *TIKTOK_NETS, *NETFLIX_NETS, *EXTRA_NETS, *ROBLOX_NETS])
+    ips = GAME_IPS if game_only else GAME_IPS | TIKTOK_IPS | SMART_IPS
     nets = [ipaddress.ip_network(n) for n in nets]
     v4 = [n for n in nets if n.version == 4] + [ipaddress.ip_network(f"{ip}/32") for ip in ips]
     v6 = [n for n in nets if n.version == 6]
