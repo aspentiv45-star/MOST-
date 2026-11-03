@@ -12,6 +12,7 @@
 изменения применяются через `awg syncconf` без перезапуска туннеля.
 """
 import asyncio
+import base64
 import html
 import io
 import ipaddress
@@ -27,6 +28,7 @@ import subprocess
 import tempfile
 import time
 import traceback
+import zlib
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -276,6 +278,8 @@ GUIDES = {
         "3. Нажмите на файл → «⋮» → «Сохранить в загрузки» (или «Сохранить в музыку/файлы»).\n"
         "4. В AmneziaWG нажмите «+» → «Импорт из файла» → папка «Загрузки» → vpn1.conf.\n"
         "   Вместо шагов 3–4 можно нажать «+» → «Сканировать QR-код» и навести камеру на QR из бота (если он пришёл).\n"
+        "   Файл открывается как текст и не сохраняется? Установите AmneziaVPN, скопируйте 🔑 ключ из сообщения бота "
+        "(нажмите на него) и в AmneziaVPN нажмите «➕» → «Вставить ключ».\n"
         "5. Включите переключатель напротив vpn1, на вопрос о VPN-подключении нажмите «ОК».\n"
         "6. Проверка: откройте YouTube и Telegram — должны работать.\n\n"
         "📱 На телефоне через VPN идут только заблокированные сервисы (Telegram, YouTube, Instagram, "
@@ -815,6 +819,37 @@ def file_base(peer):
     return label if TUNNEL_NAME.fullmatch(label) else peer["name"]
 
 
+def vpn_key(peer, params, host, port, conf_text):
+    """Ключ vpn://… для приложения AmneziaVPN («Вставить ключ») — тот же конфиг одной строкой.
+
+    Формат как у самого AmneziaVPN (и amneziawg-installer): JSON, сжатый zlib, с 4 байтами длины
+    впереди (qCompress), в base64url без «=».
+    """
+    obfs = obfs_params(peer, params)
+    fields = dict(line.split(" = ", 1) for line in conf_text.splitlines() if " = " in line)
+    inner = {k: obfs.get(k, "0") for k in ("H1", "H2", "H3", "H4", "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4")}
+    if any(obfs.get(f"I{i}") for i in range(1, 6)):
+        inner.update({f"I{i}": obfs.get(f"I{i}", "") for i in range(1, 6)})
+    inner.update({
+        "allowed_ips": [ip.strip() for ip in fields["AllowedIPs"].split(",") if ip.strip()],
+        "client_ip": peer["ip"], "client_ipv6": "", "client_priv_key": peer["priv"],
+        "config": conf_text.strip(), "hostName": host, "mtu": "1280", "persistent_keep_alive": "25",
+        "port": int(port), "server_pub_key": fields["PublicKey"],
+    })
+    dns = [d.strip() for d in fields["DNS"].split(",")]
+    outer = {
+        "containers": [{"awg": {"isThirdPartyConfig": True,
+                                "last_config": json.dumps(inner, ensure_ascii=False, separators=(",", ":")),
+                                "port": str(port), "protocol_version": "2", "transport_proto": "udp"},
+                        "container": "amnezia-awg"}],
+        "defaultContainer": "amnezia-awg", "description": f"MOST {title(peer)}",
+        "dns1": dns[0], "dns2": dns[1] if len(dns) > 1 else dns[0], "hostName": host,
+    }
+    raw = json.dumps(outer, ensure_ascii=False, separators=(",", ":")).encode()
+    packed = len(raw).to_bytes(4, "big") + zlib.compress(raw)
+    return "vpn://" + base64.urlsafe_b64encode(packed).decode().rstrip("=")
+
+
 def qr_png(text):
     """QR-код конфига или None, если он не помещается даже в самый ёмкий QR (около 2900 символов)."""
     try:
@@ -853,6 +888,13 @@ async def send_peer(chat_id, peer):
         else:
             await USER_BOT.send_message(chat_id, f"{filename}: в этом режиме список сетей слишком длинный для QR-кода — "
                                                  "добавьте туннель из файла выше («Импорт из файла»).")
+        # Ключ — на случай, если файл не открывается (бывает на Android): скопировать и вставить в AmneziaVPN.
+        key = vpn_key(peer, params, host, port or params["ListenPort"], text)
+        if len(key) < 3900:
+            await USER_BOT.send_message(
+                chat_id, f"🔑 Ключ {html.escape(filename)} — если файл не открывается:\n"
+                         "нажмите на ключ, чтобы скопировать, затем в AmneziaVPN «➕» → «Вставить ключ».\n\n"
+                         f"<code>{key}</code>", parse_mode="HTML")
     if peer.get("kind") in ROUTER_KINDS:
         await USER_BOT.send_message(chat_id, router_help(peer, params))
 
