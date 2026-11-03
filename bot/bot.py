@@ -1354,31 +1354,52 @@ async def submit_payment(user, target, data, comment, reply_to):
     await reply_to.reply_text("Скриншот отправлен администратору. Как только он подтвердит оплату, придёт сообщение.")
 
 
+def config_card(state, pub, p, back=True):
+    """Экран одного конфига: что он такое и все действия с ним."""
+    row = [InlineKeyboardButton("⬇️ Скачать", callback_data=f"get:{pub}")]
+    if not is_admin(p["user"]):
+        row.append(InlineKeyboardButton(f"🔄 Продлить — {price_for(state, pub)} ₽", callback_data=f"renew:{pub}"))
+    rows = [row, [InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}"),
+                  InlineKeyboardButton("✏️ Название", callback_data=f"ren:{pub}")]]
+    if p.get("kind") not in ROUTER_KINDS and os.environ.get("OP_PROFILES", "0") == "1":
+        rows.append([InlineKeyboardButton(f"📶 Оператор: {OPERATORS.get(p.get('op'), 'не выбран')}",
+                                          callback_data=f"opc:{pub}")])
+    if p.get("kind") not in ROUTER_KINDS:
+        rows.append([InlineKeyboardButton(f"🔀 Режим: {MODES[mode_of(p)]}", callback_data=f"mode:{pub}")])
+    if ADBLOCK_DNS and p.get("kind") not in ROUTER_KINDS and mode_of(p) != "game":
+        rows.append([InlineKeyboardButton("🛡 Реклама: " + ("блокируется" if ads_blocked(p) else "не блокируется"),
+                                          callback_data=f"ads:{pub}")])
+    rows.append([InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}")])
+    if back:
+        rows.append([InlineKeyboardButton("⬅️ Все конфиги", callback_data="cfgl:")])
+    icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
+    device = f"\n{OS_NAMES[p['os']]}" if p.get("os") in OS_NAMES else ""
+    return f"{icon} {title(p)} — {peer_status(p)}{device}", InlineKeyboardMarkup(rows)
+
+
+def config_list(state, uid):
+    """Список конфигов кнопками: выбрал — открылся экран конфига в том же сообщении."""
+    mine = sorted(user_peers(state, uid).items(), key=lambda kv: kv[1]["name"])
+    rows = []
+    for pub, p in mine:
+        icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
+        mark = "🟢" if peer_active(p) else "⚪️"
+        rows.append([InlineKeyboardButton(f"{mark} {icon} {title(p)}", callback_data=f"cfg:{pub}")])
+    return "📄 Ваши конфиги — выберите, какой изменить или скачать:", InlineKeyboardMarkup(rows)
+
+
 async def list_configs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = load_state()
     mine = user_peers(state, update.effective_user.id)
     if not mine:
         await update.message.reply_text(f"Конфигов пока нет. Нажмите «{BTN_BUY}».")
         return
-    for pub, p in mine.items():
-        row = [InlineKeyboardButton("⬇️ Скачать", callback_data=f"get:{pub}")]
-        if not is_admin(p["user"]):
-            row.append(InlineKeyboardButton(f"🔄 Продлить — {price_for(state, pub)} ₽", callback_data=f"renew:{pub}"))
-        rows = [row, [InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}"),
-                      InlineKeyboardButton("✏️ Название", callback_data=f"ren:{pub}")]]
-        if p.get("kind") not in ROUTER_KINDS and os.environ.get("OP_PROFILES", "0") == "1":
-            rows.append([InlineKeyboardButton(f"📶 Оператор: {OPERATORS.get(p.get('op'), 'не выбран')}",
-                                              callback_data=f"opc:{pub}")])
-        if p.get("kind") not in ROUTER_KINDS:
-            rows.append([InlineKeyboardButton(f"🔀 Режим: {MODES[mode_of(p)]}", callback_data=f"mode:{pub}")])
-        if ADBLOCK_DNS and p.get("kind") not in ROUTER_KINDS and mode_of(p) != "game":
-            rows.append([InlineKeyboardButton("🛡 Реклама: " + ("блокируется" if ads_blocked(p) else "не блокируется"),
-                                              callback_data=f"ads:{pub}")])
-        rows.append([InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}")])
-        buttons = InlineKeyboardMarkup(rows)
-        icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
-        device = f"\n{OS_NAMES[p['os']]}" if p.get("os") in OS_NAMES else ""
-        await update.message.reply_text(f"{icon} {title(p)} — {peer_status(p)}{device}", reply_markup=buttons)
+    if len(mine) == 1:
+        pub, p = next(iter(mine.items()))
+        text, buttons = config_card(state, pub, p, back=False)
+    else:
+        text, buttons = config_list(state, update.effective_user.id)
+    await update.message.reply_text(text, reply_markup=buttons)
 
 
 def news_screen(show_all=False):
@@ -1479,6 +1500,15 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif how in ("ios", "key", "file", "qr"):
             await query.edit_message_reply_markup(reply_markup=None)
             await deliver_peer(query.message.chat_id, peer, how)
+        return
+
+    if action == "cfgl":
+        state = load_state()
+        text, buttons = config_list(state, uid)
+        try:
+            await query.edit_message_text(text, reply_markup=buttons)
+        except Exception:
+            pass
         return
 
     if action == "newsv":
@@ -1621,6 +1651,10 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"✏️ Как назвать {title(peer)}? Например: «Телефон мамы», «Ноутбук» (до 30 символов).\n\n"
             "Чтобы туннель так же назывался и в приложении Amnezia, напишите латиницей без пробелов, "
             "до 12 символов, например mama-phone.\n\nПередумали — напишите «отмена».")
+    elif action == "cfg":
+        many = len(user_peers(state, uid)) > 1
+        text, buttons = config_card(state, arg, peer, back=many)
+        await query.edit_message_text(text, reply_markup=buttons)
     elif action == "png":
         await query.message.reply_text(await check_peer(arg, peer))
     elif action == "mode":
