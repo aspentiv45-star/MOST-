@@ -742,25 +742,31 @@ NETFLIX_NETS = ("23.246.0.0/18", "37.77.184.0/21", "45.57.0.0/17", "64.120.128.0
 EXTRA_ASNS = {"Spotify": 8403, "LinkedIn": 14413}
 EXTRA_NETS = set()
 # На общих облаках (Cloudflare, AWS) — только точные адреса по DNS, чтобы не тянуть через VPN чужие сайты.
-SMART_HOSTS = (
+# Сервисы с адресами по DNS: по ним же бот понимает, что у клиента в файле устарели адреса сервиса.
+SMART_SERVICES = {
     # Нейросети (кроме российских — Алисы и GigaChat: они работают напрямую и могут не пустить с иностранного IP)
-    "chatgpt.com", "chat.openai.com", "openai.com", "api.openai.com", "cdn.oaistatic.com", "ab.chatgpt.com",
-    "sora.com", "sora.chatgpt.com",
-    "claude.ai", "api.anthropic.com", "anthropic.com",
-    "gemini.google.com", "aistudio.google.com", "notebooklm.google.com",
-    "copilot.microsoft.com", "www.bing.com", "sydney.bing.com",
-    "grok.com", "x.ai", "api.x.ai",
-    "www.perplexity.ai", "perplexity.ai",
-    "chat.mistral.ai", "chat.deepseek.com", "poe.com", "character.ai", "huggingface.co",
-    "www.midjourney.com", "cdn.midjourney.com", "suno.com", "studio-api.prod.suno.com", "www.udio.com",
-    "app.runwayml.com", "app.leonardo.ai", "elevenlabs.io", "ideogram.ai", "pika.art",
-    "cursor.com", "api2.cursor.sh", "api.githubcopilot.com", "meta.ai",
-    "signal.org", "chat.signal.org", "storage.signal.org", "cdn.signal.org", "cdn2.signal.org",
-    "viber.com", "www.viber.com", "dl-media.viber.com",
-    "soundcloud.com", "api-v2.soundcloud.com", "cf-media.sndcdn.com",
-    "open.spotify.com", "spclient.wg.spotify.com", "audio-ak-spotify-com.akamaized.net",
-    "www.linkedin.com", "medium.com", "www.patreon.com", "www.notion.so",
-)
+    "ChatGPT": ("chatgpt.com", "chat.openai.com", "openai.com", "api.openai.com", "cdn.oaistatic.com",
+                "ab.chatgpt.com", "sora.com", "sora.chatgpt.com"),
+    "Claude": ("claude.ai", "api.anthropic.com", "anthropic.com"),
+    "Gemini": ("gemini.google.com", "aistudio.google.com", "notebooklm.google.com"),
+    "Copilot": ("copilot.microsoft.com", "www.bing.com", "sydney.bing.com"),
+    "Grok": ("grok.com", "x.ai", "api.x.ai"),
+    "Perplexity": ("www.perplexity.ai", "perplexity.ai"),
+    "Mistral": ("chat.mistral.ai",), "DeepSeek": ("chat.deepseek.com",), "Poe": ("poe.com",),
+    "Character.AI": ("character.ai",), "Hugging Face": ("huggingface.co",),
+    "Midjourney": ("www.midjourney.com", "cdn.midjourney.com"),
+    "Suno": ("suno.com", "studio-api.prod.suno.com"), "Udio": ("www.udio.com",),
+    "Runway": ("app.runwayml.com",), "Leonardo": ("app.leonardo.ai",), "ElevenLabs": ("elevenlabs.io",),
+    "Ideogram": ("ideogram.ai",), "Pika": ("pika.art",), "Cursor": ("cursor.com", "api2.cursor.sh"),
+    "GitHub Copilot": ("api.githubcopilot.com",), "Meta AI": ("meta.ai",),
+    "Signal": ("signal.org", "chat.signal.org", "storage.signal.org", "cdn.signal.org", "cdn2.signal.org"),
+    "Viber": ("viber.com", "www.viber.com", "dl-media.viber.com"),
+    "SoundCloud": ("soundcloud.com", "api-v2.soundcloud.com", "cf-media.sndcdn.com"),
+    "Spotify": ("open.spotify.com", "spclient.wg.spotify.com", "audio-ak-spotify-com.akamaized.net"),
+    "LinkedIn": ("www.linkedin.com",), "Medium": ("medium.com",), "Patreon": ("www.patreon.com",),
+    "Notion": ("www.notion.so",),
+}
+SERVICE_IPS = {}  # сервис -> текущие адреса
 SMART_IPS = set()
 TIKTOK_IPS = set()
 
@@ -815,11 +821,21 @@ async def dynamic_loop():
     """Раз в 6 часов: адреса игр и TikTok по DNS; раз в сутки: сети TikTok из RIPEstat."""
     rounds = 0
     while True:
-        for hosts, target in ((GAME_HOSTS, GAME_IPS), (TIKTOK_HOSTS, TIKTOK_IPS), (SMART_HOSTS, SMART_IPS)):
+        for hosts, target in ((GAME_HOSTS, GAME_IPS), (TIKTOK_HOSTS, TIKTOK_IPS)):
             found = await resolve(hosts)
             if found:
                 target.clear()
                 target.update(found)
+        for name, hosts in SMART_SERVICES.items():
+            found = await resolve(hosts)
+            if found:
+                SERVICE_IPS[name] = found
+        SMART_IPS.clear()
+        SMART_IPS.update(ip for ips in SERVICE_IPS.values() for ip in ips)
+        try:
+            await notify_stale_smart()
+        except Exception:
+            log.exception("проверка устаревших конфигов не удалась")
         if rounds % 4 == 0:
             nets = []
             for asn in TIKTOK_ASNS:
@@ -999,8 +1015,55 @@ async def send_peer(chat_id, peer):
                                 reply_markup=download_buttons(pub))
 
 
+async def remember_smart_snapshot(peer):
+    """Запоминает адреса сервисов, попавшие в файл «Только заблокированное», — чтобы потом понять, что устарели."""
+    if mode_of(peer) != "smart":
+        return
+    pub = peer_pub(peer)
+    async with lock:
+        state = load_state()
+        p = state["peers"].get(pub)
+        if p:
+            p["smart_ips"] = sorted(SMART_IPS)
+            p.pop("stale_notified", None)
+            save_state(state)
+
+
+async def notify_stale_smart():
+    """Клиентам «Только заблокированное», у которых в файле не осталось ни одного текущего адреса сервиса,
+    бот предлагает скачать файл заново (не чаще раза в 3 дня)."""
+    async with lock:
+        state = load_state()
+        todo = []
+        for pub, p in state["peers"].items():
+            if mode_of(p) != "smart" or not peer_active(p) or not p.get("smart_ips"):
+                continue
+            if time.time() - p.get("stale_notified", 0) < 3 * DAY:
+                continue
+            old = set(p["smart_ips"])
+            broken = [name for name, ips in SERVICE_IPS.items() if ips and not ips & old]
+            if broken:
+                p["stale_notified"] = int(time.time())
+                todo.append((pub, p, broken))
+        if todo:
+            save_state(state)
+    for pub, p, broken in todo:
+        try:
+            await USER_BOT.send_message(
+                int(p["user"]),
+                f"🔄 {title(p)}: обновите конфиг, чтобы снова работали: {', '.join(broken[:8])}"
+                + (" и другие" if len(broken) > 8 else "") + ".\n\n"
+                "У этих сервисов сменились адреса. Нажмите кнопку, удалите старый туннель и добавьте новый — "
+                "ключи и срок те же.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Получить новый конфиг",
+                                                                         callback_data=f"get:{pub}")]]))
+        except Exception:
+            pass
+
+
 async def deliver_peer(chat_id, peer, how):
     """how: file — файл; qr — QR-код; key — ключ для AmneziaVPN; ios — файл и QR; all — всё (роутеры)."""
+    await remember_smart_snapshot(peer)
     params = server_params(peer_iface(peer)[1])
     for filename, host, port in peer_variants(peer):
         text = client_conf(peer, params, host, port)
