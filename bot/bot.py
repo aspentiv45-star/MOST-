@@ -1516,6 +1516,13 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     action, _, arg = query.data.partition(":")
     await query.answer()
 
+    if action == "close":
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.edit_message_reply_markup(None)  # старше 48 часов — хотя бы убрать кнопки
+        return
+
     if action == "dl":
         how, _, pub = arg.partition(":")
         peer = load_state()["peers"].get(pub)
@@ -2176,6 +2183,14 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return
     action, _, arg = query.data.partition(":")
+
+    if action == "close":
+        await query.answer()
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.edit_message_reply_markup(None)  # старше 48 часов — хотя бы убрать кнопки
+        return
 
     if action == "acc":
         verdict, _, uid = arg.partition(":")
@@ -3247,6 +3262,23 @@ async def clear_and_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # нажатие). Файлы конфигов, QR-коды, оплаты, оповещения и переписка поддержки не удаляются:
 # запоминаются только текстовые сообщения, отправленные, пока обрабатывается кнопка меню.
 
+CLOSE_BUTTON = InlineKeyboardButton("✖️ Закрыть", callback_data="close:")
+# Без «Закрыть»: заявки, оплаты и обращения (их нельзя терять) и подсказка к ключу (там своя кнопка).
+NO_CLOSE = ("acc", "ok", "no", "tk", "tku", "kdone", "close")
+
+
+def with_close(markup):
+    """Добавить в конец inline-клавиатуры кнопку «✖️ Закрыть», которая удаляет сообщение."""
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return markup
+    rows = markup.inline_keyboard
+    for row in rows:
+        for b in row:
+            if (b.callback_data or "").partition(":")[0] in NO_CLOSE:
+                return markup
+    return InlineKeyboardMarkup([*rows, [CLOSE_BUTTON]])
+
+
 class ScreenBot(ExtBot):
     """Бот, который запоминает свои ответы на кнопку меню, чтобы удалить их при следующем нажатии."""
 
@@ -3258,7 +3290,20 @@ class ScreenBot(ExtBot):
         # Поэтому такое сообщение удаляем, только когда бот уже прислал меню новым сообщением.
         self._kb = {}       # chat_id -> (id последнего сообщения с меню, было ли оно частью экрана)
 
+    async def edit_message_text(self, *args, **kwargs):
+        kwargs["reply_markup"] = with_close(kwargs.get("reply_markup"))
+        return await super().edit_message_text(*args, **kwargs)
+
+    async def edit_message_reply_markup(self, *args, **kwargs):
+        kwargs["reply_markup"] = with_close(kwargs.get("reply_markup"))
+        return await super().edit_message_reply_markup(*args, **kwargs)
+
+    async def send_photo(self, *args, **kwargs):
+        kwargs["reply_markup"] = with_close(kwargs.get("reply_markup"))
+        return await super().send_photo(*args, **kwargs)
+
     async def send_message(self, *args, **kwargs):
+        kwargs["reply_markup"] = with_close(kwargs.get("reply_markup"))
         msg = await super().send_message(*args, **kwargs)
         chat = msg.chat_id
         if chat in self._active:
