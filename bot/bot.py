@@ -354,6 +354,7 @@ def load_state():
     # Опросы: {id: {"q", "opts", "votes": {uid: номер варианта}, "created", "closed"}}
     state.setdefault("polls", {})
     state.setdefault("next_poll", 1)
+    state.setdefault("settings", {})
     # Переход со старой схемы «подписка на человека»: срок переносится на его конфиги.
     for p in state["peers"].values():
         if "until" not in p:
@@ -524,7 +525,8 @@ def create_peer(state, uid, until, kind="device"):
     priv = run(["awg", "genkey"])
     pub = run(["awg", "pubkey"], priv + "\n")
     peer = {"user": str(uid), "name": f"{prefix}{n}", "kind": kind,
-            "priv": priv, "created": fmt_date(time.time()), "until": until, "warned": 0}
+            "priv": priv, "created": fmt_date(time.time()), "made": int(time.time()),
+            "until": until, "warned": 0}
     if kind not in ROUTER_KINDS:
         u = state["users"].get(str(uid), {})
         peer["op"] = u.get("op")
@@ -1947,7 +1949,7 @@ async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Скриншоты оплат приходят сюда сами — с кнопками «Одобрить» / «Отклонить». "
         "После одобрения клиент сразу получает новый конфиг или продление.\n\n"
         f"{ABTN_PAY} — неразобранные оплаты и запросы доступа\n"
-        f"{ABTN_USERS} — клиенты и их конфиги: продлить или отключить\n"
+        f"{ABTN_USERS} — клиенты и их конфиги: продлить, отключить, удалить неоплаченные; кто ждёт решения\n"
         f"{ABTN_GIVE} — бесплатно выдать конфиг по ID\n"
         f"{ABTN_STATS} — кто подключён и трафик\n"
         f"{ABTN_RESEND} — отправить всем клиентам актуальные файлы их конфигов\n"
@@ -1959,23 +1961,26 @@ async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def admin_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await send_waiting(update.message)
+
+
+async def send_waiting(message):
+    """Запросы доступа и непроверенные оплаты — отдельными сообщениями с кнопками решения."""
     state = load_state()
-    pending = [(pid, p) for pid, p in state["payments"].items() if p["status"] == "pending"]
-    waiting = [uid for uid, u in state["users"].items()
-               if u.get("requested") and "approved" not in u and not is_approved(state, uid)]
+    waiting, pending = waiting_items(state)
     for uid in waiting:
-        await update.message.reply_text(f"🙋 Запрос доступа\n{user_name(state, uid)}\nID {uid}",
+        await message.reply_text(f"🙋 Запрос доступа\n{user_name(state, uid)}\nID {uid}",
                                         reply_markup=access_buttons(uid))
     if not pending and not waiting:
-        await update.message.reply_text("Неразобранных оплат нет.", reply_markup=ADMIN_KEYBOARD)
+        await message.reply_text("Никто не ждёт: запросов доступа и неразобранных оплат нет.")
         return
     for pid, p in pending:
         caption = (f"Оплата №{pid} от {fmt_date(p['created'])}\n{user_name(state, p['user'])}\nID {p['user']}\n"
                    f"За: {target_label(state, p.get('target', NEW))}")
         if p.get("photo"):
-            await update.message.reply_photo(p["photo"], caption=caption, reply_markup=payment_buttons(pid))
+            await message.reply_photo(p["photo"], caption=caption, reply_markup=payment_buttons(pid))
         else:
-            await update.message.reply_text(caption, reply_markup=payment_buttons(pid))
+            await message.reply_text(caption, reply_markup=payment_buttons(pid))
 
 
 def last_handshakes():
@@ -2009,13 +2014,60 @@ def user_groups(state):
             "idle": [kv for kv in active if not is_online(hs.get(kv[0], 0))], "off": off, "none": none, "hs": hs}
 
 
+def waiting_items(state):
+    """Кто ждёт решения админа: запросы доступа и непроверенные оплаты."""
+    pending = [(pid, p) for pid, p in state["payments"].items() if p["status"] == "pending"]
+    waiting = [uid for uid, u in state["users"].items()
+               if u.get("requested") and "approved" not in u and not is_approved(state, uid)]
+    return waiting, pending
+
+
+AUTODEL_DAYS = 5
+
+
+def stale_peers(state, days=0):
+    """Неоплаченные и закончившиеся конфиги, которые можно удалить: срок кончился больше days дней назад
+    (неоплаченные — созданы больше days дней назад). Конфиги с непроверенной оплатой продления не трогаем."""
+    now = time.time()
+    paying = {p.get("target") for p in state["payments"].values() if p["status"] == "pending"}
+    result = []
+    for pub, p in state["peers"].items():
+        if is_admin(p["user"]) or peer_active(p) or pub in paying:
+            continue
+        since = p["until"] or p.get("made", 0)
+        if days == 0 or (since and now - since >= days * DAY):
+            result.append(pub)
+    return result
+
+
+def remove_peers(state, pubs):
+    for pub in pubs:
+        state["peers"].pop(pub, None)
+
+
 def users_menu(state):
     g = user_groups(state)
-    return f"👥 Клиентов: {len(state['users'])}. Кого показать?", InlineKeyboardMarkup([
+    waiting, pending = waiting_items(state)
+    rows = []
+    if waiting or pending:
+        rows.append([InlineKeyboardButton(f"🙋 Ждут решения ({len(waiting) + len(pending)})", callback_data="usrw:")])
+    rows += [
         [InlineKeyboardButton(f"🟢 Действуют ({len(g['act'])})", callback_data="usr:act")],
         [InlineKeyboardButton(f"⚪️ Закончились / не оплачены ({len(g['off'])})", callback_data="usr:off")],
         [InlineKeyboardButton(f"👤 Без конфига ({len(g['none'])})", callback_data="usr:none")],
-    ])
+    ]
+    return f"👥 Клиентов: {len(state['users'])}. Кого показать?", InlineKeyboardMarkup(rows)
+
+
+def cleanup_buttons(state):
+    auto = state["settings"].get("autodel")
+    stale = stale_peers(state)
+    rows = []
+    if stale:
+        rows.append([InlineKeyboardButton(f"🗑 Удалить все неоплаченные ({len(stale)})", callback_data="cln:ask")])
+    rows.append([InlineKeyboardButton(
+        f"⏰ Автоудаление через {AUTODEL_DAYS} дн.: {'✅ вкл' if auto else '❌ выкл'}", callback_data="cln:auto")])
+    return rows
 
 
 @admin_only
@@ -2069,6 +2121,8 @@ async def show_user_group(query, ctx, group, page=0):
     if uids:
         rows.append([InlineKeyboardButton("📋 Все карточки сразу", callback_data=f"usra:{group}")])
     rows.append([InlineKeyboardButton("⬅️ Группы", callback_data="usrg:")])
+    if group == "off":
+        rows[-1:-1] = cleanup_buttons(state)
     text = f"{names.get(group, group)}: {len(uids)}" + (f" · стр. {page + 1}/{pages}" if pages > 1 else "")
     await query.edit_message_text(text + ("\nВыберите клиента:" if uids else "\nЗдесь пока никого."),
                                   reply_markup=InlineKeyboardMarkup(rows))
@@ -2262,7 +2316,30 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Рассылка отменена.")
         return
 
-    if action in ("usr", "usrp", "usrg", "usrb", "usra", "uc"):
+    if action == "cln":
+        await query.answer()
+        if arg == "ask":
+            n = len(stale_peers(load_state()))
+            await query.edit_message_text(
+                f"Удалить {n} неоплаченных и закончившихся конфигов? Клиенты получат сообщение, "
+                "что конфиг удалён; купить новый они смогут как обычно.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🗑 Да, удалить", callback_data="cln:yes"),
+                    InlineKeyboardButton("⬅️ Нет", callback_data="usr:off")]]))
+            return
+        if arg == "yes":
+            await delete_stale(0)
+        elif arg == "auto":
+            async with lock:
+                state = load_state()
+                state["settings"]["autodel"] = not state["settings"].get("autodel")
+                save_state(state)
+            if state["settings"]["autodel"]:
+                await delete_stale(AUTODEL_DAYS)
+        await show_user_group(query, ctx, "off")
+        return
+
+    if action in ("usr", "usrp", "usrg", "usrb", "usra", "uc", "usrw"):
         await query.answer()
         if action == "usr":
             await show_user_group(query, ctx, arg)
@@ -2277,6 +2354,11 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await show_user_group(query, ctx, group, page)
         elif action == "usra":
             await send_all_cards(query.message, arg)
+        elif action == "usrw":
+            await query.edit_message_text("🙋 Ждут решения — ниже 👇",
+                                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                                              "⬅️ Группы", callback_data="usrg:")]]))
+            await send_waiting(query.message)
         else:
             state = load_state()
             if arg not in state["users"] and not user_peers(state, arg):
@@ -3187,6 +3269,7 @@ async def check_expiry():
         old_state = json.loads(json.dumps(state))
         expired = False
         for pub, p in state["peers"].items():
+            p.setdefault("made", int(now))  # конфигам из старых версий — отсчёт для автоудаления с сегодня
             if is_admin(p["user"]) or not p["until"]:
                 continue
             left = p["until"] - now
@@ -3212,10 +3295,34 @@ async def check_expiry():
             log.warning("не удалось уведомить %s", uid)
 
 
+async def delete_stale(days):
+    """Удалить неоплаченные и закончившиеся больше days дней назад конфиги и сообщить клиентам."""
+    async with lock:
+        state = load_state()
+        old_state = json.loads(json.dumps(state))
+        pubs = stale_peers(state, days)
+        if not pubs:
+            return 0
+        gone = [state["peers"][k] for k in pubs]
+        remove_peers(state, pubs)
+        apply_or_rollback(state, old_state)
+        save_state(state)
+    for p in gone:
+        try:
+            await USER_BOT.send_message(int(p["user"]), f"🗑 Конфиг {title(p)} удалён: он не был оплачен или продлён. "
+                                                        f"Новый — «{BTN_BUY}».", reply_markup=KEYBOARD)
+        except Exception:
+            pass
+    log.info("удалено неоплаченных конфигов: %d", len(gone))
+    return len(gone)
+
+
 async def expiry_loop():
     while True:
         try:
             await check_expiry()
+            if load_state()["settings"].get("autodel"):
+                await delete_stale(AUTODEL_DAYS)
         except Exception as e:
             await report_error("Ошибка проверки сроков", e)
         await asyncio.sleep(600)
