@@ -1795,15 +1795,16 @@ def access_buttons(uid):
 def user_buttons(uid):
     """Кнопки под карточкой клиента; если конфигов несколько, бот спросит, с каким из них работать."""
     copy = InlineKeyboardButton(f"📋 ID {uid}", copy_text=CopyTextButton(str(uid)))
+    back = [InlineKeyboardButton("⬅️ К списку", callback_data="usrb:")]
     if is_admin(uid):
-        return InlineKeyboardMarkup([[copy]])
+        return InlineKeyboardMarkup([[copy], back])
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("➕ Продлить", callback_data=f"uact:ext:{uid}"),
         InlineKeyboardButton("⛔️ Отключить", callback_data=f"uact:take:{uid}"),
     ], [
         InlineKeyboardButton("🏓 Пинг", callback_data=f"uact:png:{uid}"),
         copy,
-    ]])
+    ], back])
 
 
 def user_card(state, uid, hs=None):
@@ -1990,49 +1991,80 @@ def user_groups(state):
             "idle": [kv for kv in active if not is_online(hs.get(kv[0], 0))], "off": off, "none": none, "hs": hs}
 
 
+def users_menu(state):
+    g = user_groups(state)
+    return f"👥 Клиентов: {len(state['users'])}. Кого показать?", InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🟢 Действуют ({len(g['act'])})", callback_data="usr:act")],
+        [InlineKeyboardButton(f"⚪️ Закончились / не оплачены ({len(g['off'])})", callback_data="usr:off")],
+        [InlineKeyboardButton(f"👤 Без конфига ({len(g['none'])})", callback_data="usr:none")],
+    ])
+
+
 @admin_only
 async def admin_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    state = load_state()
-    g = user_groups(state)
-    await update.message.reply_text(
-        f"Клиентов: {len(state['users'])}.\nКого показать?",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"🟢 Действуют ({len(g['act'])})", callback_data="usr:act")],
-            [InlineKeyboardButton(f"⚪️ Закончились / не оплачены ({len(g['off'])})", callback_data="usr:off")],
-            [InlineKeyboardButton(f"👤 Без конфига ({len(g['none'])})", callback_data="usr:none")],
-        ]))
+    text, buttons = users_menu(load_state())
+    await update.message.reply_text(text, reply_markup=buttons)
 
 
-async def show_user_group(message, group):
+USERS_PAGE = 15
+
+
+def group_users(state, groups, group):
+    """ID клиентов группы в порядке их конфигов (у кого срок кончается раньше — выше)."""
+    if group == "none":
+        return list(groups["none"])
+    return list(dict.fromkeys(p["user"] for _, p in groups["act" if group == "all" else group]))
+
+
+async def show_user_group(query, ctx, group, page=0):
+    """Список клиентов группы кнопками — в том же сообщении, по USERS_PAGE на страницу."""
     state = load_state()
     groups = user_groups(state)
     if group == "act":
-        await message.reply_text(f"🟢 Действуют: {len(groups['act'])}. Кого показать?", reply_markup=InlineKeyboardMarkup([
+        await query.edit_message_text(f"🟢 Действуют: {len(groups['act'])}. Кого показать?", reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"🔌 Подключены сейчас ({len(groups['on'])})", callback_data="usr:on")],
             [InlineKeyboardButton(f"💤 Не подключены ({len(groups['idle'])})", callback_data="usr:idle")],
             [InlineKeyboardButton(f"📋 Все действующие ({len(groups['act'])})", callback_data="usr:all")],
+            [InlineKeyboardButton("⬅️ Группы", callback_data="usrg:")],
         ]))
         return
-    items = groups["act" if group == "all" else group]
-    if not items:
-        await message.reply_text("Здесь пока никого.")
-        return
-    if group == "none":
-        for uid in items[:40]:
-            u = state["users"][uid]
-            notes = [n for n in ("пробный использован" if u.get("trial_used") else "",
-                                 "доступ не одобрен" if not is_approved(state, uid) else "") if n]
-            await message.reply_text(
-                f"{user_name(state, uid)} · ID {uid}" + (f"\n{', '.join(notes)}" if notes else ""),
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"📋 ID {uid}",
-                                                                         copy_text=CopyTextButton(uid))]]))
-    else:
-        # Клиенты в порядке их конфигов в группе, каждый один раз.
-        items = list(dict.fromkeys(p["user"] for _, p in items))
-        for uid in items[:40]:
-            await message.reply_text(user_card(state, uid, groups["hs"]), reply_markup=user_buttons(uid))
-    if len(items) > 40:
-        await message.reply_text(f"Показаны первые 40 из {len(items)}.")
+    ctx.user_data["usr_group"] = (group, page)
+    uids = group_users(state, groups, group)
+    names = {"on": "🔌 Подключены сейчас", "idle": "💤 Не подключены", "all": "🟢 Действуют",
+             "off": "⚪️ Закончились / не оплачены", "none": "👤 Без конфига"}
+    pages = max(1, (len(uids) + USERS_PAGE - 1) // USERS_PAGE)
+    page = min(page, pages - 1)
+    rows = []
+    for uid in uids[page * USERS_PAGE:(page + 1) * USERS_PAGE]:
+        peers = user_peers(state, uid)
+        online = any(is_online(groups["hs"].get(k, 0)) for k in peers)
+        mark = "🔌" if online else "🟢" if any(peer_active(p) for p in peers.values()) else "⚪️"
+        label = f"{mark} {user_name(state, uid)[:40]}" + (f" · {len(peers)}" if len(peers) > 1 else "")
+        rows.append([InlineKeyboardButton(label, callback_data=f"uc:{uid}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"usrp:{group}:{page - 1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"usrp:{group}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    if uids:
+        rows.append([InlineKeyboardButton("📋 Все карточки сразу", callback_data=f"usra:{group}")])
+    rows.append([InlineKeyboardButton("⬅️ Группы", callback_data="usrg:")])
+    text = f"{names.get(group, group)}: {len(uids)}" + (f" · стр. {page + 1}/{pages}" if pages > 1 else "")
+    await query.edit_message_text(text + ("\nВыберите клиента:" if uids else "\nЗдесь пока никого."),
+                                  reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def send_all_cards(message, group):
+    """«📋 Все карточки сразу»: карточки клиентов группы отдельными сообщениями (до 40)."""
+    state = load_state()
+    groups = user_groups(state)
+    uids = group_users(state, groups, group)
+    for uid in uids[:40]:
+        await message.reply_text(user_card(state, uid, groups["hs"]), reply_markup=user_buttons(uid))
+    if len(uids) > 40:
+        await message.reply_text(f"Показаны первые 40 из {len(uids)}.")
 
 
 @admin_only
@@ -2083,16 +2115,31 @@ async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await resend_confirm(update, ctx)
         return
     if waiting and waiting.startswith("extend:"):
+        # Своё число дней: ответ удаляем, исходное сообщение снова становится карточкой клиента.
         text = update.message.text.strip()
+        pub = waiting.partition(":")[2]
+        chat_id, msg_id = ctx.user_data.get("extend_msg", (update.effective_chat.id, None))
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
         if not text.isdigit() or not 1 <= int(text) <= 3650:
             ctx.user_data["await"] = waiting
-            await update.message.reply_text("Нужно число дней от 1 до 3650, например 45.")
-            return
-        pub = waiting.partition(":")[2]
-        result = await extend_peer(pub, int(text))
-        state = load_state()
-        markup = user_buttons(state["peers"][pub]["user"]) if pub in state["peers"] else None
-        await update.message.reply_text(result, reply_markup=markup)
+            note, markup = "Нужно число дней от 1 до 3650, например 45.", None
+        else:
+            ctx.user_data.pop("extend_msg", None)
+            result = await extend_peer(pub, int(text))
+            state = load_state()
+            uid = state["peers"].get(pub, {}).get("user")
+            note = result.split("\n")[0] + (f"\n\n{user_card(state, uid)}" if uid else "")
+            markup = user_buttons(uid) if uid else None
+        try:
+            if msg_id:
+                await ctx.bot.edit_message_text(note, chat_id=chat_id, message_id=msg_id, reply_markup=markup)
+            else:
+                await ctx.bot.send_message(chat_id, note, reply_markup=markup)
+        except Exception:
+            pass
         return
     if waiting != "give":
         await update.message.reply_text("Выберите действие на кнопках ниже.", reply_markup=ADMIN_KEYBOARD)
@@ -2189,9 +2236,27 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Рассылка отменена.")
         return
 
-    if action == "usr":
+    if action in ("usr", "usrp", "usrg", "usrb", "usra", "uc"):
         await query.answer()
-        await show_user_group(query.message, arg)
+        if action == "usr":
+            await show_user_group(query, ctx, arg)
+        elif action == "usrp":
+            group, _, page = arg.partition(":")
+            await show_user_group(query, ctx, group, int(page))
+        elif action == "usrg":
+            text, buttons = users_menu(load_state())
+            await query.edit_message_text(text, reply_markup=buttons)
+        elif action == "usrb":
+            group, page = ctx.user_data.get("usr_group", ("all", 0))
+            await show_user_group(query, ctx, group, page)
+        elif action == "usra":
+            await send_all_cards(query.message, arg)
+        else:
+            state = load_state()
+            if arg not in state["users"] and not user_peers(state, arg):
+                await query.edit_message_text("Клиент не найден.")
+                return
+            await query.edit_message_text(user_card(state, arg), reply_markup=user_buttons(arg))
         return
 
     if action == "uact":
@@ -2220,7 +2285,10 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         peer = load_state()["peers"].get(arg)
         await query.answer()
         if peer:
-            await query.message.reply_text(f"{user_name(load_state(), peer['user'])}\n" + await check_peer(arg, peer))
+            await query.edit_message_text(
+                f"{user_name(load_state(), peer['user'])}\n" + await check_peer(arg, peer),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Ещё раз", callback_data=f"png:{arg}"),
+                                                    InlineKeyboardButton("⬅️ Назад", callback_data=f"uc:{peer['user']}")]]))
         return
 
     if action in ("ext", "exd", "exc", "exb"):
@@ -2237,7 +2305,10 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif action == "exc":
             await query.answer()
             ctx.user_data["await"] = f"extend:{pub}"
-            await query.message.reply_text(f"На сколько дней продлить {title(peer)}? Пришлите число, например 45.")
+            ctx.user_data["extend_msg"] = (query.message.chat_id, query.message.message_id)
+            await query.edit_message_text(f"На сколько дней продлить {title(peer)}? Пришлите число, например 45.",
+                                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                                              "⬅️ Назад", callback_data=f"uc:{peer['user']}")]]))
         elif action == "exb":
             await query.answer()
             await query.edit_message_text(user_card(state, peer["user"]), reply_markup=user_buttons(peer["user"]))
