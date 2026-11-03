@@ -1052,10 +1052,10 @@ async def deliver_peer(chat_id, peer, how):
             key = vpn_key(peer, params, host, port or params["ListenPort"], text)
             # Кнопка «Скопировать» в Telegram вмещает только 256 символов, а ключ длиннее,
             # поэтому ключ — моноширинным текстом: одно нажатие на него копирует целиком.
-            await USER_BOT.send_message(chat_id, f"🔑 Нажмите на ключ, чтобы скопировать:\n\n<code>{key}</code>",
-                                        parse_mode="HTML")
-            await USER_BOT.send_message(chat_id, "Скопировали? Откройте AmneziaVPN → «➕» → «Вставить ключ» → "
-                                                 "«Подключиться».")
+            # Отдельным сообщением только ключ — его удобно скопировать целиком, без лишнего текста.
+            await USER_BOT.send_message(chat_id, f"<code>{key}</code>", parse_mode="HTML")
+            await USER_BOT.send_message(chat_id, "👆 Нажмите на ключ — он скопируется.\n"
+                                                 "Затем AmneziaVPN → «➕» → «Вставить ключ» → «Подключиться».")
     if peer.get("kind") in ROUTER_KINDS:
         await USER_BOT.send_message(chat_id, router_help(peer, params))
 
