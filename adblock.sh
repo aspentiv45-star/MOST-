@@ -39,10 +39,6 @@ echo "==> Устанавливаю dnsmasq"
 export DEBIAN_FRONTEND=noninteractive
 # Пакет при установке пытается занять порт 53 на всех адресах — не даём ему стартовать до настройки.
 mkdir -p /etc/dnsmasq.d /var/lib/most
-# Не делать dnsmasq системным DNS самого сервера: он слушает только интерфейсы VPN.
-touch /etc/default/dnsmasq
-sed -i '/^DNSMASQ_EXCEPT=/d; /^IGNORE_RESOLVCONF=/d' /etc/default/dnsmasq
-printf 'DNSMASQ_EXCEPT="lo"\nIGNORE_RESOLVCONF=yes\n' >>/etc/default/dnsmasq
 [[ -f "$LIST" ]] || : >"$LIST"
 cat >"$CONF" <<EOF
 # MOST: DNS для клиентов VPN с блокировкой рекламы.
@@ -61,7 +57,16 @@ bogus-priv
 conf-file=$LIST
 EOF
 apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef \
-  install -y -qq dnsmasq curl >/dev/null
+  install -y -qq dnsmasq curl >/dev/null || true
+command -v dnsmasq >/dev/null || die "не удалось установить dnsmasq"
+# Настройки пакета: читать /etc/dnsmasq.d (без CONFIG_DIR — только стандартный конфиг, который занимает порт 53
+# на всех адресах) и не делать dnsmasq системным DNS самого сервера: он слушает только интерфейсы VPN.
+touch /etc/default/dnsmasq
+sed -i '/^CONFIG_DIR=/d; /^DNSMASQ_EXCEPT=/d; /^IGNORE_RESOLVCONF=/d' /etc/default/dnsmasq
+printf 'CONFIG_DIR=/etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new\nDNSMASQ_EXCEPT="lo"\nIGNORE_RESOLVCONF=yes\n' \
+  >>/etc/default/dnsmasq
+# Если пакет не смог запуститься при установке (порт 53), он остался недонастроенным — донастраиваем.
+dpkg --configure -a >/dev/null 2>&1 || true
 
 cat >"$UPDATE" <<'EOF'
 #!/bin/bash
