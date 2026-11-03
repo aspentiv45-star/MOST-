@@ -101,7 +101,10 @@ CLOUDFLARE_NETS = (
     "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32", "2405:8100::/32",
     "2a06:98c0::/29", "2c0f:f248::/32",
 )
-GAME_NETS = ("5.180.72.0/22", "2a09:fa40::/29")  # собственная сеть Supercell; адреса серверов ещё и из DNS (GAME_HOSTS)
+GAME_NETS = ("5.180.72.0/22", "2a09:fa40::/29")
+# Режимы, которые подключаются напрямую к основному серверу (UDP GAME_PORT), минуя вход в России:
+# меньше пинг. «Только заблокированное» тоже — выключить: SMART_DIRECT=0 в bot.env.
+DIRECT_MODES = ("game", "pcgame") + (("smart",) if os.environ.get("SMART_DIRECT", "1") == "1" else ())  # собственная сеть Supercell; адреса серверов ещё и из DNS (GAME_HOSTS)
 
 # Устройства и какой режим им подходит. На телефонах приложение AmneziaWG понимает список сетей,
 # а на iPhone иначе российские приложения не пустить мимо VPN. AmneziaVPN на компьютере
@@ -211,13 +214,16 @@ MODE_TEXT = (
     "📱 Только заблокированное — для сайтов и приложений. Через VPN идут только заблокированные: Telegram, "
     "YouTube, Instagram, WhatsApp, X, TikTok и игры Supercell. А российские приложения и сайты — банки, Госуслуги, "
     "Ozon, Wildberries, VK — открываются напрямую с телефона, как без VPN: быстро и без ошибок. "
-    "Нужно приложение AmneziaWG.\n\n"
+    "Подключение идёт напрямую в Нидерланды, поэтому пинг ниже. Если не подключается — у вашего оператора "
+    "не проходит прямое подключение, выберите «Весь трафик». Нужно приложение AmneziaWG.\n\n"
     "🎮 Игровой — для игр, два варианта:\n"
     "• 📱 Для телефона — только игры: Brawl Stars, Clash Royale, Clash of Clans, Hay Day, Boom Beach, Roblox "
     "(серверы, вход, магазин, обновления) и серверы Cloudflare. Сайты и приложения — Telegram, YouTube, "
     "Instagram — в нём НЕ работают: закончили играть — переключитесь обратно.\n"
-    "• 💻 Для ПК — весь трафик с одного IP, поэтому античиты (Easy Anti-Cheat, BattlEye) не рвут соединение, "
-    "Discord и Telegram работают. zapret и другие обходы блокировок на время VPN выключите.\n"
+    "• 💻 Для ПК — всё через VPN, кроме того, что лучше работает напрямую из России: Steam, CS2, Dota 2, "
+    "Faceit, КиберШок, Яндекс Музыка и российские сайты. Discord, Spotify, Telegram и серверы Cloudflare — "
+    "через VPN с минимальной задержкой, античиты (кроме Faceit) — тоже через VPN. zapret и другие обходы "
+    "блокировок на время VPN выключите.\n"
     "В обоих вариантах подключение идёт напрямую в Нидерланды, минуя российский сервер, — пинг самый низкий. "
     "Если не подключается — у оператора не проходит прямое подключение: на телефоне играйте в «Только "
     "заблокированное», на ПК — в «Весь трафик». Нужно приложение AmneziaWG."
@@ -633,7 +639,8 @@ def ads_blocked(peer):
 def client_conf(peer, params, host, port=None):
     allowed = (router_allowed_ips(host) if peer.get("kind") in ROUTER_KINDS else
                smart_allowed_ips() if mode_of(peer) == "smart" else
-               smart_allowed_ips(game_only=True) if mode_of(peer) == "game" else allowed_ips())
+               smart_allowed_ips(game_only=True) if mode_of(peer) == "game" else
+               PCGAME_NETS[0] if mode_of(peer) == "pcgame" and PCGAME_NETS[0] else allowed_ips())
     if ads_blocked(peer) and mode_of(peer) == "smart":
         allowed += f",{ADBLOCK_DNS}/32"  # DNS с блокировкой — на VPN-сервере, запросы к нему идут через VPN
     lines = [
@@ -725,6 +732,40 @@ ROBLOX_NETS = set(ROBLOX_SEED)
 TIKTOK_IPS = set()
 
 
+# «🎮 Игровой для ПК»: всё через VPN напрямую в Нидерланды, КРОМЕ того, что работает из России и с
+# российским IP лучше: Steam, CS2, Dota 2 (сети Valve), Faceit, КиберШок, Яндекс Музыка и всё российское.
+# Discord, Spotify, Cloudflare, Telegram, Meta, Google — всегда через VPN.
+VALVE_ASNS = (32590,)
+SPOTIFY_ASNS = (8403,)
+PC_DIRECT_HOSTS = ("faceit.com", "api.faceit.com", "www.faceit.com", "faceit-client.faceit-cdn.net",
+                   "cybershoke.net", "music.yandex.ru", "music.yandex.net")
+DISCORD_NETS = ("66.22.192.0/18", "138.128.136.0/21", "162.159.128.0/19", "162.245.208.0/21")
+PCGAME_NETS = [""]  # готовый список AllowedIPs; пусто — пока не собран, тогда весь трафик
+
+
+async def refresh_pcgame():
+    direct = []
+    for asn in VALVE_ASNS:
+        direct += [n for n in await asyncio.to_thread(split.fetch_asn_prefixes, asn) if n.version == 4]
+    direct += [ipaddress.ip_network(f"{ip}/32") for ip in await resolve(PC_DIRECT_HOSTS)]
+    # Адреса наших серверов — мимо туннеля, иначе подключение к ним уйдёт в сам туннель.
+    for host in (ENDPOINT_HOST, RELAY_HOST):
+        try:
+            direct.append(ipaddress.ip_network(f"{host}/32"))
+        except ValueError:
+            pass
+    force = [*split.FORCE_VPN, *(n for n in CLOUDFLARE_NETS if ":" not in n), *DISCORD_NETS]
+    for asn in SPOTIFY_ASNS:
+        force += [str(n) for n in await asyncio.to_thread(split.fetch_asn_prefixes, asn) if n.version == 4]
+    ru = await asyncio.to_thread(split.fetch_ru_networks)
+    # Valve, Faceit и т. п. не должны попасть в «через VPN» из-за принудительных сетей (Cloudflare):
+    # то, что пересекается с ними, остаётся через VPN — так решил клиент («Cloudflare через VPN»).
+    nets = await asyncio.to_thread(split.tunnel_networks, ru + direct, 800, force)
+    PCGAME_NETS[0] = ",".join(map(str, nets)) + ",::/0"
+    log.info("игровой режим ПК: %d сетей через VPN (мимо: %d сетей Valve/Faceit и российские)",
+             len(nets), len(direct))
+
+
 async def resolve(hosts):
     loop = asyncio.get_running_loop()
     found = set()
@@ -774,6 +815,11 @@ async def dynamic_loop():
                 ROBLOX_NETS.update(ROBLOX_SEED)
                 ROBLOX_NETS.update(str(n) for n in v4 + v6)
                 log.info("Roblox: взято %d сетей из %d", len(v4) + len(v6), len(nets))
+        if rounds % 4 == 0:
+            try:
+                await refresh_pcgame()
+            except Exception as e:
+                log.warning("список для игрового режима ПК не собрался: %s", e)
         rounds += 1
         await asyncio.sleep(6 * 3600)
 
@@ -867,7 +913,7 @@ def qr_png(text):
 def peer_variants(peer):
     """Файлы конфига: имя, адрес и порт подключения."""
     # Имя файла становится именем туннеля; на iOS оно не длиннее 15 символов.
-    if mode_of(peer) in ("game", "pcgame") and peer.get("kind") not in ROUTER_KINDS:
+    if mode_of(peer) in DIRECT_MODES and peer.get("kind") not in ROUTER_KINDS:
         # Игровой режим — напрямую на основной сервер, минуя вход в России.
         return [(f"{file_base(peer)}.conf", ENDPOINT_HOST, GAME_PORT)]
     if RELAY_HOST:
