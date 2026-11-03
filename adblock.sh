@@ -134,9 +134,11 @@ if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
 fi
 
 # Проверка: рекламный домен должен вернуть 0.0.0.0, обычный — настоящий адрес.
-AD="$(dig +short @"$DNS_IP" doubleclick.net 2>/dev/null | head -1 || true)"
+# Рекламный домен для проверки берём из самого списка (doubleclick.net в исключениях ради YouTube).
+AD_HOST="$(grep -m1 -oE '^address=/[a-z0-9.-]+\.[a-z]+/#' "$LIST" | cut -d/ -f2)"
+AD="$(dig +short @"$DNS_IP" "${AD_HOST:-ads.example.com}" 2>/dev/null | head -1 || true)"
 OK="$(dig +short @"$DNS_IP" example.com 2>/dev/null | head -1 || true)"
-echo "    проверка: doubleclick.net -> ${AD:-?} (должно быть 0.0.0.0), example.com -> ${OK:-?}"
+echo "    проверка: $AD_HOST -> ${AD:-?} (должно быть 0.0.0.0), example.com -> ${OK:-?}"
 
 sed -i '/^ADBLOCK_DNS=/d' "$ENV"
 echo "ADBLOCK_DNS=$DNS_IP" >>"$ENV"
