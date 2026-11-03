@@ -2763,15 +2763,28 @@ class ScreenBot(ExtBot):
         super().__init__(*args, **kwargs)
         self._active = {}   # chat_id -> id сообщений, отправленных в ответ на текущее нажатие
         self._screens = {}  # chat_id -> id сообщений прошлого экрана
+        # Нижнее меню держится на сообщении, которое его прислало: удалишь его — меню пропадёт.
+        # Поэтому такое сообщение удаляем, только когда бот уже прислал меню новым сообщением.
+        self._kb = {}       # chat_id -> (id последнего сообщения с меню, было ли оно частью экрана)
 
     async def send_message(self, *args, **kwargs):
         msg = await super().send_message(*args, **kwargs)
-        if msg.chat_id in self._active:
-            self._active[msg.chat_id].append(msg.message_id)
+        chat = msg.chat_id
+        if chat in self._active:
+            self._active[chat].append(msg.message_id)
+        if isinstance(kwargs.get("reply_markup"), ReplyKeyboardMarkup):
+            old_id, old_screen = self._kb.get(chat, (None, False))
+            self._kb[chat] = (msg.message_id, chat in self._active)
+            if old_id and old_screen:
+                try:
+                    await self.delete_message(chat, old_id)
+                except Exception:
+                    pass
         return msg
 
     async def screen_begin(self, chat_id, user_msg_id):
-        old = self._screens.pop(chat_id, []) + [user_msg_id]
+        keep = self._kb.get(chat_id, (None, False))[0]
+        old = [m for m in self._screens.pop(chat_id, []) if m != keep] + [user_msg_id]
         try:
             await self.delete_messages(chat_id, old)
         except Exception:
