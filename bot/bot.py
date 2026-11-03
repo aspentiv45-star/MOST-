@@ -373,6 +373,9 @@ async def add_news(text):
     return now
 
 
+REFRESH_BUTTON = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Обновить меню", callback_data="refresh:")]])
+
+
 def news_message(ts, text):
     return f"📢 Обновление от {fmt_day(ts)}\n\n{text}"
 
@@ -1269,6 +1272,11 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     action, _, arg = query.data.partition(":")
     await query.answer()
 
+    if action == "refresh":
+        # «🔄 Обновить меню» под оповещением: присылаем свежую клавиатуру с кнопками.
+        await query.message.reply_text("Меню обновлено 👇", reply_markup=KEYBOARD)
+        return
+
     if action == "pv":
         await on_poll_vote(query, arg)
         return
@@ -1874,7 +1882,7 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         users = list(load_state()["users"])
         for uid in users:
             try:
-                await USER_BOT.send_message(int(uid), news_message(ts, text), reply_markup=KEYBOARD)
+                await USER_BOT.send_message(int(uid), news_message(ts, text), reply_markup=REFRESH_BUTTON)
                 sent += 1
             except Exception:
                 pass
