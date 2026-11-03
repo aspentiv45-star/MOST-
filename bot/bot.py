@@ -28,7 +28,6 @@ import subprocess
 import tempfile
 import time
 import traceback
-import zipfile
 import zlib
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -888,7 +887,6 @@ def download_buttons(pub):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🍏 iPhone / 💻 Windows, Mac", callback_data=f"dl:ios:{pub}")],
         [InlineKeyboardButton("🤖 Android", callback_data=f"dl:and:{pub}")],
-        [InlineKeyboardButton("📦 Все режимы одним архивом", callback_data=f"dl:zip:{pub}")],
     ])
 
 
@@ -909,42 +907,6 @@ async def send_peer(chat_id, peer):
         return
     await USER_BOT.send_message(chat_id, f"📥 {title(peer)}: на каком устройстве подключаете?",
                                 reply_markup=download_buttons(pub))
-
-
-# Режимы в архиве «Все режимы»: суффикс имени файла (= имени подключения в приложении) и название.
-ZIP_MODES = (("full", "full", "Весь трафик"), ("smart", "block", "Только заблокированное"),
-             ("game", "game", "Игровой (телефон)"))
-ZIP_MODES_PC = (("full", "full", "Весь трафик"), ("smart", "block", "Только заблокированное"),
-                ("pcgame", "pcgame", "Игровой для ПК"))
-
-
-async def deliver_zip(chat_id, peer):
-    """Архив с конфигом во всех режимах: AmneziaWG импортирует его целиком («Создать из файла или архива»)."""
-    params = server_params(peer_iface(peer)[1])
-    modes = ZIP_MODES_PC if peer.get("os") == "pc" else ZIP_MODES
-    base = file_base(peer)[:8]  # имя подключения на iPhone — не длиннее 15 символов
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for mode, suffix, _ in modes:
-            p = dict(peer)
-            p.pop("mode", None)
-            if mode != "full":
-                p["mode"] = mode
-            filename, host, port = peer_variants(p)[0]
-            z.writestr(f"{base}-{suffix}.conf", client_conf(p, params, host, port))
-    buf.seek(0)
-    names = "\n".join(f"• {base}-{suffix} — {name}" for _, suffix, name in modes)
-    await USER_BOT.send_document(chat_id, document=buf, filename=f"{base}-all.zip",
-                                 caption=f"📦 {title(peer)}: все режимы — {peer_status(peer)}")
-    await USER_BOT.send_message(
-        chat_id, f"В архиве три подключения:\n{names}\n\n"
-                 "Как добавить (приложение AmneziaWG):\n"
-                 "1. Сохраните архив: зажмите файл → «Поделиться» → «Сохранить в Файлы». Если Telegram пишет "
-                 "«Нет файлов для просмотра» — это нормально, просто сохраните архив.\n"
-                 "2. В AmneziaWG: «➕» → «Создать из файла или архива» → выберите архив.\n"
-                 "3. Режим меняется переключателем нужного подключения.\n\n"
-                 "❗ Включайте только одно подключение одновременно — это один и тот же ключ.\n"
-                 "Архив не открывается в AmneziaVPN — там добавляйте режимы по одному (ключом или файлом).")
 
 
 async def deliver_peer(chat_id, peer, how):
@@ -1432,9 +1394,6 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif how in ("ios", "key", "file", "qr"):
             await query.edit_message_reply_markup(reply_markup=None)
             await deliver_peer(query.message.chat_id, peer, how)
-        elif how == "zip":
-            await query.edit_message_reply_markup(reply_markup=None)
-            await deliver_zip(query.message.chat_id, peer)
         return
 
     if action == "newsv":
