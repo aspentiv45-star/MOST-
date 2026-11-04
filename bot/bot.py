@@ -1361,11 +1361,22 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         u = get_user(state, update.effective_user)
         # Ссылка друга: t.me/бот?start=ref_ID — запоминаем, кто пригласил (только новичкам).
         arg = (ctx.args or [""])[0] if getattr(ctx, "args", None) else ""
-        if arg.startswith("ref_") and "ref" not in u and not user_peers(state, update.effective_user.id):
-            rid = parse_ref(state, update.effective_user.id, arg)
-            if rid:
+        note = ""
+        if arg.startswith("ref_"):
+            me = str(update.effective_user.id)
+            rid = parse_ref(state, me, arg)
+            if arg == f"ref_{me}":
+                note = "👥 Это ваша ссылка — отправьте её другу."
+            elif u.get("ref"):
+                note = f"👥 Вас уже пригласил {user_name(state, u['ref'])}."
+            elif user_peers(state, me) or any(p["user"] == me for p in state["payments"].values()):
+                note = "👥 Вы уже клиент — ссылка приглашения работает только для новых."
+            elif rid:
                 u["ref"] = rid
+                note = f"👥 Вас пригласил {user_name(state, rid)}."
         save_state(state)
+    if note:
+        await update.message.reply_text(note)
     if not await gate(update, ctx, state):
         return
     mine = user_peers(state, update.effective_user.id)
