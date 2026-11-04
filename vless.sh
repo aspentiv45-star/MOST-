@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # MOST — VLESS Reality для клиентов (Happ, v2rayNG, Hiddify, Streisand). Запускать на ОСНОВНОМ сервере.
 #
-# Ставит Xray на TCP 443 (маскировка под обычный HTTPS чужого сайта). Ключи клиентам выдаёт бот:
-# «📄 Мои конфиги» → «⬇️ Скачать» → «🔗 VLESS». Ключ работает, пока активен конфиг AmneziaWG,
-# к которому он привязан, — срок, продление и удаление общие. AmneziaWG продолжает работать как раньше.
+# Ставит Xray на TCP 443 и 2053 (игровой ключ; маскировка под обычный HTTPS чужого сайта). Бот продаёт
+# «🔗 Подписку VLESS (Happ)» отдельно от AmneziaWG — со своим сроком; после оплаты присылает текст для Happ:
+# маршрутизация (российское — без VPN) и три ключа: основной, обход белых списков (через вход), игровой.
 # Российские сайты, как и у AmneziaWG, идут через российский выход (если стоит ru-route.sh).
 #
 #   sudo bash vless.sh [--sni www.microsoft.com] [--relay-port 8443]   — включить
@@ -103,6 +103,7 @@ EOF
 
 sed -i '/^VLESS_/d' "$ENV"
 cat >>"$ENV" <<EOF
+VLESS_GAME_PORT=2053
 VLESS_PRIV=$PRIV
 VLESS_PUB=$PUB
 VLESS_SID=$SID
@@ -114,6 +115,7 @@ RELAY_HOST="$(old RELAY_HOST)"
 
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow 443/tcp comment "MOST vless" >/dev/null
+  ufw allow 2053/tcp comment "MOST vless game" >/dev/null
 fi
 
 systemctl daemon-reload
@@ -129,9 +131,9 @@ systemctl is-active --quiet xray || { journalctl -u xray -n 20 --no-pager; die "
 MY_IP="$(old ENDPOINT_HOST)"
 cat <<EOF
 
-Готово: VLESS Reality на TCP 443 (маскировка под $SNI). Клиенты берут ключ в боте:
-«📄 Мои конфиги» → «⬇️ Скачать» → «🔗 VLESS (Happ, v2rayNG)».
-Если у хостинга есть свой файрвол — откройте в нём TCP-порт 443.
+Готово: VLESS Reality на TCP 443 и 2053 (игровой; маскировка под $SNI).
+В боте появилась покупка «🔗 Подписка VLESS (Happ)» — после оплаты клиент получает текст для Happ
+с маршрутизацией и тремя ключами. Если у хостинга есть свой файрвол — откройте TCP 443 и 2053.
 EOF
 if [[ -n "$RELAY_HOST" ]]; then
   cat <<EOF

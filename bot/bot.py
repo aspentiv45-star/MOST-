@@ -65,6 +65,7 @@ VLESS_SID = os.environ.get("VLESS_SID", "")
 VLESS_SNI = os.environ.get("VLESS_SNI", "www.microsoft.com")
 VLESS_PORT = os.environ.get("VLESS_PORT", "443")
 VLESS_RELAY_PORT = os.environ.get("VLESS_RELAY_PORT", "")  # порт на входе в Москве (TCP), пусто — без него
+VLESS_GAME_PORT = os.environ.get("VLESS_GAME_PORT", "2053")  # отдельный вход Xray для игрового ключа
 XRAY_CONF = os.environ.get("XRAY_CONF", "/usr/local/etc/xray/config.json")
 # Со входом в РФ клиенты получают один конфиг через него: прямое подключение к
 # зарубежному серверу российские провайдеры часто режут. SEND_DIRECT=1 — выдавать и прямой.
@@ -178,7 +179,8 @@ NEW = "new"
 TOPUP = "topup"                    # пополнение баланса (не конфиг)
 NEW_ROUTER = "new-router"          # роутер на чистом WireGuard
 NEW_ROUTER_AWG = "new-router-awg"  # роутер с AmneziaWG (Keenetic, OpenWrt)
-KIND_BY_TARGET = {NEW: "device", NEW_ROUTER: "router", NEW_ROUTER_AWG: "router-awg"}
+NEW_VLESS = "new-vless"            # подписка VLESS (Happ, v2rayNG) — отдельно от AmneziaWG
+KIND_BY_TARGET = {NEW: "device", NEW_ROUTER: "router", NEW_ROUTER_AWG: "router-awg", NEW_VLESS: "vless"}
 ROUTER_KINDS = ("router", "router-awg")
 
 # Параметры обфускации AmneziaWG: клиенту они нужны точно такими же, как у сервера.
@@ -485,6 +487,8 @@ def write_server_conf(state):
     ifaces = [(IFACE, CONF)] + ([(ROUTER_IFACE, ROUTER_CONF)] if plain_routers() else [])
     # Роутеры, выданные до появления отдельного интерфейса, переезжают в его подсеть.
     for p in state["peers"].values():
+        if p.get("kind") == "vless":
+            continue
         conf = peer_iface(p)[1]
         net = ipaddress.ip_interface(server_params(conf)["Address"].split(",")[0].strip()).network
         if ipaddress.ip_address(p["ip"]) not in net:
@@ -492,7 +496,7 @@ def write_server_conf(state):
     for iface, conf in ifaces:
         out = interface_section(conf)
         for pub, p in state["peers"].items():
-            if peer_active(p) and peer_iface(p)[0] == iface:
+            if peer_active(p) and p.get("kind") != "vless" and peer_iface(p)[0] == iface:
                 out += ["", "[Peer]", f"# {p['user']} {p['name']}", f"PublicKey = {pub}", f"AllowedIPs = {p['ip']}/32"]
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(conf))
         with os.fdopen(fd, "w") as f:
@@ -532,17 +536,20 @@ def vless_enabled():
 def xray_config(state):
     """Конфиг Xray: в нём только действующие конфиги, которым выдан ключ VLESS."""
     clients = [{"id": p["vless"], "flow": "xtls-rprx-vision", "email": f"{p['user']}-{p['name']}"}
-               for p in state["peers"].values() if p.get("vless") and peer_active(p)]
+               for p in state["peers"].values() if p.get("kind") == "vless" and peer_active(p)]
+    reality = {"network": "tcp", "security": "reality", "realitySettings": {
+        "dest": f"{VLESS_SNI}:443", "serverNames": [VLESS_SNI], "privateKey": VLESS_PRIV, "shortIds": [VLESS_SID]}}
+    sniff = {"enabled": True, "destOverride": ["http", "tls", "quic"]}
+    inbounds = [{"tag": "vless", "listen": "0.0.0.0", "port": int(VLESS_PORT), "protocol": "vless",
+                 "settings": {"clients": clients, "decryption": "none"}, "streamSettings": reality, "sniffing": sniff}]
+    if VLESS_GAME_PORT:
+        # Игровой ключ — свой порт: если основной притормаживают, игры на нём не страдают.
+        inbounds.append({"tag": "game", "listen": "0.0.0.0", "port": int(VLESS_GAME_PORT), "protocol": "vless",
+                         "settings": {"clients": clients, "decryption": "none"}, "streamSettings": reality,
+                         "sniffing": sniff})
     return {
         "log": {"loglevel": "warning"},
-        "inbounds": [{
-            "tag": "vless", "listen": "0.0.0.0", "port": int(VLESS_PORT), "protocol": "vless",
-            "settings": {"clients": clients, "decryption": "none"},
-            "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {
-                "dest": f"{VLESS_SNI}:443", "serverNames": [VLESS_SNI],
-                "privateKey": VLESS_PRIV, "shortIds": [VLESS_SID]}},
-            "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
-        }],
+        "inbounds": inbounds,
         "outbounds": [{"protocol": "freedom", "tag": "direct"}, {"protocol": "blackhole", "tag": "block"}],
         # Как у AmneziaWG: без торрентов, локальных сетей и почтовой рассылки (порт 25).
         "routing": {"rules": [
@@ -579,46 +586,67 @@ def write_xray_conf(state):
     run(["systemctl", "restart", "xray"])
 
 
+# Маршрутизация для Happ: российские сайты и приложения — напрямую, заблокированное — через VPN.
+HAPP_ROUTING = {
+    "Name": "MOST", "GlobalProxy": "true", "UseChunkFiles": "true",
+    "RemoteDNSType": "DoH", "RemoteDNSDomain": "https://cloudflare-dns.com/dns-query", "RemoteDNSIP": "1.1.1.1",
+    "DomesticDNSType": "DoU", "DomesticDNSDomain": "", "DomesticDNSIP": "77.88.8.8",
+    "Geoipurl": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat",
+    "Geositeurl": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat",
+    "DnsHosts": {},
+    # Через VPN всегда — даже если у сервиса есть серверы в России (кэши YouTube у провайдеров и т. п.).
+    "ProxySites": ["geosite:youtube", "geosite:google", "geosite:telegram", "geosite:instagram",
+                   "geosite:facebook", "geosite:twitter", "geosite:discord", "geosite:tiktok",
+                   "geosite:openai", "geosite:anthropic", "geosite:netflix", "geosite:spotify"],
+    "ProxyIp": ["geoip:telegram"],
+    "DirectSites": ["geosite:category-ru", "geosite:category-gov-ru", "domain:ru", "domain:su", "domain:xn--p1ai"],
+    "DirectIp": ["geoip:ru", "geoip:private"],
+    "BlockSites": [], "BlockIp": [],
+    "DomainStrategy": "IPIfNonMatch", "FakeDNS": "false",
+}
+
+
+def happ_routing_link():
+    data = dict(HAPP_ROUTING, LastUpdated=str(int(time.time())))
+    return "happ://routing/onadd/" + base64.b64encode(json.dumps(data, ensure_ascii=False).encode()).decode()
+
+
 def vless_links(peer):
-    """Ссылки vless:// для приложения: напрямую в Нидерланды и через вход в Москве."""
+    """Три ключа подписки: основной (напрямую в Нидерланды), обход белых списков (через Москву), игровой."""
     q = (f"encryption=none&flow=xtls-rprx-vision&security=reality&sni={VLESS_SNI}&fp=chrome"
          f"&pbk={VLESS_PUB}&sid={VLESS_SID}&type=tcp")
-    name = file_base(peer)
-    links = [("⚡️ Основной — напрямую в Нидерланды",
-              f"vless://{peer['vless']}@{ENDPOINT_HOST}:{VLESS_PORT}?{q}#MOST-{name}")]
+    uid = peer["vless"]
+    links = [("⚡️ Основной", f"vless://{uid}@{ENDPOINT_HOST}:{VLESS_PORT}?{q}#MOST ⚡️ Основной")]
     if RELAY_HOST and VLESS_RELAY_PORT:
-        links.append(("🛡 Обход белых списков — через Москву",
-                      f"vless://{peer['vless']}@{RELAY_HOST}:{VLESS_RELAY_PORT}?{q}#MOST-{name}-obhod"))
+        links.append(("🛡 Обход белых списков",
+                      f"vless://{uid}@{RELAY_HOST}:{VLESS_RELAY_PORT}?{q}#MOST 🛡 Обход белых списков"))
+    if VLESS_GAME_PORT:
+        links.append(("🎮 Игровой", f"vless://{uid}@{ENDPOINT_HOST}:{VLESS_GAME_PORT}?{q}#MOST 🎮 Игровой"))
     return links
 
 
-async def deliver_vless(chat_id, pub):
-    """Выдаёт конфигу ключ VLESS (если ещё нет) и присылает ссылки."""
-    async with lock:
-        state = load_state()
-        peer = state["peers"].get(pub)
-        if not peer:
-            return
-        if not peer.get("vless"):
-            old_state = json.loads(json.dumps(state))
-            peer["vless"] = str(uuid.uuid4())
-            apply_or_rollback(state, old_state)
-            save_state(state)
-    ids = []
-    for label, link in vless_links(peer):
-        msg = await USER_BOT.send_message(chat_id, f"{label}\n<code>{html.escape(link)}</code>", parse_mode="HTML")
-        ids.append(msg.message_id)
+async def deliver_vless(chat_id, peer):
+    """Подписка VLESS: один блок для Happ (маршрутизация + все ключи) — нажать, скопировать, вставить."""
+    if not vless_enabled():
+        await USER_BOT.send_message(chat_id, "VLESS сейчас недоступен — напишите в «🆘 Нужна помощь».")
+        return
+    links = vless_links(peer)
+    block = "\n".join([happ_routing_link()] + [link for _, link in links])
+    msg = await USER_BOT.send_message(chat_id, f"<code>{html.escape(block)}</code>", parse_mode="HTML")
+    modes = " · ".join(label for label, _ in links)
     await USER_BOT.send_message(
-        chat_id, "👆 Нажмите на ссылку — она скопируется. Happ (или v2rayNG, Hiddify, Streisand) → «➕» → "
-                 "«Вставить из буфера». Добавьте обе: не работает одна — включите другую.\n"
-                 "Ключ действует, пока активен этот конфиг.",
+        chat_id, f"👆 Нажмите на текст — он скопируется целиком. Happ → «➕» → «Вставить из буфера».\n"
+                 f"Добавятся режимы: {modes} и маршрутизация — российские приложения и сайты будут "
+                 "открываться без VPN.\n\n"
+                 "v2rayNG, Hiddify, Streisand тоже принимают эти ключи, но маршрутизацию для них нужно "
+                 "настроить в самом приложении.",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-            "✅ Готово — убрать", callback_data="kdone:" + ",".join(map(str, ids)))]]))
+            "✅ Готово — убрать", callback_data=f"kdone:{msg.message_id}")]]))
 
 
 def next_free_ip(state, params):
     iface = ipaddress.ip_interface(params["Address"].split(",")[0].strip())
-    used = {p["ip"] for p in state["peers"].values()} | {str(iface.ip)}
+    used = {p["ip"] for p in state["peers"].values() if p.get("ip")} | {str(iface.ip)}
     for host in iface.network.hosts():
         # Адреса на .0 и .255 в сетях больше /24 формально годятся, но некоторые устройства их не любят.
         if str(host) not in used and host.packed[-1] not in (0, 255):
@@ -657,9 +685,17 @@ def months_text(m):
 
 def create_peer(state, uid, until, kind="device"):
     """Добавляет конфиг в state (без применения на сервере). Возвращает его ключ и данные."""
-    prefix = "rtr" if kind in ROUTER_KINDS else "vpn"
+    prefix = "rtr" if kind in ROUTER_KINDS else "vless" if kind == "vless" else "vpn"
     names = {p["name"] for p in user_peers(state, uid).values()}
     n = next(i for i in range(1, 1000) if f"{prefix}{i}" not in names)
+    if kind == "vless":
+        # Подписка VLESS: вместо ключей AmneziaWG — UUID для Xray.
+        vid = str(uuid.uuid4())
+        pub = "v" + vid.replace("-", "")
+        peer = {"user": str(uid), "name": f"{prefix}{n}", "kind": kind, "priv": vid, "vless": vid,
+                "created": fmt_date(time.time()), "made": int(time.time()), "until": until, "warned": 0}
+        state["peers"][pub] = peer
+        return pub, peer
     priv = run(["awg", "genkey"])
     pub = run(["awg", "pubkey"], priv + "\n")
     peer = {"user": str(uid), "name": f"{prefix}{n}", "kind": kind,
@@ -1139,8 +1175,6 @@ def download_buttons(pub):
         [InlineKeyboardButton("🍏 iPhone / 💻 Windows, Mac", callback_data=f"dl:ios:{pub}")],
         [InlineKeyboardButton("🤖 Android", callback_data=f"dl:and:{pub}")],
         [InlineKeyboardButton("📦 Все режимы сразу", callback_data=f"dl:allm:{pub}")],
-        *([[InlineKeyboardButton("🔗 VLESS (Happ, v2rayNG)", callback_data=f"dl:vless:{pub}")]]
-          if vless_enabled() else []),
         [InlineKeyboardButton("⬅️ К конфигу", callback_data=f"cfg:{pub}")],
     ])
 
@@ -1187,6 +1221,9 @@ def android_buttons(pub):
 async def send_peer(chat_id, peer):
     """Выдача конфига: роутеру — сразу файл; телефону и компьютеру — сначала выбор устройства."""
     pub = peer_pub(peer)
+    if peer.get("kind") == "vless":
+        await deliver_vless(chat_id, peer)
+        return
     if peer.get("kind") in ROUTER_KINDS or not pub:
         await deliver_peer(chat_id, peer, "all")
         return
@@ -1404,6 +1441,8 @@ def pay_text():
 def target_label(state, target):
     if target == TOPUP:
         return "пополнение баланса"
+    if target == NEW_VLESS:
+        return "подписка VLESS (Happ)"
     if target == NEW:
         return "новый конфиг для себя"
     if target == NEW_ROUTER:
@@ -1780,6 +1819,8 @@ BUY_MENU = {
     "root": (f"Что подключаем? Срок — {DAYS} дней.", InlineKeyboardMarkup([
         [InlineKeyboardButton(f"📱 Для устройства — {PRICE} ₽", callback_data="menu:device")],
         [InlineKeyboardButton(f"📡 Для роутера (весь дом) — {ROUTER_PRICE} ₽", callback_data="menu:router")],
+        *([[InlineKeyboardButton(f"🔗 Подписка VLESS (Happ) — {PRICE} ₽", callback_data="menu:vless")]]
+          if VLESS_PRIV else []),
         [InlineKeyboardButton("🛒 Что выбрать?", callback_data="menu:what")],
     ])),
     "device": ("📱 Какое устройство? Один конфиг — одно устройство.", InlineKeyboardMarkup([
@@ -1795,6 +1836,17 @@ BUY_MENU = {
                "Модель написана на наклейке снизу роутера.", InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ У меня Keenetic или OpenWrt", callback_data="menu:router-awg")],
         [InlineKeyboardButton("📱 Другой роутер — купить для устройства", callback_data="menu:device")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="menu:root")],
+    ])),
+    "vless": ("🔗 Подписка VLESS для приложения Happ (iPhone, Android, ПК).\n\n"
+              "⭐️ Рекомендуем AmneziaWG («📱 Для устройства»): он быстрее и стабильнее, лучше подходит для игр. "
+              "VLESS — запасной вариант, если AmneziaWG у вас не подключается, или если вы уже пользуетесь Happ.\n\n"
+              "В подписке 3 режима: ⚡️ Основной (напрямую в Нидерланды), 🛡 Обход белых списков (через Россию) "
+              "и 🎮 Игровой. Российские приложения и сайты открываются без VPN.\n\n"
+              "Установите Happ из App Store или Google Play — после оплаты бот пришлёт текст, который нужно "
+              "вставить в Happ.", InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💳 Купить — {PRICE} ₽/мес или {PRICE3} ₽ за 3 мес", callback_data=f"buy:{NEW_VLESS}")],
+        [InlineKeyboardButton("📱 Лучше AmneziaWG", callback_data="menu:device")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:root")],
     ])),
     "what": (GUIDES["what"], InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu:root")]])),
@@ -1893,9 +1945,15 @@ async def submit_payment(user, target, data, comment, reply_to, months=1, amount
 
 def config_card(state, pub, p, back=True):
     """Экран одного конфига: что он такое и все действия с ним."""
-    row = [InlineKeyboardButton("⬇️ Скачать", callback_data=f"get:{pub}")]
+    vless = p.get("kind") == "vless"
+    row = [InlineKeyboardButton("🔑 Получить ключи" if vless else "⬇️ Скачать", callback_data=f"get:{pub}")]
     if not is_admin(p["user"]):
         row.append(InlineKeyboardButton(f"🔄 Продлить — {price_for(state, pub)} ₽", callback_data=f"renew:{pub}"))
+    if vless:
+        rows = [row, [InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pub}")]]
+        if back:
+            rows.append([InlineKeyboardButton("⬅️ Все конфиги", callback_data="cfgl:")])
+        return f"🔗 {title(p)} — {peer_status(p)}\nПодписка VLESS для Happ", InlineKeyboardMarkup(rows)
     rows = [row, [InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}"),
                   InlineKeyboardButton("✏️ Название", callback_data=f"ren:{pub}")]]
     if p.get("kind") not in ROUTER_KINDS and os.environ.get("OP_PROFILES", "0") == "1":
@@ -2044,9 +2102,6 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif how == "back":
             await query.edit_message_text(f"📥 {title(peer)}: на каком устройстве подключаете?",
                                           reply_markup=download_buttons(pub))
-        elif how == "vless" and vless_enabled() and peer.get("kind") not in ROUTER_KINDS:
-            await show_card(query, pub, "✅ Отправил ниже 👇")
-            await deliver_vless(query.message.chat_id, pub)
         elif how in ("ios", "key", "file", "qr", "amk", "amq", "amf"):
             # Сначала экран конфига (с пометкой), потом файлы под ним.
             await show_card(query, pub, "✅ Отправил ниже 👇")
@@ -2294,6 +2349,10 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not peer_active(peer):
             await show_card(query, arg, "Срок закончился — сначала продлите.")
             return
+        if peer.get("kind") == "vless":
+            await show_card(query, arg, "✅ Отправил ниже 👇")
+            await deliver_vless(query.message.chat_id, peer)
+            return
         await query.edit_message_text(f"📥 {title(peer)}: на каком устройстве подключаете?",
                                       reply_markup=download_buttons(arg))
     elif action == "del":
@@ -2387,10 +2446,12 @@ def user_card(state, uid, hs=None):
     if extra:
         lines.append(" · ".join(extra))
     for pub, p in sorted(user_peers(state, uid).items(), key=lambda kv: kv[1]["name"]):
-        icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
+        icon = "📡" if p.get("kind") in ROUTER_KINDS else "🔗" if p.get("kind") == "vless" else "📱"
         lines.append(f"\n{icon} {title(p)} — {peer_status(p)}")
         extra = []
-        if peer_active(p):
+        if peer_active(p) and p.get("kind") == "vless":
+            extra.append("🔗 подписка VLESS")
+        elif peer_active(p):
             h = hs.get(pub, 0)
             extra.append("🔌 подключён сейчас" if is_online(h)
                          else f"💤 не подключён, последний раз: {fmt_date(h) if h else 'ни разу'}")
@@ -2963,6 +3024,8 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         peers = user_peers(state, uid)
         if what != "ext":
             peers = {k: p for k, p in peers.items() if peer_active(p)}
+        if what == "png":  # у подписки VLESS нет адреса в туннеле — пинговать нечего
+            peers = {k: p for k, p in peers.items() if p.get("kind") != "vless"}
         if what == "back" or not peers:
             await query.answer("Нет подходящих конфигов." if what != "back" else "")
             await query.edit_message_text(user_card(state, uid), reply_markup=user_buttons(uid))
