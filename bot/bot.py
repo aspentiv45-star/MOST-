@@ -2213,7 +2213,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 ABTN_PAY = "⏳ Оплаты"
 ABTN_USERS = "👥 Клиенты"
-ABTN_GIVE = "🎁 Выдать конфиг"
+ABTN_GIVE = "💰 Выдать деньги"
 ABTN_STATS = "📊 Статистика"
 ABTN_RESEND = "📤 Разослать конфиги"
 ABTN_NEWS = "📢 Оповестить об обновлении"
@@ -2257,8 +2257,8 @@ def user_buttons(uid):
         InlineKeyboardButton("⛔️ Отключить", callback_data=f"uact:take:{uid}"),
     ], [
         InlineKeyboardButton("🏓 Пинг", callback_data=f"uact:png:{uid}"),
-        copy,
-    ], back])
+        InlineKeyboardButton("💰 Деньги", callback_data=f"money:{uid}"),
+    ], [copy], back])
 
 
 def user_card(state, uid, hs=None):
@@ -2399,7 +2399,7 @@ async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "После одобрения клиент сразу получает новый конфиг или продление.\n\n"
         f"{ABTN_PAY} — неразобранные оплаты и запросы доступа\n"
         f"{ABTN_USERS} — клиенты и их конфиги: продлить, отключить, удалить неоплаченные; кто ждёт решения\n"
-        f"{ABTN_GIVE} — бесплатно выдать конфиг по ID\n"
+        f"{ABTN_GIVE} — начислить (или списать) деньги на баланс клиента по ID\n"
         f"{ABTN_STATS} — кто подключён и трафик\n"
         f"{ABTN_RESEND} — отправить всем клиентам актуальные файлы их конфигов\n"
         f"{ABTN_NEWS} — написать всем клиентам, что нового (попадёт в «{BTN_NEWS}»)\n"
@@ -2592,12 +2592,31 @@ async def send_all_cards(message, group):
 async def admin_give_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["await"] = "give"
     await update.message.reply_text(
-        f"Пришлите ID клиента и, через пробел, число дней (по умолчанию {DAYS}).\n"
-        f"Например: 123456789 {DAYS}\n"
-        f"Для роутера (Keenetic, OpenWrt) добавьте слово «роутер»: "
-        f"123456789 {DAYS} роутер\n\n"
-        "Клиент получит новый конфиг бесплатно. ID видно в его оплатах и в «👥 Клиенты». "
-        "Клиент должен хотя бы раз нажать /start в клиентском боте.")
+        "Пришлите ID клиента и сумму через пробел.\n"
+        "Например: 123456789 300 — начислить 300 ₽, 123456789 -100 — списать 100 ₽.\n\n"
+        "Клиенту придёт сообщение. ID видно в его оплатах и в «👥 Клиенты».")
+
+
+async def give_money(uid, amount):
+    """Начислить (amount > 0) или списать деньги с баланса клиента. Возвращает текст итога."""
+    async with lock:
+        state = load_state()
+        u = state["users"].setdefault(str(uid), {"name": str(uid)})
+        old = u.get("balance", 0)
+        u["balance"] = max(0, old + amount)
+        if amount > 0:
+            u.setdefault("approved", True)  # начислили деньги — значит, пускаем
+        save_state(state)
+    diff = u["balance"] - old
+    text = (f"🎁 Администратор начислил {diff} ₽ на баланс." if diff > 0 else
+            f"Администратор списал {-diff} ₽ с баланса.") + f" Теперь {u['balance']} ₽."
+    sent = ""
+    if diff:
+        try:
+            await USER_BOT.send_message(int(uid), text, reply_markup=KEYBOARD)
+        except Exception:
+            sent = "\nКлиенту написать не удалось — он ещё не нажимал /start в клиентском боте."
+    return f"{user_name(state, uid)}: баланс {old} → {u['balance']} ₽{sent}"
 
 
 @admin_only
@@ -2662,22 +2681,25 @@ async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         return
+    if (waiting or "").startswith("money:"):
+        amount = update.message.text.replace("₽", "").replace("+", "").strip()
+        if not amount.lstrip("-").isdigit() or int(amount) == 0:
+            ctx.user_data["await"] = waiting
+            await update.message.reply_text("Нужно число, например 300 или -100.")
+            return
+        result = await give_money(waiting.partition(":")[2], int(amount))
+        await update.message.reply_text(f"Готово.\n{result}", reply_markup=ADMIN_KEYBOARD)
+        return
     if waiting != "give":
         await update.message.reply_text("Выберите действие на кнопках ниже.", reply_markup=ADMIN_KEYBOARD)
         return
-    words = update.message.text.lower().split()
-    AWG_WORDS = ("amnez", "амнез", "keenetic", "кинет", "awg", "openwrt")
-    awg = any(w.startswith(AWG_WORDS) for w in words)
-    # Обычный WireGuard для роутеров больше не продаётся: «роутер» = роутер AmneziaWG.
-    awg = awg or any(w.startswith(("роут", "router")) for w in words)
-    parts = [w for w in words if w.isdigit()]
-    if not parts or not parts[0].isdigit() or (len(parts) > 1 and not parts[1].isdigit()):
+    parts = update.message.text.replace("₽", " ").replace("+", " ").split()
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].lstrip("-").isdigit() or parts[1] in ("0", "-0"):
         ctx.user_data["await"] = "give"
-        await update.message.reply_text(f"Нужно число — ID клиента. Например: 123456789 {DAYS}")
+        await update.message.reply_text("Нужно два числа: ID клиента и сумма. Например: 123456789 300")
         return
-    uid, days = int(parts[0]), int(parts[1]) if len(parts) > 1 else DAYS
-    result = await grant(uid, NEW_ROUTER_AWG if awg else NEW, days, paid=False)
-    await update.message.reply_text(f"Готово: выдан конфиг.\n{result}", reply_markup=ADMIN_KEYBOARD)
+    result = await give_money(parts[0], int(parts[1]))
+    await update.message.reply_text(f"Готово.\n{result}", reply_markup=ADMIN_KEYBOARD)
 
 
 async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2814,6 +2836,13 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("Клиент не найден.")
                 return
             await query.edit_message_text(user_card(state, arg), reply_markup=user_buttons(arg))
+        return
+
+    if action == "money":
+        await query.answer()
+        ctx.user_data["await"] = f"money:{arg}"
+        await query.message.reply_text(f"💰 {user_name(load_state(), arg)}: сколько начислить? Пришлите число, "
+                                       "например 300. Списать — с минусом: -100.")
         return
 
     if action == "uact":
