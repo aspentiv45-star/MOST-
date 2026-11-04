@@ -1007,6 +1007,7 @@ def download_buttons(pub):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🍏 iPhone / 💻 Windows, Mac", callback_data=f"dl:ios:{pub}")],
         [InlineKeyboardButton("🤖 Android", callback_data=f"dl:and:{pub}")],
+        [InlineKeyboardButton("📦 Все режимы сразу", callback_data=f"dl:allm:{pub}")],
         [InlineKeyboardButton("⬅️ К конфигу", callback_data=f"cfg:{pub}")],
     ])
 
@@ -1108,8 +1109,35 @@ async def notify_stale_smart():
             pass
 
 
+# «📦 Все режимы сразу»: по файлу на режим — в приложении это отдельные туннели, клиент переключается
+# между ними сам. Ключ у всех один (это тот же конфиг), поэтому включать можно только один туннель.
+ALL_MODES = {"smart": "osn", "full": "obhod", "game": "game"}
+ALL_MODES_PC = {"smart": "osn", "full": "obhod", "pcgame": "game"}
+
+
+async def deliver_all_modes(chat_id, peer):
+    params = server_params(peer_iface(peer)[1])
+    base = file_base(peer)
+    ids = []
+    for mode, suffix in (ALL_MODES_PC if peer.get("os") == "pc" else ALL_MODES).items():
+        mp = dict(peer, mode=mode)
+        _, host, port = peer_variants(mp)[0]
+        filename = f"{base[:14 - len(suffix)]}-{suffix}.conf"  # имя туннеля на iOS — до 15 символов
+        msg = await USER_BOT.send_document(chat_id, document=io.BytesIO(client_conf(mp, params, host, port).encode()),
+                                           filename=filename, caption=MODES[mode])
+        ids.append(msg.message_id)
+    await USER_BOT.send_message(
+        chat_id, "👆 Добавьте все файлы в AmneziaWG (или AmneziaVPN) — это режимы. Переключайтесь между ними "
+                 "прямо в приложении. Включайте только один туннель за раз.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+            "✅ Готово — убрать файлы", callback_data="kdone:" + ",".join(map(str, ids)))]]))
+
+
 async def deliver_peer(chat_id, peer, how):
     """how: file — файл; qr — QR-код; key — ключ для AmneziaVPN; ios — файл и QR; all — всё (роутеры)."""
+    if how == "allm" and peer.get("kind") not in ROUTER_KINDS:
+        await deliver_all_modes(chat_id, peer)
+        return
     await remember_smart_snapshot(peer)
     params = server_params(peer_iface(peer)[1])
     for filename, host, port in peer_variants(peer):
@@ -1625,7 +1653,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif how == "back":
             await query.edit_message_text(f"📥 {title(peer)}: на каком устройстве подключаете?",
                                           reply_markup=download_buttons(pub))
-        elif how in ("ios", "key", "file", "qr"):
+        elif how in ("ios", "key", "file", "qr", "allm"):
             # Сначала экран конфига (с пометкой), потом файлы под ним.
             await show_card(query, pub, "✅ Отправил ниже 👇")
             await deliver_peer(query.message.chat_id, peer, how)
@@ -1633,7 +1661,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "kdone":
         # «✅ Готово» под ключом: убираем и ключ, и подсказку — ключ в чате больше не нужен.
-        ids = [query.message.message_id] + ([int(arg)] if arg.isdigit() else [])
+        ids = [query.message.message_id] + [int(i) for i in arg.split(",") if i.isdigit()]
         try:
             await ctx.bot.delete_messages(query.message.chat_id, ids)
         except Exception:
