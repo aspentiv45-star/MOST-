@@ -86,7 +86,7 @@ FULL_TUNNEL = "0.0.0.0/0, ::/0"
 # обрабатывают плохо (зависания на Windows, обрыв правил на Linux, тормоза интерфейса).
 # Режимы конфига. full — весь трафик через вход в России; smart — только заблокированное;
 # game — только игры и напрямую на основной сервер, без входа в России: меньше пинг.
-MODES = {"full": "🌍 Весь трафик", "smart": "📱 Только заблокированное", "game": "🎮 Игровой: телефон",
+MODES = {"full": "🛡 Обход белых списков", "smart": "⚡️ Основной", "game": "🎮 Игровой: телефон",
          "pcgame": "🎮 Игровой: ПК"}
 # pcgame — весь трафик через VPN (один IP: античиты Easy Anti-Cheat и др. не рвут соединение,
 # Discord и Telegram работают), но напрямую на основной сервер, минуя вход в России: пинг ниже.
@@ -222,15 +222,15 @@ HELP_TEXT = (
 
 # Подробные инструкции для клиентов — открываются кнопками из «❓ Как подключить».
 MODE_TEXT = (
-    "🌍 Весь трафик — через VPN идёт всё. Работает везде, в любом приложении.\n\n"
-    "📱 Только заблокированное — всё через VPN сразу в Нидерланды, без сервера в Москве: быстрее. "
-    "Российские сайты и приложения (банки, Госуслуги) VPN сам отправляет через Россию. "
-    "Лучший вариант для телефона.\n\n"
+    "⚡️ Основной — всё через VPN сразу в Нидерланды: быстрее всего. Российские сайты и приложения "
+    "(банки, Госуслуги) VPN сам отправляет через Россию. Выбирайте его.\n\n"
+    "🛡 Обход белых списков — то же самое, но через сервер в Москве. Для случаев, когда оператор "
+    "режет зарубежные адреса (ограничения мобильного интернета, «белые списки») и «Основной» не подключается.\n\n"
     "🎮 Игровой — минимальный пинг:\n"
     "• телефон: игры (Brawl Stars, Roblox, CoD Mobile, Pokémon GO, Fortnite и др.) + Telegram, Discord и YouTube; "
     "App Store и Google Play — напрямую, чтобы игры качались быстро;\n"
     "• ПК: всё через VPN, кроме Steam, CS2, Dota 2, Faceit и российских сайтов.\n\n"
-    "Не подключается «Только заблокированное» или «Игровой» — выберите «Весь трафик»."
+    "Не подключается «Основной» или «Игровой» — выберите «Обход белых списков»."
 )
 
 # Список для клиентов: что идёт через VPN в режиме «только заблокированное».
@@ -292,7 +292,7 @@ GUIDES = {
         "2. Выключите и включите VPN, закройте другие VPN.\n"
         "3. Скачайте конфиг заново и замените старый.\n"
         "4. Не открывается какой-то сайт — выключите «🛡 Реклама».\n"
-        "5. Не подключается «Только заблокированное» или «Игровой» — выберите «Весь трафик».\n"
+        "5. Не подключается «Основной» или «Игровой» — выберите «Обход белых списков».\n"
         "6. Один конфиг — одно устройство.\n\n"
         f"Не помогло — «{BTN_SUPPORT}»."
     ),
@@ -539,7 +539,7 @@ def create_peer(state, uid, until, kind="device"):
         peer["op"] = u.get("op")
         # Режим под устройство: на телефонах через VPN только заблокированное, на компьютере — всё.
         peer["os"] = u.get("os")
-        if u.get("os") in SMART_OS:
+        if u.get("os") in SMART_OS or SMART_FULL:  # «Основной» — весь трафик, подходит и компьютеру
             peer["mode"] = "smart"
     peer["ip"] = next_free_ip(state, server_params(peer_iface(peer)[1]))
     state["peers"][pub] = peer
@@ -1793,8 +1793,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"🔀 {html.escape(title(peer))}: сейчас «{MODES[cur]}».\n\n" + MODE_TEXT + ("" if SMART_FULL else "\n\n" + SMART_LIST),
             parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(mark(cur == "full") + MODES["full"], callback_data=f"mset:full:{arg}")],
                 [InlineKeyboardButton(mark(cur == "smart") + MODES["smart"], callback_data=f"mset:smart:{arg}")],
+                [InlineKeyboardButton(mark(cur == "full") + MODES["full"], callback_data=f"mset:full:{arg}")],
                 [InlineKeyboardButton(mark(cur in ("game", "pcgame")) + "🎮 Игровой", callback_data=f"mgame:{arg}")],
                 [back_button(arg)],
             ]))
@@ -1809,8 +1809,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cur = mode_of(peer)
         mark = lambda on: "✅ " if on else ""
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(mark(cur == "full") + MODES["full"], callback_data=f"mset:full:{arg}")],
             [InlineKeyboardButton(mark(cur == "smart") + MODES["smart"], callback_data=f"mset:smart:{arg}")],
+            [InlineKeyboardButton(mark(cur == "full") + MODES["full"], callback_data=f"mset:full:{arg}")],
             [InlineKeyboardButton(mark(cur in ("game", "pcgame")) + "🎮 Игровой", callback_data=f"mgame:{arg}")],
             [back_button(arg)],
         ]))
