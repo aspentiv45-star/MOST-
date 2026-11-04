@@ -606,6 +606,44 @@ HAPP_ROUTING = {
 }
 
 
+# Темы оформления Happ: (название, фон 1, фон 2, строка сервера, выбранная строка, акцент, светлый акцент,
+# текст, подпись, эллипс 1, эллипс 2, светлая тема).
+HAPP_THEMES = [
+    ("🌸 Сакура", "#0A0709", "#1A0D14", "#140D11", "#2A1520", "#FF8FC0", "#FFB3D5", "#FFFFFF", "#C0C0C8", "#5A2A44", "#2A1520", False),
+    ("💚 Матрица", "#050A06", "#0B1A0E", "#0C140E", "#14301A", "#3DDC84", "#8CF5B4", "#FFFFFF", "#B8C8BC", "#1F5A30", "#0F2A17", False),
+    ("🌊 Океан", "#050A12", "#0B1A2E", "#0C1522", "#13294A", "#3FA9FF", "#9CD2FF", "#FFFFFF", "#B8C4D4", "#1D4A7A", "#0F2540", False),
+    ("🔥 Огонь", "#0D0604", "#1F0C06", "#180B07", "#36160A", "#FF6A2B", "#FFA37A", "#FFFFFF", "#D2BCB2", "#7A2A10", "#3A1408", False),
+    ("💜 Неон", "#08050F", "#160B2A", "#110A1F", "#261447", "#B266FF", "#D7A8FF", "#FFFFFF", "#C4BCD4", "#4B1F8A", "#241045", False),
+    ("🌙 Полночь", "#05070D", "#0E1426", "#0D111E", "#1A2240", "#E8C46A", "#F5DFA3", "#FFFFFF", "#BCC2D2", "#2A3768", "#141B36", False),
+    ("🍋 Лимон", "#0A0A04", "#1A1A08", "#141408", "#2E2E10", "#F2E14C", "#F8EE9A", "#FFFFFF", "#CFCFB8", "#5A5518", "#2A280C", False),
+    ("🌅 Закат", "#0F0608", "#2A0F1A", "#1C0C12", "#3D1626", "#FF7A59", "#FFB199", "#FFFFFF", "#D6BFC4", "#8A2D4A", "#4A1830", False),
+    ("🖤 Графит", "#08080A", "#18181C", "#121215", "#26262C", "#D0D0D8", "#F0F0F5", "#FFFFFF", "#A8A8B2", "#3A3A44", "#1E1E24", False),
+    ("❄️ Лёд", "#EEF4FA", "#D9E7F5", "#FFFFFF", "#CFE3F7", "#2D7FD3", "#2D7FD3", "#0E1A26", "#5A6B7C", "#B7D3F0", "#E3EEF9", True),
+]
+
+
+def happ_theme(i):
+    """Код темы для Happ (как в «Оформление» → импорт)."""
+    _, bg1, bg2, row, sel, acc, light, text, sub, el1, el2, is_light = HAPP_THEMES[i]
+    c = lambda x: x + "FF"
+    return json.dumps({
+        "backgroundGradientRotationAngle": 0, "backgroundGradientColorIntensity": 0,
+        "backgroundColors": [c(bg1), c(bg2)], "serverRowBackgroundColor": c(row), "selectedServerRowColor": c(sel),
+        "subsHeaderColor": c(sub), "buttonColor": c(acc), "buttonTextColor": c("#FFFFFF"),
+        "powerIconColor": c("#FFFFFF"), "serverRowTitleTextColor": c(text), "serverRowSubTitleTextColor": c(sub),
+        "topBarButtonsColor": c(light), "supportIconColor": c(light), "profileWebPageIconColor": c(light),
+        "subHeaderButtonColor": c(text if is_light else "#E8E8EE"), "settingsControlsTintColor": c(acc),
+        "subscriptionInfoBackgroundColor": c(row), "elipseColors": [c(el1), c(el2)],
+        "backgroundImageType": "system", "buttonImageType": "dark" if is_light else "light",
+    }, separators=(",", ":"))
+
+
+def theme_picker():
+    rows = [[InlineKeyboardButton(HAPP_THEMES[i][0], callback_data=f"thm:{i}")
+             for i in range(j, min(j + 2, len(HAPP_THEMES)))] for j in range(0, len(HAPP_THEMES), 2)]
+    return InlineKeyboardMarkup(rows)
+
+
 def happ_routing_link():
     data = dict(HAPP_ROUTING, LastUpdated=str(int(time.time())))
     return "happ://routing/onadd/" + base64.b64encode(json.dumps(data, ensure_ascii=False).encode()).decode()
@@ -639,9 +677,11 @@ async def deliver_vless(chat_id, peer):
                  f"Добавятся режимы: {modes} и маршрутизация — российские приложения и сайты будут "
                  "открываться без VPN.\n\n"
                  "v2rayNG, Hiddify, Streisand тоже принимают эти ключи, но маршрутизацию для них нужно "
-                 "настроить в самом приложении.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-            "✅ Готово — убрать", callback_data=f"kdone:{msg.message_id}")]]))
+                 "настроить в самом приложении.\n\n"
+                 "🎨 А ещё можно переделать вид Happ — выбрать раскраску. Хотите?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎨 Да, хочу", callback_data="thm:")],
+            [InlineKeyboardButton("✅ Готово — убрать", callback_data=f"kdone:{msg.message_id}")]]))
 
 
 def next_free_ip(state, params):
@@ -2106,6 +2146,35 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # Сначала экран конфига (с пометкой), потом файлы под ним.
             await show_card(query, pub, "✅ Отправил ниже 👇")
             await deliver_peer(query.message.chat_id, peer, how)
+        return
+
+    if action == "thm":
+        if not arg:
+            await query.message.reply_text("🎨 Выберите раскраску для Happ:", reply_markup=theme_picker())
+            return
+        if arg.startswith("b"):
+            # «Другая раскраска»: убираем код и подсказку, снова выбор.
+            ids = [query.message.message_id] + [int(x) for x in arg[1:].split(",") if x.isdigit()]
+            try:
+                await ctx.bot.delete_messages(query.message.chat_id, ids)
+            except Exception:
+                pass
+            await ctx.bot.send_message(query.message.chat_id, "🎨 Выберите раскраску для Happ:",
+                                       reply_markup=theme_picker())
+            return
+        i = int(arg) if arg.isdigit() and int(arg) < len(HAPP_THEMES) else 0
+        try:
+            await query.message.delete()  # выбор раскраски больше не нужен
+        except Exception:
+            pass
+        chat = query.message.chat_id
+        code = await ctx.bot.send_message(chat, f"<code>{html.escape(happ_theme(i))}</code>", parse_mode="HTML")
+        await ctx.bot.send_message(chat, 
+            f"{HAPP_THEMES[i][0]}: 👆 нажмите на код — он скопируется. В Happ откройте настройки оформления "
+            "(тема) и вставьте код.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Скопировал — убрать", callback_data=f"kdone:{code.message_id}")],
+                [InlineKeyboardButton("🎨 Другая раскраска", callback_data=f"thm:b{code.message_id}")]]))
         return
 
     if action == "kdone":
