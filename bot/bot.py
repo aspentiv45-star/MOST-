@@ -1115,28 +1115,62 @@ ALL_MODES = {"smart": "osn", "full": "obhod", "game": "game"}
 ALL_MODES_PC = {"smart": "osn", "full": "obhod", "pcgame": "game"}
 
 
-async def deliver_all_modes(chat_id, peer):
+def all_modes_buttons(pub):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Ключи (AmneziaVPN)", callback_data=f"dl:amk:{pub}")],
+        [InlineKeyboardButton("🔳 QR-коды", callback_data=f"dl:amq:{pub}"),
+         InlineKeyboardButton("📄 Файлы", callback_data=f"dl:amf:{pub}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"dl:back:{pub}")],
+    ])
+
+
+ALL_MODES_HINT = {
+    "amk": "👆 Нажмите на ключ — он скопируется. AmneziaVPN → «➕» → «Вставить ключ». Так с каждым ключом.",
+    "amq": "👆 Отсканируйте каждый QR-код в AmneziaWG («➕» → «Сканировать QR-код») с другого экрана.",
+    "amf": "👆 Добавьте все файлы в AmneziaWG (или AmneziaVPN).",
+}
+
+
+async def deliver_all_modes(chat_id, peer, fmt="amf"):
+    """По конфигу на каждый режим — ключами, QR-кодами или файлами (fmt: amk, amq, amf)."""
     params = server_params(peer_iface(peer)[1])
     base = file_base(peer)
     ids = []
     for mode, suffix in (ALL_MODES_PC if peer.get("os") == "pc" else ALL_MODES).items():
         mp = dict(peer, mode=mode)
         _, host, port = peer_variants(mp)[0]
-        filename = f"{base[:14 - len(suffix)]}-{suffix}.conf"  # имя туннеля на iOS — до 15 символов
-        msg = await USER_BOT.send_document(chat_id, document=io.BytesIO(client_conf(mp, params, host, port).encode()),
-                                           filename=filename, caption=MODES[mode])
+        name = f"{base[:14 - len(suffix)]}-{suffix}"  # имя туннеля на iOS — до 15 символов
+        text = client_conf(mp, params, host, port)
+        if fmt == "amk":
+            key = vpn_key(mp, params, host, port or params["ListenPort"], text)
+            if len(key) < 4000:  # больше не влезает в одно сообщение Telegram
+                msg = await USER_BOT.send_message(chat_id, f"{MODES[mode]}\n<code>{key}</code>", parse_mode="HTML")
+            else:
+                msg = await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()),
+                                                   filename=f"{name}.conf",
+                                                   caption=f"{MODES[mode]}: ключ слишком длинный — вот файл.")
+        elif fmt == "amq":
+            png = qr_png(text)
+            if png:
+                msg = await USER_BOT.send_photo(chat_id, photo=png, caption=MODES[mode])
+            else:
+                msg = await USER_BOT.send_message(chat_id, f"{MODES[mode]}: слишком длинный для QR-кода — "
+                                                           "возьмите ключ или файл.")
+        else:
+            msg = await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()),
+                                               filename=f"{name}.conf", caption=MODES[mode])
         ids.append(msg.message_id)
     await USER_BOT.send_message(
-        chat_id, "👆 Добавьте все файлы в AmneziaWG (или AmneziaVPN) — это режимы. Переключайтесь между ними "
-                 "прямо в приложении. Включайте только один туннель за раз.",
+        chat_id, ALL_MODES_HINT[fmt] + "\nЭто режимы — переключайтесь между ними прямо в приложении. "
+                                       "Включайте только один за раз.",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-            "✅ Готово — убрать файлы", callback_data="kdone:" + ",".join(map(str, ids)))]]))
+            "✅ Готово — убрать", callback_data="kdone:" + ",".join(map(str, ids)))]]))
 
 
 async def deliver_peer(chat_id, peer, how):
     """how: file — файл; qr — QR-код; key — ключ для AmneziaVPN; ios — файл и QR; all — всё (роутеры)."""
-    if how == "allm" and peer.get("kind") not in ROUTER_KINDS:
-        await deliver_all_modes(chat_id, peer)
+    if how in ALL_MODES_HINT and peer.get("kind") not in ROUTER_KINDS:
+        await deliver_all_modes(chat_id, peer, how)
         return
     await remember_smart_snapshot(peer)
     params = server_params(peer_iface(peer)[1])
@@ -1650,10 +1684,13 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                           "🔑 Ключ — для AmneziaVPN, проще всего.\n"
                                           "📄 Файл — для AmneziaWG.",
                                           reply_markup=android_buttons(pub))
+        elif how == "allm":
+            await query.edit_message_text(f"📦 {title(peer)}: все режимы сразу. Как прислать?",
+                                          reply_markup=all_modes_buttons(pub))
         elif how == "back":
             await query.edit_message_text(f"📥 {title(peer)}: на каком устройстве подключаете?",
                                           reply_markup=download_buttons(pub))
-        elif how in ("ios", "key", "file", "qr", "allm"):
+        elif how in ("ios", "key", "file", "qr", "amk", "amq", "amf"):
             # Сначала экран конфига (с пометкой), потом файлы под ним.
             await show_card(query, pub, "✅ Отправил ниже 👇")
             await deliver_peer(query.message.chat_id, peer, how)
