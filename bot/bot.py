@@ -1427,10 +1427,9 @@ async def pay_screen(message, ctx, target, months, state, query=None):
     if bal >= price:
         rows.append([InlineKeyboardButton(f"✅ Оплатить {price} ₽ с баланса", callback_data=f"bal:{months}:{target}")])
     else:
-        amount = max(price - bal, TOPUP_MIN)
         text += (f"\nНа балансе недостаточно средств. Чтобы пополнить, нажмите «Пополнить» — "
                  "после пополнения конфиг оплатится сам.")
-        rows.append([InlineKeyboardButton(f"➕ Пополнить на {amount} ₽", callback_data=f"topb:{months}:{target}")])
+        rows.append([InlineKeyboardButton("➕ Пополнить", callback_data=f"topb:{months}:{target}")])
     if len(plans(state, target)) > 1:
         rows.append([InlineKeyboardButton("⬅️ Другой срок", callback_data=f"pln:{target}")])
     elif target not in KIND_BY_TARGET:
@@ -2079,23 +2078,29 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         m, _, target = arg.partition(":")
         await pay_from_balance(query, ctx, target, int(m))
         return
-    if action == "top":
-        if query.message.text and query.message.text.startswith("💰 Баланс"):
+    if action in ("top", "topb"):
+        need = 0
+        if action == "topb":
+            # «Пополнить» с экрана оплаты: после пополнения бот сам оплатит эту покупку.
+            m, _, target = arg.partition(":")
+            state = load_state()
+            months, days, price = plan(state, target, int(m))
+            ctx.user_data["pay_then"] = (target, months)
+            need = price - balance(state, uid)
+        elif query.message.text and query.message.text.startswith("💰 Баланс"):
             ctx.user_data.pop("pay_then", None)
         ctx.user_data["await"] = "topup"
-        rows = [[InlineKeyboardButton(f"{a} ₽", callback_data=f"topa:{a}") for a in TOPUP_AMOUNTS]]
-        await query.edit_message_text(f"➕ На сколько пополнить? От {TOPUP_MIN} ₽ — нажмите сумму "
-                                      "или напишите свою числом.", reply_markup=InlineKeyboardMarkup(rows))
+        amounts = [a for a in TOPUP_AMOUNTS if a >= TOPUP_MIN]
+        rows = [[InlineKeyboardButton(f"{a} ₽", callback_data=f"topa:{a}") for a in amounts[i:i + 2]]
+                for i in range(0, len(amounts), 2)]
+        if action == "topb":
+            rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"per:{arg}")])
+        hint = f"\nДля этой оплаты нужно не меньше {need} ₽." if need > TOPUP_MIN else ""
+        await query.edit_message_text(f"➕ На сколько пополнить?{hint}\nНажмите сумму или напишите свою числом "
+                                      f"(от {TOPUP_MIN} ₽).", reply_markup=InlineKeyboardMarkup(rows))
         return
     if action == "topa":
         await topup_screen(query.message, ctx, int(arg), query)
-        return
-    if action == "topb":
-        m, _, target = arg.partition(":")
-        state = load_state()
-        months, days, price = plan(state, target, int(m))
-        amount = max(price - balance(state, uid), TOPUP_MIN)
-        await topup_screen(query.message, ctx, amount, query, then=(target, months))
         return
     if action == "refset":
         ctx.user_data["await"] = "ref_set"
