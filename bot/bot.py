@@ -69,6 +69,10 @@ ROUTER_PRICE = int(os.environ.get("ROUTER_PRICE", "500"))
 # Бесплатный пробный период для нового клиента (один раз на аккаунт); 0 — выключить.
 TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "3"))
 DAYS = int(os.environ.get("DAYS", "30"))
+PRICE3 = int(os.environ.get("PRICE3", "249"))       # 3 месяца для устройства (скидка)
+TOPUP_MIN = int(os.environ.get("TOPUP_MIN", "150"))  # минимальное пополнение баланса, ₽
+REF_NEED = int(os.environ.get("REF_NEED", "3"))      # сколько друзей должны оплатить, чтобы получить подарок
+REF_DAYS = int(os.environ.get("REF_DAYS", "30"))     # подарок за каждых REF_NEED друзей, дней
 PAY_FILE = os.environ.get("PAY_FILE", "/etc/most/pay.txt")
 # approve — купить может только тот, кого администратор пустил; open — любой.
 ACCESS = os.environ.get("ACCESS", "open")
@@ -162,6 +166,7 @@ SMART_NETS = (
 DAY = 86400
 # Цель оплаты: новый конфиг для устройства или для роутера; иначе — публичный ключ продлеваемого конфига.
 NEW = "new"
+TOPUP = "topup"                    # пополнение баланса (не конфиг)
 NEW_ROUTER = "new-router"          # роутер на чистом WireGuard
 NEW_ROUTER_AWG = "new-router-awg"  # роутер с AmneziaWG (Keenetic, OpenWrt)
 KIND_BY_TARGET = {NEW: "device", NEW_ROUTER: "router", NEW_ROUTER_AWG: "router-awg"}
@@ -196,7 +201,8 @@ BTN_HELP = "❓ Как подключить"
 BTN_NEWS = "🆕 Что нового"
 BTN_SUPPORT = "🆘 Нужна помощь"
 BTN_CLEAR = "🧹 Почистить чат"
-KEYBOARD = ReplyKeyboardMarkup([[BTN_BUY], [BTN_LIST, BTN_HELP], [BTN_NEWS, BTN_SUPPORT], [BTN_CLEAR]],
+BTN_BALANCE = "💰 Баланс и друзья"
+KEYBOARD = ReplyKeyboardMarkup([[BTN_BUY], [BTN_LIST, BTN_HELP], [BTN_BALANCE, BTN_NEWS], [BTN_SUPPORT, BTN_CLEAR]],
                                resize_keyboard=True)
 
 async def clear_chat(bot, chat_id, last_id):
@@ -522,6 +528,25 @@ def is_router(state, target):
 
 def price_for(state, target):
     return ROUTER_PRICE if is_router(state, target) else PRICE
+
+
+def plans(state, target):
+    """Варианты оплаты: (месяцев, дней, цена). Для устройства — ещё 3 месяца со скидкой."""
+    if is_router(state, target):
+        return [(1, DAYS, ROUTER_PRICE)]
+    return [(1, DAYS, PRICE), (3, 3 * DAYS, PRICE3)]
+
+
+def plan(state, target, months):
+    return next((p for p in plans(state, target) if p[0] == months), plans(state, target)[0])
+
+
+def balance(state, uid):
+    return state["users"].get(str(uid), {}).get("balance", 0)
+
+
+def months_text(m):
+    return {1: "1 месяц", 3: "3 месяца"}.get(m, f"{m} мес.")
 
 
 def create_peer(state, uid, until, kind="device"):
@@ -1269,6 +1294,8 @@ def pay_text():
 
 
 def target_label(state, target):
+    if target == TOPUP:
+        return "пополнение баланса"
     if target == NEW:
         return "новый конфиг для себя"
     if target == NEW_ROUTER:
@@ -1288,27 +1315,64 @@ async def request_access(user):
         u.setdefault("requested", int(time.time()))
         save_state(state)
     if first:
+        ref = u.get("ref")
+        who = f"\n👥 Пригласил: {user_name(state, ref)} (ID {ref})" if ref else ""
         for admin in ADMINS:
             try:
-                await ADMIN_BOT.send_message(admin, f"🙋 Запрос доступа\n{u['name']}\nID {user.id}",
+                await ADMIN_BOT.send_message(admin, f"🙋 Запрос доступа\n{u['name']}\nID {user.id}{who}",
                                              reply_markup=access_buttons(user.id))
             except Exception:
                 log.exception("не удалось отправить запрос доступа админу %s", admin)
 
 
+REF_ASK = ("👥 Доступ по приглашению. Пришлите ID друга, который вас пригласил, — одним числом.\n"
+           f"Он есть у друга в «{BTN_BALANCE}».")
+
+
+async def gate(update, ctx, state):
+    """Пускает дальше, только если доступ открыт. Новичка сначала спрашивает, кто его пригласил,
+    и только потом отправляет запрос администратору."""
+    user = update.effective_user
+    if is_approved(state, user.id):
+        return True
+    u = state["users"].get(str(user.id), {})
+    if not u.get("ref") and "requested" not in u and u.get("approved") is not False:
+        ctx.user_data["await"] = "ref"
+        await update.message.reply_text(REF_ASK)
+        return False
+    await request_access(user)
+    await update.message.reply_text(closed_text(state, user.id))
+    return False
+
+
+def parse_ref(state, uid, text):
+    """ID пригласившего из текста или ссылки; None — если такого клиента нет."""
+    rid = re.sub(r"^ref_", "", (text or "").strip())
+    if not rid.isdigit() or rid == str(uid) or rid not in state["users"]:
+        return None
+    if not is_approved(state, rid) and not is_admin(rid):
+        return None
+    return rid
+
+
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     async with lock:
         state = load_state()
-        get_user(state, update.effective_user)
+        u = get_user(state, update.effective_user)
+        # Ссылка друга: t.me/бот?start=ref_ID — запоминаем, кто пригласил (только новичкам).
+        arg = (ctx.args or [""])[0] if getattr(ctx, "args", None) else ""
+        if arg.startswith("ref_") and "ref" not in u and not user_peers(state, update.effective_user.id):
+            rid = parse_ref(state, update.effective_user.id, arg)
+            if rid:
+                u["ref"] = rid
         save_state(state)
-    if not is_approved(state, update.effective_user.id):
-        await request_access(update.effective_user)
-        await update.message.reply_text(f"Привет! Это VPN на AmneziaWG.\n\n{closed_text(state, update.effective_user.id)}")
+    if not await gate(update, ctx, state):
         return
     mine = user_peers(state, update.effective_user.id)
     active = sum(1 for p in mine.values() if peer_active(p))
     await update.message.reply_text(
-        f"Привет! Это VPN MOST.\n{PRICE} ₽ за {DAYS} дней на устройство, роутер — {ROUTER_PRICE} ₽.\n\n"
+        f"Привет! Это VPN MOST.\n{PRICE} ₽ за {DAYS} дней на устройство, 3 месяца — {PRICE3} ₽. "
+        f"Роутер — {ROUTER_PRICE} ₽.\n\n"
         + (f"Ваших конфигов: {len(mine)}, активных: {active}. Подробнее — «{BTN_LIST}»." if mine
            else f"🎁 Попробуйте бесплатно {TRIAL_DAYS} дня: «{BTN_BUY}» → «Попробовать бесплатно»."
            if trial_available(state, update.effective_user.id)
@@ -1317,24 +1381,176 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def ask_payment(message, ctx, target, state, query=None):
-    """Реквизиты для оплаты; с query — в том же сообщении (продление с экрана конфига, с кнопкой «Назад»)."""
-    ctx.user_data["pay_for"] = target
+    """Выбор срока оплаты; с query — в том же сообщении (продление с экрана конфига, с кнопкой «Назад»).
+    Если вариант один (роутер) — сразу реквизиты."""
     leave_ticket(ctx)
+    options = plans(state, target)
+    if len(options) == 1:
+        await pay_screen(message, ctx, target, 1, state, query)
+        return
+    rows = []
+    for m, days, price in options:
+        save = m * PRICE - price
+        rows.append([InlineKeyboardButton(f"💳 {months_text(m)} — {price} ₽" + (f" (выгода {save} ₽)" if save > 0 else ""),
+                                          callback_data=f"per:{m}:{target}")])
+    if target not in KIND_BY_TARGET:
+        rows.append([back_button(target)])
+    text = f"Оплата: {target_label(state, target)}.\nНа какой срок?"
+    bal = balance(state, message.chat_id)
+    if bal:
+        text += f"\n\n💰 На балансе {bal} ₽ — можно оплатить с него."
+    if query:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
+    else:
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def pay_screen(message, ctx, target, months, state, query=None):
+    """Реквизиты для выбранного срока; если хватает баланса — кнопка «Оплатить с баланса»."""
+    months, days, price = plan(state, target, months)
+    ctx.user_data["pay_for"] = target
+    ctx.user_data["pay_months"] = months
     warning = f"{router_requirements(target)}\n\n" if target in (NEW_ROUTER, NEW_ROUTER_AWG) else ""
-    text = (f"Оплата: {target_label(state, target)} — {price_for(state, target)} ₽ за {DAYS} дней.\n\n"
+    text = (f"Оплата: {target_label(state, target)} — {price} ₽ за {days} дней.\n\n"
             f"{warning}{pay_text()}\n\n"
             "После оплаты пришлите сюда скриншот перевода одним фото.")
+    rows = []
+    bal = balance(state, message.chat_id)
+    if bal >= price:
+        rows.append([InlineKeyboardButton(f"💰 Оплатить с баланса (у вас {bal} ₽)",
+                                          callback_data=f"bal:{months}:{target}")])
+    if len(plans(state, target)) > 1:
+        rows.append([InlineKeyboardButton("⬅️ Другой срок", callback_data=f"pln:{target}")])
+    elif target not in KIND_BY_TARGET:
+        rows.append([back_button(target)])
+    markup = InlineKeyboardMarkup(rows) if rows else None
     if query:
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back_button(target)]]))
+        await query.edit_message_text(text, reply_markup=markup)
     else:
-        await message.reply_text(text)
+        await message.reply_text(text, reply_markup=markup)
+
+
+async def pay_from_balance(query, ctx, target, months):
+    """Оплата с баланса — сразу, без проверки администратором."""
+    user = query.from_user
+    async with lock:
+        state = load_state()
+        u = get_user(state, user)
+        months, days, price = plan(state, target, months)
+        if target not in KIND_BY_TARGET and target not in state["peers"]:
+            await query.edit_message_text("Конфиг не найден.")
+            return
+        if u.get("balance", 0) < price:
+            await query.edit_message_text(f"На балансе {u.get('balance', 0)} ₽ — не хватает на {price} ₽. "
+                                          f"Пополнить: «{BTN_BALANCE}».")
+            return
+        u["balance"] -= price
+        pid = str(state["next_payment"])
+        state["next_payment"] += 1
+        state["payments"][pid] = {"user": str(user.id), "target": target, "status": "approved", "via": "balance",
+                                  "price": price, "days": days, "created": int(time.time())}
+        save_state(state)
+    ctx.user_data.pop("pay_for", None)
+    await query.edit_message_text(f"💰 Оплачено с баланса: {price} ₽. Осталось {u['balance']} ₽.")
+    result = await grant(user.id, target, days)
+    for admin in ADMINS:
+        try:
+            await ADMIN_BOT.send_message(admin, f"💰 Оплата с баланса №{pid} — {price} ₽\n{u['name']}\nID {user.id}\n"
+                                                f"За: {target_label(state, target)} на {days} дней\n{result}")
+        except Exception:
+            pass
+
+
+# ---------- баланс и приглашения ----------
+
+def balance_screen(state, uid):
+    u = state["users"].get(str(uid), {})
+    n = u.get("ref_count", 0)
+    try:
+        link = f"https://t.me/{USER_BOT.username}?start=ref_{uid}"
+    except Exception:  # бот ещё не знает своё имя
+        link = ""
+    text = (f"💰 Баланс: {u.get('balance', 0)} ₽\n"
+            f"Пополнение — от {TOPUP_MIN} ₽, баланс тратится на покупку и продление конфигов.\n\n"
+            f"👥 Пригласите {REF_NEED} друзей — получите {REF_DAYS} дней бесплатно. Друг считается, "
+            f"когда оплатит VPN.\nОплатили: {n % REF_NEED}/{REF_NEED} (всего друзей: {n}).\n\n"
+            f"Ваш ID: <code>{uid}</code>" + (f"\nСсылка для друга: {link}" if link else ""))
+    rows = [[InlineKeyboardButton("➕ Пополнить баланс", callback_data="top:")]]
+    if not u.get("ref") and not any(p["user"] == str(uid) and p["status"] == "approved"
+                                    for p in state["payments"].values()):
+        rows.append([InlineKeyboardButton("✏️ Меня пригласил друг", callback_data="refset:")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def balance_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    state = load_state()
+    if not await gate(update, ctx, state):
+        return
+    text, buttons = balance_screen(state, update.effective_user.id)
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=buttons, disable_web_page_preview=True)
+
+
+TOPUP_AMOUNTS = (150, 300, 500, 1000)
+
+
+async def topup_screen(message, ctx, amount, query=None):
+    ctx.user_data["pay_for"] = TOPUP
+    ctx.user_data["pay_amount"] = amount
+    ctx.user_data.pop("await", None)
+    text = (f"➕ Пополнение баланса на {amount} ₽.\n\n{pay_text()}\n\n"
+            f"Переведите ровно {amount} ₽ и пришлите сюда скриншот перевода одним фото.")
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Другая сумма", callback_data="top:")]])
+    if query:
+        await query.edit_message_text(text, reply_markup=markup)
+    else:
+        await message.reply_text(text, reply_markup=markup)
+
+
+async def referral_credit(uid):
+    """Друг (uid) впервые оплатил VPN: засчитываем пригласившему; за каждых REF_NEED — подарок."""
+    async with lock:
+        state = load_state()
+        u = state["users"].get(str(uid), {})
+        rid = u.get("ref")
+        if not rid or u.get("ref_counted") or rid not in state["users"]:
+            return
+        u["ref_counted"] = int(time.time())
+        r = state["users"][rid]
+        r["ref_count"] = r.get("ref_count", 0) + 1
+        n = r["ref_count"]
+        gift = ""
+        if n % REF_NEED == 0:
+            old_state = json.loads(json.dumps(state))
+            mine = [(k, p) for k, p in user_peers(state, rid).items() if p.get("kind") not in ROUTER_KINDS]
+            # Подарок — к конфигу, который кончается раньше всех; нет конфигов — на баланс.
+            if mine:
+                pub, peer = min(mine, key=lambda kv: kv[1]["until"] if peer_active(kv[1]) else float("inf"))
+                peer["until"] = max(peer["until"], time.time()) + REF_DAYS * DAY
+                peer["warned"] = 0
+                apply_or_rollback(state, old_state)
+                gift = f"🎁 Подарок: {title(peer)} продлён на {REF_DAYS} дней, до {fmt_date(peer['until'])}."
+            else:
+                r["balance"] = r.get("balance", 0) + PRICE
+                gift = f"🎁 Подарок: {PRICE} ₽ на баланс — это месяц VPN."
+        save_state(state)
+    left = REF_NEED - n % REF_NEED
+    text = (f"👥 Ваш друг {u.get('name', uid)} оплатил VPN — засчитан ({n % REF_NEED or REF_NEED}/{REF_NEED}).\n"
+            + (gift if gift else f"Ещё {left} — и {REF_DAYS} дней бесплатно."))
+    try:
+        await USER_BOT.send_message(int(rid), text, reply_markup=KEYBOARD)
+    except Exception:
+        pass
+    if gift:
+        for admin in ADMINS:
+            try:
+                await ADMIN_BOT.send_message(admin, f"👥 {user_name(state, rid)} (ID {rid}) пригласил {n} друзей. {gift}")
+            except Exception:
+                pass
 
 
 async def buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    if not is_approved(state, update.effective_user.id):
-        await request_access(update.effective_user)
-        await update.message.reply_text(closed_text(state, update.effective_user.id))
+    if not await gate(update, ctx, state):
         return
     if len(user_peers(state, update.effective_user.id)) >= MAX_PEERS and not is_admin(update.effective_user.id):
         await update.message.reply_text(
@@ -1426,7 +1642,8 @@ async def remember_op(user, op):
 def _buy_screen(guide, target, price, back):
     """Экран «инструкция + купить»: подробные шаги для выбранного устройства и кнопка оплаты."""
     return (GUIDES[guide], InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💳 Купить — {price} ₽ за {DAYS} дней",
+        [InlineKeyboardButton(f"💳 Купить — {price} ₽ за {DAYS} дней" if target != NEW else
+                              f"💳 Купить — {PRICE} ₽/мес или {PRICE3} ₽ за 3 мес",
                               callback_data=f"buy:{target}:{guide}" if guide in OS_NAMES else f"buy:{target}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data=f"menu:{back}")],
     ]))
@@ -1486,9 +1703,7 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     state = load_state()
-    if not is_approved(state, update.effective_user.id):
-        await request_access(update.effective_user)
-        await msg.reply_text(closed_text(state, update.effective_user.id))
+    if not await gate(update, ctx, state):
         return
     target = ctx.user_data.pop("pay_for", None)
     if target is None:
@@ -1501,22 +1716,29 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Если это скриншот проблемы — нажмите «{BTN_SUPPORT}» и пришлите его там.",
             reply_markup=KEYBOARD)
         return
-    await submit_payment(update.effective_user, target, data, msg.caption, msg)
+    months = ctx.user_data.pop("pay_months", 1)
+    amount = ctx.user_data.pop("pay_amount", None)
+    await submit_payment(update.effective_user, target, data, msg.caption, msg, months, amount)
 
 
-async def submit_payment(user, target, data, comment, reply_to):
+async def submit_payment(user, target, data, comment, reply_to, months=1, amount=None):
     async with lock:
         state = load_state()
         u = get_user(state, user)
         pid = str(state["next_payment"])
         state["next_payment"] += 1
-        price = price_for(state, target)
+        if target == TOPUP:
+            price, days = int(amount or TOPUP_MIN), 0
+        else:
+            months, days, price = plan(state, target, months)
         state["payments"][pid] = {"user": str(user.id), "target": target, "status": "pending",
-                                  "price": price, "created": int(time.time())}
+                                  "price": price, "days": days, "created": int(time.time())}
         save_state(state)
 
+    term = f" на {days} дней" if days else ""
     caption = (f"Оплата №{pid} — {price} ₽\n{u['name']}\nID {user.id}\n"
-               f"За: {target_label(state, target)}")
+               f"За: {target_label(state, target)}{term}"
+               + ("\n⚠️ Проверьте, что сумма на скриншоте совпадает." if target == TOPUP else ""))
     if comment:
         caption += f"\nКомментарий: {comment}"
     # file_id одного бота не годится для другого — пересылаем саму картинку,
@@ -1821,6 +2043,31 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ask_payment(query.message, ctx, target, state)
         return
 
+    if action == "per":
+        m, _, target = arg.partition(":")
+        await pay_screen(query.message, ctx, target, int(m), load_state(), query)
+        return
+    if action == "pln":
+        await ask_payment(query.message, ctx, arg, load_state(), query=query)
+        return
+    if action == "bal":
+        m, _, target = arg.partition(":")
+        await pay_from_balance(query, ctx, target, int(m))
+        return
+    if action == "top":
+        ctx.user_data["await"] = "topup"
+        rows = [[InlineKeyboardButton(f"{a} ₽", callback_data=f"topa:{a}") for a in TOPUP_AMOUNTS]]
+        await query.edit_message_text(f"➕ На сколько пополнить? От {TOPUP_MIN} ₽ — нажмите сумму "
+                                      "или напишите свою числом.", reply_markup=InlineKeyboardMarkup(rows))
+        return
+    if action == "topa":
+        await topup_screen(query.message, ctx, int(arg), query)
+        return
+    if action == "refset":
+        ctx.user_data["await"] = "ref_set"
+        await query.edit_message_text("✏️ Пришлите ID друга, который вас пригласил, — одним числом.")
+        return
+
     if action == "payfor":
         pending = ctx.user_data.pop("pending_photo", None)
         if not pending:
@@ -1948,7 +2195,7 @@ def admin_only(func):
 
 def payment_buttons(pid):
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"✅ Одобрить (+{DAYS} дн.)", callback_data=f"ok:{pid}"),
+        InlineKeyboardButton("✅ Одобрить", callback_data=f"ok:{pid}"),
         InlineKeyboardButton("❌ Отклонить", callback_data=f"no:{pid}"),
     ]])
 
@@ -1979,6 +2226,16 @@ def user_card(state, uid, hs=None):
     """Одно сообщение на клиента: все его конфиги со сроками, подключением и оператором."""
     hs = last_handshakes() if hs is None else hs
     lines = [f"{user_name(state, uid)} · ID {uid}"]
+    u = state["users"].get(str(uid), {})
+    extra = []
+    if u.get("balance"):
+        extra.append(f"💰 {u['balance']} ₽")
+    if u.get("ref_count"):
+        extra.append(f"👥 привёл {u['ref_count']}")
+    if u.get("ref"):
+        extra.append(f"пришёл от {user_name(state, u['ref'])} (ID {u['ref']})")
+    if extra:
+        lines.append(" · ".join(extra))
     for pub, p in sorted(user_peers(state, uid).items(), key=lambda kv: kv[1]["name"]):
         icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
         lines.append(f"\n{icon} {title(p)} — {peer_status(p)}")
@@ -2075,6 +2332,11 @@ async def grant(uid, target, days, paid=True):
     except Exception:
         log.exception("не удалось отправить клиенту %s", uid)
         sent = "\nКлиенту написать не удалось — он ещё не нажимал /start в клиентском боте."
+    if paid:
+        try:
+            await referral_credit(uid)
+        except Exception:
+            log.exception("приглашение не засчиталось")
     return f"{title(peer)}: {peer_status(peer)}{sent}"
 
 
@@ -2607,8 +2869,20 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     uid = int(payment["user"])
-    if action == "ok":
-        result = "✅ Одобрено. " + await grant(uid, payment.get("target", NEW), DAYS)
+    if action == "ok" and payment.get("target") == TOPUP:
+        async with lock:
+            state = load_state()
+            u = state["users"].setdefault(str(uid), {"name": str(uid)})
+            u["balance"] = u.get("balance", 0) + payment["price"]
+            save_state(state)
+        result = f"✅ Баланс пополнен на {payment['price']} ₽, теперь {u['balance']} ₽."
+        try:
+            await USER_BOT.send_message(uid, f"💰 Баланс пополнен на {payment['price']} ₽. Теперь {u['balance']} ₽ — "
+                                             "оплачивайте конфиги кнопкой «Оплатить с баланса».", reply_markup=KEYBOARD)
+        except Exception:
+            pass
+    elif action == "ok":
+        result = "✅ Одобрено. " + await grant(uid, payment.get("target", NEW), payment.get("days") or DAYS)
     else:
         result = "❌ Отклонено"
         try:
@@ -2910,11 +3184,14 @@ async def admin_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ago = "никогда" if not handshake else f"{int(now - handshake) // 60} мин назад"
         rows.append(f"{names.get(pub, pub[:8])}: вход {ago}, ↓{rx / 2**20:.0f} МБ ↑{tx / 2**20:.0f} МБ")
     active = sum(1 for p in state["peers"].values() if peer_active(p) and not is_admin(p["user"]))
-    approved = sum(1 for p in state["payments"].values() if p["status"] == "approved")
-    revenue = sum(p.get("price", PRICE) for p in state["payments"].values() if p["status"] == "approved")
+    # Деньги — переводы (оплаты и пополнения); оплата с баланса — те же деньги второй раз, её не считаем.
+    money = [p for p in state["payments"].values() if p["status"] == "approved" and p.get("via") != "balance"]
+    approved = len(money)
+    revenue = sum(p.get("price", PRICE) for p in money)
+    balances = sum(u.get("balance", 0) for u in state["users"].values())
     await update.message.reply_text(
         f"Оплаченных конфигов сейчас: {active}\nОдобренных оплат всего: {approved} "
-        f"(≈ {revenue} ₽)\n\n" + ("\n".join(rows) or "Подключений нет."),
+        f"(≈ {revenue} ₽)\nНа балансах клиентов: {balances} ₽\n\n" + ("\n".join(rows) or "Подключений нет."),
         reply_markup=ADMIN_KEYBOARD)
 
 
@@ -3238,6 +3515,35 @@ async def rename_peer(update, ctx, pub, label):
 async def user_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Свободный текст клиента: обращение, реквизиты для возврата или просто возврат в меню."""
     waiting = ctx.user_data.get("await") or ""
+    if waiting in ("ref", "ref_set"):
+        text = update.message.text.strip()
+        async with lock:
+            state = load_state()
+            u = get_user(state, update.effective_user)
+            rid = parse_ref(state, update.effective_user.id, text)
+            if rid:
+                u["ref"] = rid
+                save_state(state)
+        if not rid:
+            await update.message.reply_text("Такого клиента нет. Проверьте ID (одно число) и пришлите ещё раз.")
+            return
+        ctx.user_data.pop("await")
+        if waiting == "ref_set":
+            await update.message.reply_text(f"✅ Записал: вас пригласил {user_name(state, rid)}. Когда оплатите VPN, "
+                                            "друг получит зачёт.", reply_markup=KEYBOARD)
+            return
+        await request_access(update.effective_user)
+        await update.message.reply_text(closed_text(state, update.effective_user.id))
+        return
+    if waiting == "topup":
+        text = update.message.text.strip().replace("₽", "").replace(" ", "")
+        if text.isdigit():
+            if int(text) < TOPUP_MIN:
+                await update.message.reply_text(f"Минимум — {TOPUP_MIN} ₽. Напишите сумму ещё раз.")
+                return
+            await topup_screen(update.message, ctx, int(text))
+            return
+        ctx.user_data.pop("await")
     if waiting.startswith("rename:"):
         ctx.user_data.pop("await")
         await rename_peer(update, ctx, waiting.partition(":")[2], update.message.text.strip())
@@ -3604,7 +3910,7 @@ async def user_menu_begin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def build_user_app():
     app = Application.builder().bot(ScreenBot(token=TOKEN)).build()
     # Кнопки меню и команды: выход из переписки по обращению и чистый чат (прошлый экран удаляется).
-    menu = filters.Text([BTN_BUY, BTN_LIST, BTN_HELP, BTN_NEWS, BTN_SUPPORT, BTN_CLEAR]) \
+    menu = filters.Text([BTN_BUY, BTN_LIST, BTN_HELP, BTN_NEWS, BTN_SUPPORT, BTN_CLEAR, BTN_BALANCE]) \
         | filters.Command(["start", "help", "news"])
     app.add_handler(MessageHandler(menu, user_menu_begin), group=-1)
     app.add_handler(MessageHandler(menu, screen_end), group=1)
@@ -3614,6 +3920,8 @@ def build_user_app():
     app.add_handler(MessageHandler(filters.Text([BTN_LIST]), list_configs))
     app.add_handler(MessageHandler(filters.Text([BTN_HELP]), help_cmd))
     app.add_handler(MessageHandler(filters.Text([BTN_NEWS]), news_cmd))
+    app.add_handler(MessageHandler(filters.Text([BTN_BALANCE]), balance_cmd))
+    app.add_handler(CommandHandler("balance", balance_cmd))
     app.add_handler(CommandHandler("news", news_cmd))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_screenshot))
     # Старые кнопки из прошлой версии бота, оставшиеся у клиентов на экране.
