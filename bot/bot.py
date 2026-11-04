@@ -1417,59 +1417,62 @@ async def ask_payment(message, ctx, target, state, query=None):
 
 
 async def pay_screen(message, ctx, target, months, state, query=None):
-    """Реквизиты для выбранного срока; если хватает баланса — кнопка «Оплатить с баланса»."""
+    """Оплата выбранного срока — только с баланса: хватает — кнопка «Оплатить», нет — «Пополнить»
+    (после пополнения конфиг оплатится сам)."""
     months, days, price = plan(state, target, months)
-    ctx.user_data["pay_for"] = target
-    ctx.user_data["pay_months"] = months
     warning = f"{router_requirements(target)}\n\n" if target in (NEW_ROUTER, NEW_ROUTER_AWG) else ""
-    text = (f"Оплата: {target_label(state, target)} — {price} ₽ за {days} дней.\n\n"
-            f"{warning}{pay_text()}\n\n"
-            "После оплаты пришлите сюда скриншот перевода одним фото.")
-    rows = []
     bal = balance(state, message.chat_id)
+    text = f"Оплата: {target_label(state, target)} — {price} ₽ за {days} дней.\n\n{warning}💰 На балансе: {bal} ₽."
+    rows = []
     if bal >= price:
-        rows.append([InlineKeyboardButton(f"💰 Оплатить с баланса (у вас {bal} ₽)",
-                                          callback_data=f"bal:{months}:{target}")])
+        rows.append([InlineKeyboardButton(f"✅ Оплатить {price} ₽ с баланса", callback_data=f"bal:{months}:{target}")])
+    else:
+        amount = max(price - bal, TOPUP_MIN)
+        text += (f"\nНа балансе недостаточно средств. Чтобы пополнить, нажмите «Пополнить» — "
+                 "после пополнения конфиг оплатится сам.")
+        rows.append([InlineKeyboardButton(f"➕ Пополнить на {amount} ₽", callback_data=f"topb:{months}:{target}")])
     if len(plans(state, target)) > 1:
         rows.append([InlineKeyboardButton("⬅️ Другой срок", callback_data=f"pln:{target}")])
     elif target not in KIND_BY_TARGET:
         rows.append([back_button(target)])
-    markup = InlineKeyboardMarkup(rows) if rows else None
     if query:
-        await query.edit_message_text(text, reply_markup=markup)
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
     else:
-        await message.reply_text(text, reply_markup=markup)
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
 
 
-async def pay_from_balance(query, ctx, target, months):
-    """Оплата с баланса — сразу, без проверки администратором."""
-    user = query.from_user
+async def buy_with_balance(uid, target, months):
+    """Списывает цену с баланса и выдаёт или продлевает конфиг. Возвращает (получилось, текст)."""
     async with lock:
         state = load_state()
-        u = get_user(state, user)
+        u = state["users"].setdefault(str(uid), {"name": str(uid)})
         months, days, price = plan(state, target, months)
         if target not in KIND_BY_TARGET and target not in state["peers"]:
-            await query.edit_message_text("Конфиг не найден.")
-            return
+            return False, "Конфиг не найден."
         if u.get("balance", 0) < price:
-            await query.edit_message_text(f"На балансе {u.get('balance', 0)} ₽ — не хватает на {price} ₽. "
-                                          f"Пополнить: «{BTN_BALANCE}».")
-            return
+            return False, f"На балансе {u.get('balance', 0)} ₽ — не хватает на {price} ₽."
         u["balance"] -= price
         pid = str(state["next_payment"])
         state["next_payment"] += 1
-        state["payments"][pid] = {"user": str(user.id), "target": target, "status": "approved", "via": "balance",
+        state["payments"][pid] = {"user": str(uid), "target": target, "status": "approved", "via": "balance",
                                   "price": price, "days": days, "created": int(time.time())}
         save_state(state)
-    ctx.user_data.pop("pay_for", None)
-    await query.edit_message_text(f"💰 Оплачено с баланса: {price} ₽. Осталось {u['balance']} ₽.")
-    result = await grant(user.id, target, days)
+    result = await grant(int(uid), target, days)
     for admin in ADMINS:
         try:
-            await ADMIN_BOT.send_message(admin, f"💰 Оплата с баланса №{pid} — {price} ₽\n{u['name']}\nID {user.id}\n"
+            await ADMIN_BOT.send_message(admin, f"💰 Оплата с баланса №{pid} — {price} ₽\n{u['name']}\nID {uid}\n"
                                                 f"За: {target_label(state, target)} на {days} дней\n{result}")
         except Exception:
             pass
+    return True, f"💰 Оплачено с баланса: {price} ₽. Осталось {u['balance']} ₽."
+
+
+async def pay_from_balance(query, ctx, target, months):
+    """Кнопка «Оплатить с баланса» — сразу, без проверки администратором."""
+    ok, text = await buy_with_balance(query.from_user.id, target, months)
+    if not ok and "не хватает" in text:
+        text += f" Пополнить: «{BTN_BALANCE}»."
+    await query.edit_message_text(text)
 
 
 # ---------- баланс и приглашения ----------
@@ -1504,12 +1507,17 @@ async def balance_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 TOPUP_AMOUNTS = (150, 300, 500, 1000)
 
 
-async def topup_screen(message, ctx, amount, query=None):
+async def topup_screen(message, ctx, amount, query=None, then=None):
+    """Реквизиты для пополнения. then — (за что, месяцев): после пополнения бот сам оплатит это с баланса."""
     ctx.user_data["pay_for"] = TOPUP
     ctx.user_data["pay_amount"] = amount
+    then = then or ctx.user_data.get("pay_then")
+    if then:
+        ctx.user_data["pay_then"] = then
     ctx.user_data.pop("await", None)
+    after = f"\n\nПосле пополнения бот сам оплатит: {target_label(load_state(), then[0])}." if then else ""
     text = (f"➕ Пополнение баланса на {amount} ₽.\n\n{pay_text()}\n\n"
-            f"Переведите ровно {amount} ₽ и пришлите сюда скриншот перевода одним фото.")
+            f"Переведите ровно {amount} ₽ и пришлите сюда скриншот перевода одним фото.{after}")
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Другая сумма", callback_data="top:")]])
     if query:
         await query.edit_message_text(text, reply_markup=markup)
@@ -1720,19 +1728,21 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if target is None:
         # Оплату принимаем только после выбора, за что она.
         await msg.reply_text(
-            "Чтобы оплатить, сначала выберите, за что платите:\n"
-            f"• новый конфиг — «{BTN_BUY}» → выберите устройство → «💳 Купить»;\n"
-            f"• продление — «{BTN_LIST}» → нужный конфиг → «🔄 Продлить».\n"
+            "Чтобы оплатить, сначала нажмите «Пополнить»:\n"
+            f"• новый конфиг — «{BTN_BUY}» → устройство → «💳 Купить» → срок → «➕ Пополнить»;\n"
+            f"• продление — «{BTN_LIST}» → конфиг → «🔄 Продлить» → «➕ Пополнить»;\n"
+            f"• просто баланс — «{BTN_BALANCE}» → «➕ Пополнить баланс».\n"
             "После этого пришлите скриншот перевода.\n\n"
             f"Если это скриншот проблемы — нажмите «{BTN_SUPPORT}» и пришлите его там.",
             reply_markup=KEYBOARD)
         return
     months = ctx.user_data.pop("pay_months", 1)
     amount = ctx.user_data.pop("pay_amount", None)
-    await submit_payment(update.effective_user, target, data, msg.caption, msg, months, amount)
+    then = ctx.user_data.pop("pay_then", None) if target == TOPUP else None
+    await submit_payment(update.effective_user, target, data, msg.caption, msg, months, amount, then)
 
 
-async def submit_payment(user, target, data, comment, reply_to, months=1, amount=None):
+async def submit_payment(user, target, data, comment, reply_to, months=1, amount=None, then=None):
     async with lock:
         state = load_state()
         u = get_user(state, user)
@@ -1744,9 +1754,13 @@ async def submit_payment(user, target, data, comment, reply_to, months=1, amount
             months, days, price = plan(state, target, months)
         state["payments"][pid] = {"user": str(user.id), "target": target, "status": "pending",
                                   "price": price, "days": days, "created": int(time.time())}
+        if then:
+            state["payments"][pid]["then"] = list(then)
         save_state(state)
 
     term = f" на {days} дней" if days else ""
+    if then:
+        term += f"\nПосле пополнения — оплата: {target_label(state, then[0])}"
     caption = (f"Оплата №{pid} — {price} ₽\n{u['name']}\nID {user.id}\n"
                f"За: {target_label(state, target)}{term}"
                + ("\n⚠️ Проверьте, что сумма на скриншоте совпадает." if target == TOPUP else ""))
@@ -2066,6 +2080,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await pay_from_balance(query, ctx, target, int(m))
         return
     if action == "top":
+        if query.message.text and query.message.text.startswith("💰 Баланс"):
+            ctx.user_data.pop("pay_then", None)
         ctx.user_data["await"] = "topup"
         rows = [[InlineKeyboardButton(f"{a} ₽", callback_data=f"topa:{a}") for a in TOPUP_AMOUNTS]]
         await query.edit_message_text(f"➕ На сколько пополнить? От {TOPUP_MIN} ₽ — нажмите сумму "
@@ -2073,6 +2089,13 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if action == "topa":
         await topup_screen(query.message, ctx, int(arg), query)
+        return
+    if action == "topb":
+        m, _, target = arg.partition(":")
+        state = load_state()
+        months, days, price = plan(state, target, int(m))
+        amount = max(price - balance(state, uid), TOPUP_MIN)
+        await topup_screen(query.message, ctx, amount, query, then=(target, months))
         return
     if action == "refset":
         ctx.user_data["await"] = "ref_set"
@@ -2888,10 +2911,18 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             save_state(state)
         result = f"✅ Баланс пополнен на {payment['price']} ₽, теперь {u['balance']} ₽."
         try:
-            await USER_BOT.send_message(uid, f"💰 Баланс пополнен на {payment['price']} ₽. Теперь {u['balance']} ₽ — "
-                                             "оплачивайте конфиги кнопкой «Оплатить с баланса».", reply_markup=KEYBOARD)
+            await USER_BOT.send_message(uid, f"💰 Баланс пополнен на {payment['price']} ₽. Теперь {u['balance']} ₽.",
+                                        reply_markup=KEYBOARD)
         except Exception:
             pass
+        if payment.get("then"):
+            target, months = payment["then"]
+            ok, text = await buy_with_balance(uid, target, int(months))
+            result += f"\n{text}"
+            try:
+                await USER_BOT.send_message(uid, text)
+            except Exception:
+                pass
     elif action == "ok":
         result = "✅ Одобрено. " + await grant(uid, payment.get("target", NEW), payment.get("days") or DAYS)
     else:
