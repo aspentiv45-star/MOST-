@@ -28,6 +28,7 @@ import subprocess
 import tempfile
 import time
 import traceback
+import uuid
 import zlib
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -57,6 +58,14 @@ ROUTER_CONF = os.environ.get("ROUTER_CONF", f"/etc/amnezia/amneziawg/{ROUTER_IFA
 STATE_FILE = os.environ.get("STATE_FILE", "/var/lib/most/state.json")
 ENDPOINT_HOST = os.environ["ENDPOINT_HOST"]
 RELAY_HOST = os.environ.get("RELAY_HOST", "")
+# VLESS Reality (vless.sh): ключи для Happ, v2rayNG, Hiddify, Streisand. Пусто — VLESS выключен.
+VLESS_PRIV = os.environ.get("VLESS_PRIV", "")
+VLESS_PUB = os.environ.get("VLESS_PUB", "")
+VLESS_SID = os.environ.get("VLESS_SID", "")
+VLESS_SNI = os.environ.get("VLESS_SNI", "www.microsoft.com")
+VLESS_PORT = os.environ.get("VLESS_PORT", "443")
+VLESS_RELAY_PORT = os.environ.get("VLESS_RELAY_PORT", "")  # порт на входе в Москве (TCP), пусто — без него
+XRAY_CONF = os.environ.get("XRAY_CONF", "/usr/local/etc/xray/config.json")
 # Со входом в РФ клиенты получают один конфиг через него: прямое подключение к
 # зарубежному серверу российские провайдеры часто режут. SEND_DIRECT=1 — выдавать и прямой.
 SEND_DIRECT = os.environ.get("SEND_DIRECT", "0") == "1"
@@ -508,6 +517,103 @@ def apply_or_rollback(state, old_state):
         except Exception:
             pass
         raise
+    try:
+        write_xray_conf(state)
+    except Exception:
+        log.exception("не удалось обновить Xray (VLESS)")
+
+
+# ---------- VLESS (Xray) ----------
+
+def vless_enabled():
+    return bool(VLESS_PRIV and VLESS_PUB)
+
+
+def xray_config(state):
+    """Конфиг Xray: в нём только действующие конфиги, которым выдан ключ VLESS."""
+    clients = [{"id": p["vless"], "flow": "xtls-rprx-vision", "email": f"{p['user']}-{p['name']}"}
+               for p in state["peers"].values() if p.get("vless") and peer_active(p)]
+    return {
+        "log": {"loglevel": "warning"},
+        "inbounds": [{
+            "tag": "vless", "listen": "0.0.0.0", "port": int(VLESS_PORT), "protocol": "vless",
+            "settings": {"clients": clients, "decryption": "none"},
+            "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {
+                "dest": f"{VLESS_SNI}:443", "serverNames": [VLESS_SNI],
+                "privateKey": VLESS_PRIV, "shortIds": [VLESS_SID]}},
+            "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
+        }],
+        "outbounds": [{"protocol": "freedom", "tag": "direct"}, {"protocol": "blackhole", "tag": "block"}],
+        # Как у AmneziaWG: без торрентов, локальных сетей и почтовой рассылки (порт 25).
+        "routing": {"rules": [
+            {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
+            {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
+            {"type": "field", "port": "25", "outboundTag": "block"},
+        ]},
+    }
+
+
+def write_xray_conf(state):
+    """Записывает конфиг Xray и перезапускает его, только если список ключей изменился."""
+    if not vless_enabled() or not os.path.isdir(os.path.dirname(XRAY_CONF)):
+        return
+    text = json.dumps(xray_config(state), ensure_ascii=False, indent=1)
+    try:
+        with open(XRAY_CONF) as f:
+            if f.read() == text:
+                return
+    except FileNotFoundError:
+        pass
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(XRAY_CONF), suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(tmp, 0o644)
+    xray = shutil.which("xray") or "/usr/local/bin/xray"
+    try:
+        run([xray, "run", "-test", "-config", tmp])  # битый конфиг не ставим — Xray остаётся на прежнем
+    except Exception:
+        os.unlink(tmp)
+        raise
+    os.replace(tmp, XRAY_CONF)
+    # Перезапуск обрывает соединения VLESS на секунду — приложения сразу переподключаются.
+    run(["systemctl", "restart", "xray"])
+
+
+def vless_links(peer):
+    """Ссылки vless:// для приложения: напрямую в Нидерланды и через вход в Москве."""
+    q = (f"encryption=none&flow=xtls-rprx-vision&security=reality&sni={VLESS_SNI}&fp=chrome"
+         f"&pbk={VLESS_PUB}&sid={VLESS_SID}&type=tcp")
+    name = file_base(peer)
+    links = [("⚡️ Основной — напрямую в Нидерланды",
+              f"vless://{peer['vless']}@{ENDPOINT_HOST}:{VLESS_PORT}?{q}#MOST-{name}")]
+    if RELAY_HOST and VLESS_RELAY_PORT:
+        links.append(("🛡 Обход белых списков — через Москву",
+                      f"vless://{peer['vless']}@{RELAY_HOST}:{VLESS_RELAY_PORT}?{q}#MOST-{name}-obhod"))
+    return links
+
+
+async def deliver_vless(chat_id, pub):
+    """Выдаёт конфигу ключ VLESS (если ещё нет) и присылает ссылки."""
+    async with lock:
+        state = load_state()
+        peer = state["peers"].get(pub)
+        if not peer:
+            return
+        if not peer.get("vless"):
+            old_state = json.loads(json.dumps(state))
+            peer["vless"] = str(uuid.uuid4())
+            apply_or_rollback(state, old_state)
+            save_state(state)
+    ids = []
+    for label, link in vless_links(peer):
+        msg = await USER_BOT.send_message(chat_id, f"{label}\n<code>{html.escape(link)}</code>", parse_mode="HTML")
+        ids.append(msg.message_id)
+    await USER_BOT.send_message(
+        chat_id, "👆 Нажмите на ссылку — она скопируется. Happ (или v2rayNG, Hiddify, Streisand) → «➕» → "
+                 "«Вставить из буфера». Добавьте обе: не работает одна — включите другую.\n"
+                 "Ключ действует, пока активен этот конфиг.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+            "✅ Готово — убрать", callback_data="kdone:" + ",".join(map(str, ids)))]]))
 
 
 def next_free_ip(state, params):
@@ -1033,6 +1139,8 @@ def download_buttons(pub):
         [InlineKeyboardButton("🍏 iPhone / 💻 Windows, Mac", callback_data=f"dl:ios:{pub}")],
         [InlineKeyboardButton("🤖 Android", callback_data=f"dl:and:{pub}")],
         [InlineKeyboardButton("📦 Все режимы сразу", callback_data=f"dl:allm:{pub}")],
+        *([[InlineKeyboardButton("🔗 VLESS (Happ, v2rayNG)", callback_data=f"dl:vless:{pub}")]]
+          if vless_enabled() else []),
         [InlineKeyboardButton("⬅️ К конфигу", callback_data=f"cfg:{pub}")],
     ])
 
@@ -1936,6 +2044,9 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif how == "back":
             await query.edit_message_text(f"📥 {title(peer)}: на каком устройстве подключаете?",
                                           reply_markup=download_buttons(pub))
+        elif how == "vless" and vless_enabled() and peer.get("kind") not in ROUTER_KINDS:
+            await show_card(query, pub, "✅ Отправил ниже 👇")
+            await deliver_vless(query.message.chat_id, pub)
         elif how in ("ios", "key", "file", "qr", "amk", "amq", "amf"):
             # Сначала экран конфига (с пометкой), потом файлы под ним.
             await show_card(query, pub, "✅ Отправил ниже 👇")
@@ -3071,6 +3182,12 @@ async def server_status():
         lines += ["", "🛡 Блокировка рекламы: " + ("работает" if ok else "🔴 не работает")]
         if not ok:
             problems.append("DNS с блокировкой рекламы не работает — у клиентов с ней не открываются сайты")
+    if vless_enabled():
+        ok = await unit_active("xray")
+        n = sum(1 for p in load_state()["peers"].values() if p.get("vless") and peer_active(p))
+        lines.append(f"🔗 VLESS: {'работает' if ok else '🔴 не работает'} · ключей: {n}")
+        if not ok:
+            problems.append("Xray (VLESS) не работает — ключи VLESS у клиентов не подключаются")
     return "\n".join(lines), problems
 
 
@@ -4047,6 +4164,10 @@ async def amain():
         # Сразу применяем сроки к серверу: после простоя бота истёкшие конфиги отключатся.
         async with lock:
             write_server_conf(load_state())
+            try:
+                write_xray_conf(load_state())
+            except Exception as e:
+                await report_error("Xray (VLESS) не принял конфиг", e)
         for app in (user_app, admin_app):
             await app.start()
             await app.updater.start_polling()
