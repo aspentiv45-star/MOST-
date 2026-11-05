@@ -104,6 +104,7 @@ EOF
 sed -i '/^VLESS_/d' "$ENV"
 cat >>"$ENV" <<EOF
 VLESS_GAME_PORT=2053
+SUB_PORT=2096
 VLESS_PRIV=$PRIV
 VLESS_PUB=$PUB
 VLESS_SID=$SID
@@ -116,6 +117,7 @@ RELAY_HOST="$(old RELAY_HOST)"
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow 443/tcp comment "MOST vless" >/dev/null
   ufw allow 2053/tcp comment "MOST vless game" >/dev/null
+  ufw allow 2096/tcp comment "MOST vless subscription" >/dev/null
 fi
 
 systemctl daemon-reload
@@ -133,14 +135,15 @@ cat <<EOF
 
 Готово: VLESS Reality на TCP 443 и 2053 (игровой; маскировка под $SNI).
 В боте появилась покупка «🔗 Подписка VLESS (Happ)» — после оплаты клиент получает текст для Happ
-с маршрутизацией и тремя ключами. Если у хостинга есть свой файрвол — откройте TCP 443 и 2053.
+ссылку-подписку (порт 2096): Happ сам добавит три режима и маршрутизацию.
+Если у хостинга есть свой файрвол — откройте TCP 443, 2053 и 2096.
 EOF
 if [[ -n "$RELAY_HOST" ]]; then
   cat <<EOF
 
 Для ссылки «через Москву» на ВХОДЕ ($RELAY_HOST), в папке MOST-, добавьте TCP-порт к пересылке
-(к уже настроенным портам допишите ,t$RELAY_PORT=443):
+(к уже настроенным портам допишите ,t$RELAY_PORT=443,t2096=2096 — ключ через Москву и подписка):
 
-  sudo bash relay.sh --to $MY_IP:\$(sed -n 's/^# MOST: .*порты: //p' /usr/local/sbin/most-relay | sed 's/,t[0-9=]*//g'),t$RELAY_PORT=443
+  sudo bash relay.sh --to $MY_IP:\$(sed -n 's/^# MOST: .*порты: //p' /usr/local/sbin/most-relay | sed 's/,t[0-9=]*//g'),t$RELAY_PORT=443,t2096=2096
 EOF
 fi

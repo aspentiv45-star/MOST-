@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import re
 import shutil
 import signal
@@ -66,6 +67,10 @@ VLESS_SNI = os.environ.get("VLESS_SNI", "www.microsoft.com")
 VLESS_PORT = os.environ.get("VLESS_PORT", "443")
 VLESS_RELAY_PORT = os.environ.get("VLESS_RELAY_PORT", "")  # порт на входе в Москве (TCP), пусто — без него
 VLESS_GAME_PORT = os.environ.get("VLESS_GAME_PORT", "2053")  # отдельный вход Xray для игрового ключа
+# Ссылка-подписка для Happ/v2rayNG: бот сам отдаёт список серверов и маршрутизацию по http://ХОСТ:SUB_PORT/sub/КОД.
+# Через вход в Москве (relay.sh с t2096=2096), если он есть, — чтобы подписка обновлялась и при белых списках.
+SUB_PORT = int(os.environ.get("SUB_PORT", "2096"))
+SUB_HOST = os.environ.get("SUB_HOST", "")
 XRAY_CONF = os.environ.get("XRAY_CONF", "/usr/local/etc/xray/config.json")
 # Со входом в РФ клиенты получают один конфиг через него: прямое подключение к
 # зарубежному серверу российские провайдеры часто режут. SEND_DIRECT=1 — выдавать и прямой.
@@ -663,25 +668,93 @@ def vless_links(peer):
     return links
 
 
+def sub_url(peer):
+    host = SUB_HOST or (RELAY_HOST if RELAY_HOST and VLESS_RELAY_PORT else ENDPOINT_HOST)
+    return f"http://{host}:{SUB_PORT}/sub/{peer['sub']}"
+
+
+async def ensure_sub(peer):
+    """Код подписки у старых подписок VLESS (выданных до ссылок-подписок)."""
+    if peer.get("sub"):
+        return peer
+    async with lock:
+        state = load_state()
+        p = next((p for p in state["peers"].values() if p.get("vless") == peer.get("vless")), None)
+        if p is None:
+            return peer
+        p.setdefault("sub", secrets.token_urlsafe(12))
+        save_state(state)
+        return p
+
+
 async def deliver_vless(chat_id, peer):
-    """Подписка VLESS: один блок для Happ (маршрутизация + все ключи) — нажать, скопировать, вставить."""
+    """Подписка VLESS: одна ссылка — Happ сам добавит все режимы и маршрутизацию и будет их обновлять."""
     if not vless_enabled():
         await USER_BOT.send_message(chat_id, "VLESS сейчас недоступен — напишите в «🆘 Нужна помощь».")
         return
-    links = vless_links(peer)
-    block = "\n".join([happ_routing_link()] + [link for _, link in links])
-    msg = await USER_BOT.send_message(chat_id, f"<code>{html.escape(block)}</code>", parse_mode="HTML")
-    modes = " · ".join(label for label, _ in links)
+    peer = await ensure_sub(peer)
+    url = sub_url(peer)
+    modes = " · ".join(label for label, _ in vless_links(peer))
+    msg = await USER_BOT.send_message(chat_id, f"<code>{html.escape(url)}</code>", parse_mode="HTML",
+                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                                          "📋 Скопировать ссылку", copy_text=CopyTextButton(url))]]))
     await USER_BOT.send_message(
-        chat_id, f"👆 Нажмите на текст — он скопируется целиком. Happ → «➕» → «Вставить из буфера».\n"
-                 f"Добавятся режимы: {modes} и маршрутизация — российские приложения и сайты будут "
-                 "открываться без VPN.\n\n"
-                 "v2rayNG, Hiddify, Streisand тоже принимают эти ключи, но маршрутизацию для них нужно "
-                 "настроить в самом приложении.\n\n"
+        chat_id, f"👆 Это ваша подписка. Скопируйте ссылку → Happ → «➕» → «Вставить из буфера».\n"
+                 f"Сразу появятся режимы {modes} и маршрутизация: российские приложения и сайты — без VPN. "
+                 "Подписка обновляется сама.\n\n"
+                 "Ссылка подходит и для v2rayNG, Hiddify, Streisand (маршрутизацию там настройте в приложении). "
+                 "Никому её не пересылайте.\n\n"
                  "🎨 А ещё можно переделать вид Happ — выбрать раскраску. Хотите?",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🎨 Да, хочу", callback_data="thm:")],
             [InlineKeyboardButton("✅ Готово — убрать", callback_data=f"kdone:{msg.message_id}")]]))
+
+
+def subscription_response(token, happ=False):
+    """Ответ на запрос подписки: (код, заголовки, тело). happ — запрос от Happ: маршрутизация ещё и строкой."""
+    state = load_state()
+    peer = next((p for p in state["peers"].values() if p.get("kind") == "vless" and p.get("sub") == token), None)
+    if not peer or not token:
+        return 404, {}, b"not found"
+    links = [link for _, link in vless_links(peer)] if peer_active(peer) else []
+    if happ and links:
+        links = [happ_routing_link()] + links
+    body = base64.b64encode("\n".join(links).encode()).decode().encode()
+    b64 = lambda t: "base64:" + base64.b64encode(t.encode()).decode()
+    headers = {
+        "Content-Type": "text/plain; charset=utf-8",
+        "profile-title": b64("MOST VPN"),
+        "profile-update-interval": "6",
+        "subscription-userinfo": f"upload=0; download=0; total=0; expire={int(peer['until'])}",
+        "routing": happ_routing_link(),
+    }
+    try:
+        headers["support-url"] = f"https://t.me/{USER_BOT.username}"
+    except Exception:
+        pass
+    if not peer_active(peer):
+        headers["announce"] = b64("Срок подписки закончился — продлите её в боте.")
+    return 200, headers, body
+
+
+async def sub_handler(reader, writer):
+    """Крошечный HTTP-сервер подписок: только GET /sub/КОД."""
+    try:
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 10)
+        line = head.split(b"\r\n", 1)[0].decode("latin-1").split()
+        path = line[1] if len(line) >= 2 and line[0] in ("GET", "HEAD") else ""
+        token = path.split("?")[0].rsplit("/", 1)[-1] if path.startswith("/sub/") else ""
+        happ = b"happ" in head.lower()  # User-Agent приложения Happ
+        code, headers, body = subscription_response(token, happ)
+        reason = {200: "OK", 404: "Not Found"}[code]
+        headers.update({"Content-Length": str(len(body)), "Connection": "close", "Cache-Control": "no-store"})
+        out = f"HTTP/1.1 {code} {reason}\r\n" + "".join(f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n"
+        writer.write(out.encode() + (body if line and line[0] == "GET" else b""))
+        await writer.drain()
+    except Exception:
+        pass
+    finally:
+        writer.close()
 
 
 def next_free_ip(state, params):
@@ -733,6 +806,7 @@ def create_peer(state, uid, until, kind="device"):
         vid = str(uuid.uuid4())
         pub = "v" + vid.replace("-", "")
         peer = {"user": str(uid), "name": f"{prefix}{n}", "kind": kind, "priv": vid, "vless": vid,
+                "sub": secrets.token_urlsafe(12),
                 "created": fmt_date(time.time()), "made": int(time.time()), "until": until, "warned": 0}
         state["peers"][pub] = peer
         return pub, peer
@@ -4305,6 +4379,12 @@ async def amain():
             await app.updater.start_polling()
         tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop()),
                  asyncio.create_task(dynamic_loop()), asyncio.create_task(monitor_loop())]
+        sub_server = None
+        if vless_enabled():
+            try:
+                sub_server = await asyncio.start_server(sub_handler, "0.0.0.0", SUB_PORT, limit=8192)
+            except Exception as e:
+                await report_error(f"Сервер подписок VLESS не запустился (порт {SUB_PORT})", e)
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -4314,6 +4394,8 @@ async def amain():
 
         for task in tasks:
             task.cancel()
+        if sub_server:
+            sub_server.close()
         for app in (user_app, admin_app):
             await app.updater.stop()
             await app.stop()
