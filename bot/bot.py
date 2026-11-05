@@ -1948,6 +1948,31 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await deliver_peer(query.message.chat_id, peer, how)
         return
 
+    if action == "rsn":
+        await query.edit_message_text("Хорошо, ваши конфиги остаются как есть.")
+        return
+    if action in ("rsy", "rsp") and arg.partition(":")[0] in MODES:
+        mode, _, pub = arg.partition(":")
+        mine = device_peers(load_state(), uid)
+        if not mine:
+            await query.edit_message_text("Действующих конфигов нет — сначала продлите конфиг.")
+            return
+        if action == "rsy" and len(mine) > 1:
+            rows = [[InlineKeyboardButton(f"📱 {title(p)} — сейчас {MODES[mode_of(p)]}", callback_data=f"rsp:{mode}:{k}")]
+                    for k, p in mine.items()]
+            await query.edit_message_text(f"Для какого конфига прислать «{MODES[mode]}»?",
+                                          reply_markup=InlineKeyboardMarkup(rows))
+            return
+        pub = pub if pub in mine else next(iter(mine))
+        async with lock:
+            state = load_state()
+            if pub in state["peers"]:
+                state["peers"][pub]["mode"] = mode
+                save_state(state)
+        await query.edit_message_text(f"✅ {title(mine[pub])}: режим «{MODES[mode]}». На каком устройстве подключаете?",
+                                      reply_markup=download_buttons(pub))
+        return
+
     if action == "kdone":
         # «✅ Готово» под ключом: убираем и ключ, и подсказку — ключ в чате больше не нужен.
         ids = [query.message.message_id] + [int(i) for i in arg.split(",") if i.isdigit()]
@@ -2787,7 +2812,11 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("📤 Рассылаю…")
             await add_news(f"Обновление конфига — {text}")
             await resend_all(query, text)
-        elif arg == "yes":
+        elif arg.startswith("m:") and arg[2:] in MODES and text:
+            await query.edit_message_text(f"📤 Рассылаю: режим «{MODES[arg[2:]]}»…")
+            await add_news(f"Обновление режима «{MODES[arg[2:]]}» — {text}")
+            await resend_mode(query, text, arg[2:])
+        elif arg == "yes" or arg.startswith("m:"):
             await query.edit_message_text(f"Текст рассылки потерялся — нажмите «{ABTN_RESEND}» ещё раз.")
         else:
             await query.edit_message_text("Рассылка отменена.")
@@ -3213,16 +3242,53 @@ async def resend_confirm(update, ctx):
     peers = [p for p in state["peers"].values() if peer_active(p)]
     users = {p["user"] for p in peers}
     await update.message.reply_text(
-        f"Клиенты получат:\n\n{resend_message(text)}\n\n…и кнопку на каждый свой конфиг — файл придёт по нажатию.\n\n"
-        f"Разослать {len(peers)} активных конфигов {len(users)} клиентам? Сроки не меняются.",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📤 Да, разослать", callback_data="resend:yes"),
-            InlineKeyboardButton("Отмена", callback_data="resend:no"),
-        ]]))
+        f"Клиенты получат:\n\n{resend_message(text)}\n\n"
+        f"Активных конфигов: {len(peers)}, клиентов: {len(users)}. Сроки не меняются.\n\n"
+        "Что разослать?\n"
+        "• Режим — клиент ответит «Пользуюсь» / «Не пользуюсь» и получит конфиг этого режима.\n"
+        "• Все сразу — кнопка на каждый конфиг клиента, файл по нажатию.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(MODES["smart"], callback_data="resend:m:smart"),
+             InlineKeyboardButton(MODES["full"], callback_data="resend:m:full")],
+            [InlineKeyboardButton(MODES["game"], callback_data="resend:m:game"),
+             InlineKeyboardButton(MODES["pcgame"], callback_data="resend:m:pcgame")],
+            [InlineKeyboardButton("📦 Все сразу", callback_data="resend:yes")],
+            [InlineKeyboardButton("Отмена", callback_data="resend:no")],
+        ]))
 
 
 def resend_message(text):
     return f"🔄 Обновление конфига — {text}"
+
+
+def device_peers(state, uid):
+    """Действующие конфиги клиента для устройств (у роутеров режимов нет)."""
+    return {k: p for k, p in user_peers(state, uid).items() if peer_active(p) and p.get("kind") not in ROUTER_KINDS}
+
+
+async def resend_mode(query, text, mode):
+    """Рассылка одного режима: клиент отвечает, пользуется ли им, и получает конфиг этого режима."""
+    state = load_state()
+    users = {p["user"] for p in state["peers"].values()
+             if peer_active(p) and p.get("kind") not in ROUTER_KINDS}
+    buttons = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Пользуюсь", callback_data=f"rsy:{mode}"),
+        InlineKeyboardButton("❌ Не пользуюсь", callback_data="rsn:"),
+    ]])
+    sent, failed = 0, []
+    for uid in users:
+        try:
+            await USER_BOT.send_message(
+                int(uid), f"{resend_message(text)}\n\nОбновился режим «{MODES[mode]}». Вы им пользуетесь?",
+                reply_markup=buttons)
+            await asyncio.sleep(0.05)
+            sent += 1
+        except Exception:
+            failed.append(user_name(state, uid))
+    result = f"📤 Режим «{MODES[mode]}»: спросил {sent} из {len(users)} клиентов."
+    if failed:
+        result += "\nНе удалось (не нажимали /start или заблокировали бота): " + ", ".join(failed)[:3000]
+    await query.message.reply_text(result, reply_markup=ADMIN_KEYBOARD)
 
 
 async def resend_all(query, text):
