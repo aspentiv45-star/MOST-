@@ -71,6 +71,9 @@ VLESS_GAME_PORT = os.environ.get("VLESS_GAME_PORT", "2053")  # отдельны�
 # Через вход в Москве (relay.sh с t2096=2096), если он есть, — чтобы подписка обновлялась и при белых списках.
 SUB_PORT = int(os.environ.get("SUB_PORT", "2096"))
 SUB_HOST = os.environ.get("SUB_HOST", "")
+# Happ принимает только https: адрес из sub-https.sh (nginx на входе с сертификатом), например
+# https://80-87-192-62.sslip.io. Пусто — http://ХОСТ:SUB_PORT (подходит v2rayNG, но не Happ).
+SUB_BASE = os.environ.get("SUB_BASE", "").rstrip("/")
 XRAY_CONF = os.environ.get("XRAY_CONF", "/usr/local/etc/xray/config.json")
 # Со входом в РФ клиенты получают один конфиг через него: прямое подключение к
 # зарубежному серверу российские провайдеры часто режут. SEND_DIRECT=1 — выдавать и прямой.
@@ -670,6 +673,8 @@ def vless_links(peer):
 
 
 def sub_url(peer):
+    if SUB_BASE:
+        return f"{SUB_BASE}/sub/{peer['sub']}"
     host = SUB_HOST or (RELAY_HOST if RELAY_HOST and VLESS_RELAY_PORT else ENDPOINT_HOST)
     return f"http://{host}:{SUB_PORT}/sub/{peer['sub']}"
 
