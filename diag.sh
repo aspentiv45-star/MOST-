@@ -30,13 +30,46 @@ net.netfilter.nf_conntrack_udp_timeout = 60
 net.netfilter.nf_conntrack_udp_timeout_stream = 180
 EOF
   sysctl -q -p "$SYSCTL" 2>&1 | grep -v 'No such file' || true
-  # Новая очередь fq на внешнем интерфейсе — сразу, без перезагрузки.
+  # Кольцевые буферы сетевой карты — до максимума (иначе при всплесках карта сама отбрасывает пакеты)
+  # и очередь fq. Повторяется при каждой загрузке: most-speed.service.
+  command -v ethtool >/dev/null || apt-get install -y -qq ethtool >/dev/null 2>&1 || true
+  cat >/usr/local/sbin/most-speed <<'SPEED'
+#!/bin/bash
+# MOST: буферы сетевой карты и очередь fq (diag.sh fix)
+WAN="$(ip -4 route show default | awk '{print $5; exit}')"
+[[ -n "$WAN" ]] || exit 0
+if command -v ethtool >/dev/null; then
+  RX=$(ethtool -g "$WAN" 2>/dev/null | awk '/maximums/{m=1} m && /^RX:/{print $2; exit}')
+  TX=$(ethtool -g "$WAN" 2>/dev/null | awk '/maximums/{m=1} m && /^TX:/{print $2; exit}')
+  [[ $RX =~ ^[0-9]+$ ]] && ethtool -G "$WAN" rx "$RX" 2>/dev/null
+  [[ $TX =~ ^[0-9]+$ ]] && ethtool -G "$WAN" tx "$TX" 2>/dev/null
+fi
+tc qdisc replace dev "$WAN" root fq 2>/dev/null
+exit 0
+SPEED
+  chmod 755 /usr/local/sbin/most-speed
+  cat >/etc/systemd/system/most-speed.service <<'UNIT'
+[Unit]
+Description=MOST: буферы сетевой карты и очередь для скорости
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/most-speed
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable most-speed >/dev/null 2>&1
+  /usr/local/sbin/most-speed
   WAN="$(ip -4 route show default | awk '{print $5; exit}')"
-  [[ -n "$WAN" ]] && tc qdisc replace dev "$WAN" root fq 2>/dev/null || true
-  echo "Готово: настройки включены и сохранятся после перезагрузки ($SYSCTL)."
-  echo "Перезапустите VPN, чтобы новые буферы взял и он:"
-  if [[ -f /etc/most/bot.env ]]; then echo "  sudo systemctl restart awg-quick@awg0"; fi
-  echo "Затем снова: sudo bash diag.sh"
+  echo "Готово: настройки включены и сохранятся после перезагрузки."
+  echo "    буферы UDP: $(sysctl -n net.core.rmem_max) · TCP: $(sysctl -n net.ipv4.tcp_congestion_control) · очередь: $(tc qdisc show dev "$WAN" | head -1 | awk '{print $2}')"
+  ethtool -g "$WAN" 2>/dev/null | awk '/Current/{c=1} c && /^RX:/{print "    буфер сетевой карты RX:", $2}'
+  # Туннели пересоздают сокеты — так они берут новые буферы (клиенты переподключатся за пару секунд).
+  for i in awg0 awg1 wgr0; do
+    ip link show "$i" >/dev/null 2>&1 && systemctl restart "awg-quick@$i" && echo "    перезапущен $i"
+  done
+  echo "Проверьте снова: sudo bash diag.sh"
   exit 0
 fi
 
@@ -82,7 +115,10 @@ if [[ $MAIN == 1 ]] && command -v awg >/dev/null; then
 fi
 
 h "Скорость канала сервера (без VPN, Cloudflare)"
-down=$(curl -4 -s -o /dev/null -w '%{speed_download}' --max-time 20 'https://speed.cloudflare.com/__down?bytes=100000000')
+down=$(curl -4 -s -o /dev/null -w '%{speed_download}' --max-time 20 'https://speed.cloudflare.com/__down?bytes=25000000')
+# Cloudflare отдаёт не всем — тогда большой файл с другого сервера.
+[[ "${down%%.*}" -gt 0 ]] 2>/dev/null || down=$(curl -4 -s -o /dev/null -w '%{speed_download}' --max-time 20 \
+  'https://proof.ovh.net/files/100Mb.dat')
 echo "скачивание: $(awk -v b="${down:-0}" 'BEGIN{printf "%.0f", b*8/1e6}') Мбит/с"
 up=$(head -c 30000000 /dev/urandom | curl -4 -s -o /dev/null -w '%{speed_upload}' --max-time 20 --data-binary @- 'https://speed.cloudflare.com/__up')
 echo "отдача: $(awk -v b="${up:-0}" 'BEGIN{printf "%.0f", b*8/1e6}') Мбит/с"
