@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo
 
 import qrcode
 import split
+from telegram.error import NetworkError, TimedOut
 from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -4093,6 +4094,10 @@ async def on_error(update, ctx: ContextTypes.DEFAULT_TYPE):
     # Нажатие кнопки, на которое бот не успел ответить (был выключен или долго работал):
     # действие уже выполнено, а сама ошибка ничего не значит.
     if "query is too old" in str(ctx.error).lower() or "query id is invalid" in str(ctx.error).lower():
+        return
+    # Telegram не ответил вовремя (сбой связи на секунду) — библиотека сама переподключится; админу не пишем.
+    if isinstance(ctx.error, (TimedOut, NetworkError)):
+        log.warning("связь с Telegram: %r", ctx.error)
         return
     await report_error("Ошибка в боте", ctx.error)
     if isinstance(update, Update) and update.effective_chat:
