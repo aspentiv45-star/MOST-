@@ -96,6 +96,9 @@ MODES = {"full": "🛡 Обход белых списков", "smart": "⚡️ �
 # Discord и Telegram работают), но напрямую на основной сервер, минуя вход в России: пинг ниже.
 # Порт основного сервера для игрового режима: 443 принимает alt-port.sh (как QUIC его режут реже).
 GAME_PORT = os.environ.get("GAME_PORT", "443")
+# Порт «⚡️ Основного» (напрямую на основной сервер); по умолчанию тот же, что у игрового.
+# Другой порт на сервере открывает alt-port.sh (например alt-port.sh 443 8054).
+SMART_PORT = os.environ.get("SMART_PORT", GAME_PORT)
 # Сети Cloudflare (официальный список cloudflare.com/ips) — только для игрового режима: через него
 # работают серверы многих игр. Вместе с ними через VPN пойдут и сайты на Cloudflare.
 CLOUDFLARE_NETS = (
@@ -1020,7 +1023,7 @@ def peer_variants(peer):
     # Имя файла становится именем туннеля; на iOS оно не длиннее 15 символов.
     if mode_of(peer) in DIRECT_MODES and peer.get("kind") not in ROUTER_KINDS:
         # Игровой режим — напрямую на основной сервер, минуя вход в России.
-        return [(f"{file_base(peer)}.conf", ENDPOINT_HOST, GAME_PORT)]
+        return [(f"{file_base(peer)}.conf", ENDPOINT_HOST, SMART_PORT if mode_of(peer) == "smart" else GAME_PORT)]
     if RELAY_HOST:
         variants = [(f"{file_base(peer)}.conf", RELAY_HOST, None)]
         if SEND_DIRECT:
