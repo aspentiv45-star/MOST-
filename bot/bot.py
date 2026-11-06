@@ -2769,6 +2769,29 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await on_ticket_button(query, ctx, kind, tid)
         return
 
+    if action == "tun":
+        await query.answer()
+        if arg == "keep":
+            TUN_STATE["snooze"] = time.time() + 6 * 3600
+            await query.edit_message_text(f"{query.message.text}\n\n✅ Оставил как есть. Напомню не раньше чем через 6 часов.")
+            return
+        if arg == "swap" and TUN_PORT_RANGE:
+            head = query.message.text
+
+            async def progress(text):
+                try:
+                    await query.edit_message_text(f"{head}\n\n🔄 Подбираю порт…\n{text}")
+                except Exception:
+                    pass
+            try:
+                result = await pick_tunnel_port(progress)
+            except Exception as e:
+                result = f"Не получилось: {e}"
+            await query.edit_message_text(f"{head}\n\n{result}")
+            return
+        await query.edit_message_text("Подбор порта не настроен: нужен ru-ports.sh на российском сервере.")
+        return
+
     if action == "srv":
         await query.answer()
         text, _ = await server_status()
@@ -3036,6 +3059,119 @@ async def ping_host(host, count=3):
     return None
 
 
+# ---------- туннель для российских сайтов: потери и подбор порта ----------
+# На российском сервере ru-ports.sh направляет UDP-порты TUN_PORT_RANGE от основного сервера в туннель,
+# поэтому порт можно менять только здесь — у основного сервера, без доступа к российскому.
+TUN_CONF = os.path.join(os.path.dirname(CONF), "awg1.conf")
+TUN_PORT_RANGE = os.environ.get("TUN_PORT_RANGE", "")      # например 1024-9999 (после ru-ports.sh)
+TUN_ALERT_LOSS = float(os.environ.get("TUN_ALERT_LOSS", "5"))  # % потерь, при которых писать админу
+TUN_STATE = {"bad": 0, "alerted": False, "snooze": 0}
+
+
+async def tunnel_loss(count=30):
+    """(потери в %, средний пинг) по туннелю до российского сервера."""
+    rc, out = await sh("ping", "-c", str(count), "-i", "0.2", "-W", "2", "-q", "10.66.0.1",
+                       timeout=count * 0.2 + 10)
+    loss, avg = 100.0, None
+    for line in out.splitlines():
+        m = re.search(r"([\d.]+)% packet loss", line)
+        if m:
+            loss = float(m.group(1))
+        if "min/avg" in line:
+            avg = round(float(line.split("=")[1].split("/")[1]))
+    return loss, avg
+
+
+def tunnel_endpoint():
+    try:
+        with open(TUN_CONF) as f:
+            for line in f:
+                m = re.match(r"\s*Endpoint\s*=\s*([\d.]+):(\d+)", line)
+                if m:
+                    return m.group(1), int(m.group(2))
+    except FileNotFoundError:
+        pass
+    return None, None
+
+
+async def set_tunnel_port(port, persist):
+    """Переключает туннель на другой порт российского сервера сразу, без перезапуска."""
+    ip, _ = tunnel_endpoint()
+    rc, out = await sh("awg", "show", "awg1", "peers")
+    peer = out.split()[0] if out.split() else ""
+    if not ip or not peer:
+        raise RuntimeError("туннель awg1 не найден")
+    await sh("awg", "set", "awg1", "peer", peer, "endpoint", f"{ip}:{port}")
+    if persist:
+        with open(TUN_CONF) as f:
+            text = f.read()
+        text = re.sub(r"(?m)^(\s*Endpoint\s*=\s*[\d.]+:)\d+", rf"\g<1>{port}", text)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(TUN_CONF))
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, TUN_CONF)
+
+
+def tunnel_buttons():
+    rows = [[InlineKeyboardButton("✅ Оставить", callback_data="tun:keep")]]
+    if TUN_PORT_RANGE:
+        rows.insert(0, [InlineKeyboardButton("🔄 Подобрать другой порт", callback_data="tun:swap")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def pick_tunnel_port(progress):
+    """Пробует несколько портов и оставляет тот, где меньше всего потерь. progress(text) — ход проверки."""
+    lo, hi = (int(x) for x in TUN_PORT_RANGE.split("-"))
+    _, cur = tunnel_endpoint()
+    cur_loss, cur_avg = await tunnel_loss(20)
+    lines = [f"Сейчас порт {cur}: потери {cur_loss:.0f}%, пинг {cur_avg or '—'} мс"]
+    await progress("\n".join(lines))
+    best = (cur_loss, cur_avg or 9999, cur)
+    for port in random.sample([p for p in range(lo, hi + 1) if p != cur], 8):
+        await set_tunnel_port(port, persist=False)
+        await asyncio.sleep(4)  # новое рукопожатие
+        loss, avg = await tunnel_loss(20)
+        lines.append(f"порт {port}: потери {loss:.0f}%, пинг {avg or '—'} мс")
+        await progress("\n".join(lines))
+        if (loss, avg or 9999) < best[:2]:
+            best = (loss, avg or 9999, port)
+        if loss == 0 and avg:
+            break
+    await set_tunnel_port(best[2], persist=True)
+    TUN_STATE.update(bad=0, alerted=False)
+    head = (f"✅ Туннель переведён на порт {best[2]}: потери {best[0]:.0f}%." if best[2] != cur
+            else f"Лучше порта {cur} не нашлось — оставил его.")
+    return head + "\n\n" + "\n".join(lines)
+
+
+async def tunnel_loop():
+    """Раз в 10 минут: потери в туннеле для российских сайтов; 2 плохие проверки подряд — сообщение админу."""
+    while True:
+        await asyncio.sleep(600)
+        if not os.path.exists(TUN_CONF) or not await unit_active("awg-quick@awg1"):
+            continue
+        try:
+            loss, avg = await tunnel_loss(30)
+        except Exception:
+            continue
+        if loss >= TUN_ALERT_LOSS:
+            TUN_STATE["bad"] += 1
+            if TUN_STATE["bad"] >= 2 and not TUN_STATE["alerted"] and time.time() > TUN_STATE["snooze"]:
+                TUN_STATE["alerted"] = True
+                _, port = tunnel_endpoint()
+                hint = "" if TUN_PORT_RANGE else ("\n\nЧтобы бот сам подбирал порт: на российском сервере "
+                                                  "sudo bash ru-ports.sh 104.249.40.115, затем TUN_PORT_RANGE=1024-9999 "
+                                                  "в bot.env.")
+                await notify_admins(f"🟠 Туннель для российских сайтов теряет пакеты: {loss:.0f}% "
+                                    f"(пинг {avg or '—'} мс, порт {port}). Российские сайты могут грузиться плохо — "
+                                    f"скорее всего, порт начали резать.{hint}", tunnel_buttons())
+        else:
+            if TUN_STATE["alerted"]:
+                await notify_admins(f"🟢 Туннель для российских сайтов снова без потерь ({loss:.0f}%).")
+            TUN_STATE.update(bad=0, alerted=False)
+
+
 def _cpu_times():
     with open("/proc/stat") as f:
         v = [int(x) for x in f.readline().split()[1:]]
@@ -3101,6 +3237,9 @@ async def server_status():
                      "🔴 туннель для российских сайтов не работает (сторож пробует поднять)")
         if tping is None:
             problems.append("туннель для российских сайтов не работает — российские сайты идут из Нидерландов")
+        else:
+            loss, _ = await tunnel_loss(15)
+            lines.append(f"    потери в туннеле: {loss:.0f}% · порт {tunnel_endpoint()[1]}")
     if ADBLOCK_DNS:
         ok = await unit_active("dnsmasq")
         lines += ["", "🛡 Блокировка рекламы: " + ("работает" if ok else "🔴 не работает")]
@@ -4123,7 +4262,8 @@ async def amain():
             await app.start()
             await app.updater.start_polling()
         tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop()),
-                 asyncio.create_task(dynamic_loop()), asyncio.create_task(monitor_loop())]
+                 asyncio.create_task(dynamic_loop()), asyncio.create_task(monitor_loop()),
+                 asyncio.create_task(tunnel_loop())]
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
