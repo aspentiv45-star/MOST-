@@ -61,7 +61,8 @@ RELAY_HOST = os.environ.get("RELAY_HOST", "")
 # Порт входа в Москве для «🛡 Обхода белых списков»; пусто — тот же, что у AmneziaWG основного сервера.
 # Новый порт на входе: relay.sh --to IP:50967=8054,8055=8054,50968 (старый оставить для старых файлов).
 RELAY_PORT = os.environ.get("RELAY_PORT", "")
-# Постоянный порт устройства клиента (ListenPort в его конфиге); пусто — телефон берёт случайный.
+# Постоянный порт устройства клиента (ListenPort) — только в конфигах «🛡 Обхода» (через вход в Москве);
+# пусто — телефон берёт случайный. У «Основного» и «Игрового» порт всегда случайный.
 CLIENT_PORT = os.environ.get("CLIENT_PORT", "")
 # Со входом в РФ клиенты получают один конфиг через него: прямое подключение к
 # зарубежному серверу российские провайдеры часто режут. SEND_DIRECT=1 — выдавать и прямой.
@@ -645,7 +646,7 @@ def client_conf(peer, params, host, port=None):
         f"DNS = {ADBLOCK_DNS if ads_blocked(peer) else CLIENT_DNS}",
         "MTU = 1280",
     ]
-    if CLIENT_PORT and peer.get("kind") not in ROUTER_KINDS:
+    if CLIENT_PORT and peer.get("kind") not in ROUTER_KINDS and RELAY_HOST and host == RELAY_HOST:
         lines.append(f"ListenPort = {CLIENT_PORT}")
     lines += [f"{k} = {v}" for k, v in obfs_params(peer, params).items()]
     lines += [
