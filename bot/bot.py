@@ -58,6 +58,9 @@ ROUTER_CONF = os.environ.get("ROUTER_CONF", f"/etc/amnezia/amneziawg/{ROUTER_IFA
 STATE_FILE = os.environ.get("STATE_FILE", "/var/lib/most/state.json")
 ENDPOINT_HOST = os.environ["ENDPOINT_HOST"]
 RELAY_HOST = os.environ.get("RELAY_HOST", "")
+# Порт входа в Москве для «🛡 Обхода белых списков»; пусто — тот же, что у AmneziaWG основного сервера.
+# Новый порт на входе: relay.sh --to IP:50967=8054,8055=8054,50968 (старый оставить для старых файлов).
+RELAY_PORT = os.environ.get("RELAY_PORT", "")
 # Со входом в РФ клиенты получают один конфиг через него: прямое подключение к
 # зарубежному серверу российские провайдеры часто режут. SEND_DIRECT=1 — выдавать и прямой.
 SEND_DIRECT = os.environ.get("SEND_DIRECT", "0") == "1"
@@ -1026,7 +1029,8 @@ def peer_variants(peer):
         # Игровой режим — напрямую на основной сервер, минуя вход в России.
         return [(f"{file_base(peer)}.conf", ENDPOINT_HOST, SMART_PORT if mode_of(peer) == "smart" else GAME_PORT)]
     if RELAY_HOST:
-        variants = [(f"{file_base(peer)}.conf", RELAY_HOST, None)]
+        port = RELAY_PORT if RELAY_PORT and peer.get("kind") not in ROUTER_KINDS else None
+        variants = [(f"{file_base(peer)}.conf", RELAY_HOST, port)]
         if SEND_DIRECT:
             variants.append((f"{file_base(peer)}-nl.conf", ENDPOINT_HOST, None))
         return variants
