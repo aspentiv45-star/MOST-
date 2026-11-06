@@ -16,7 +16,8 @@ export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
 
 AWG_DIR=/etc/amnezia/amneziawg
 CONF="$AWG_DIR/awg1.conf"
-PORT=51821
+# Порт туннеля: до 9999 и не 443 — высокие порты и 443 (как QUIC) провайдеры режут чаще; на 8053 потерь почти нет.
+PORT=8053
 NL_IP=""
 PUBLIC_IP=""
 
