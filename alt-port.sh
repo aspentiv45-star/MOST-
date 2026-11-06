@@ -4,8 +4,9 @@
 # Нужен, когда UDP на обычный порт основного сервера режут по дороге из России, а на 443
 # (его использует QUIC — YouTube, Google) пропускают. На входе: relay.sh --to IP:ПОРТ=443.
 #
-#   sudo bash alt-port.sh 443     — принимать AmneziaWG ещё и на UDP 443
-#   sudo bash alt-port.sh off     — убрать
+#   sudo bash alt-port.sh 443        — принимать AmneziaWG ещё и на UDP 443
+#   sudo bash alt-port.sh 443 8054   — на нескольких портах (8054 — для входа: между серверами 443 режут)
+#   sudo bash alt-port.sh off        — убрать
 set -euo pipefail
 
 die() { echo "Ошибка: $*" >&2; exit 1; }
@@ -22,28 +23,32 @@ if [[ "${1:-}" == "off" ]]; then
   exit 0
 fi
 
-ALT="${1:-}"
-[[ "$ALT" =~ ^[0-9]+$ ]] || die "использование: sudo bash alt-port.sh 443 | off"
+ALTS="$*"
+[[ "$ALTS" =~ ^[0-9]+( [0-9]+)*$ ]] || die "использование: sudo bash alt-port.sh 443 [8054 ...] | off"
 AWG_PORT="$(awk -F' *= *' '$1=="ListenPort"{print $2; exit}' /etc/amnezia/amneziawg/awg0.conf)"
 [[ -n "$AWG_PORT" ]] || die "не нашёл порт AmneziaWG в /etc/amnezia/amneziawg/awg0.conf"
 
 # Снимаем правила прошлой установки и ручные правила с тем же действием.
 systemctl stop most-altport 2>/dev/null || true
-while iptables -t nat -D PREROUTING -p udp --dport "$ALT" -j REDIRECT --to-ports "$AWG_PORT" 2>/dev/null; do :; done
+for ALT in $ALTS; do
+  while iptables -t nat -D PREROUTING -p udp --dport "$ALT" -j REDIRECT --to-ports "$AWG_PORT" 2>/dev/null; do :; done
+done
 
 cat >"$RULES" <<EOF
 #!/bin/bash
-# MOST: UDP $ALT -> AmneziaWG ($AWG_PORT)
-case "\$1" in
-  up)   iptables -t nat -I PREROUTING -p udp --dport $ALT -j REDIRECT --to-ports $AWG_PORT ;;
-  down) while iptables -t nat -D PREROUTING -p udp --dport $ALT -j REDIRECT --to-ports $AWG_PORT 2>/dev/null; do :; done ;;
-esac
+# MOST: UDP $ALTS -> AmneziaWG ($AWG_PORT)
+for ALT in $ALTS; do
+  case "\$1" in
+    up)   iptables -t nat -I PREROUTING -p udp --dport \$ALT -j REDIRECT --to-ports $AWG_PORT ;;
+    down) while iptables -t nat -D PREROUTING -p udp --dport \$ALT -j REDIRECT --to-ports $AWG_PORT 2>/dev/null; do :; done ;;
+  esac
+done
 EOF
 chmod 755 "$RULES"
 
 cat >"$UNIT" <<EOF
 [Unit]
-Description=MOST: AmneziaWG также на UDP $ALT
+Description=MOST: AmneziaWG также на UDP $ALTS
 After=network-online.target
 Wants=network-online.target
 
@@ -61,8 +66,8 @@ systemctl enable most-altport >/dev/null 2>&1
 systemctl restart most-altport
 
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-  ufw allow "$ALT"/udp comment "MOST AmneziaWG alt" >/dev/null
+  for ALT in $ALTS; do ufw allow "$ALT"/udp comment "MOST AmneziaWG alt" >/dev/null; done
 fi
 
-echo "Готово: AmneziaWG принимает подключения и на UDP $ALT (сохранится после перезагрузки)."
-echo "На входе: sudo bash relay.sh --to ЭТОТ_IP:$AWG_PORT=$ALT,ПОРТ_РОУТЕРОВ"
+echo "Готово: AmneziaWG принимает подключения и на UDP $ALTS (сохранится после перезагрузки)."
+echo "На входе: sudo bash relay.sh --to ЭТОТ_IP:$AWG_PORT=ПОРТ,ПОРТ_РОУТЕРОВ (ПОРТ — один из: $ALTS)"
