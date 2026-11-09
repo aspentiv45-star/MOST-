@@ -1432,19 +1432,6 @@ async def request_access(user):
 
 REF_ASK = ("👥 Доступ по приглашению. Пришлите ID друга, который вас пригласил, — одним числом.\n"
            f"Он есть у друга в «{BTN_BALANCE}».")
-REF_ASK_BUTTONS = InlineKeyboardMarkup([[InlineKeyboardButton("✍️ Ввести ID друга", callback_data="refin:")]])
-
-
-async def mark_await_ref(uid, on=True):
-    """Ждём ID пригласившего — запоминаем на сервере, чтобы не потерять при перезапуске бота."""
-    async with lock:
-        state = load_state()
-        u = state["users"].setdefault(str(uid), {"name": str(uid)})
-        if on:
-            u["await_ref"] = 1
-        else:
-            u.pop("await_ref", None)
-        save_state(state)
 
 
 async def gate(update, ctx, state):
@@ -1460,8 +1447,7 @@ async def gate(update, ctx, state):
     u = state["users"].get(str(user.id), {})
     if not u.get("ref") and "requested" not in u and u.get("approved") is not False:
         ctx.user_data["await"] = "ref"
-        await mark_await_ref(user.id)
-        await update.message.reply_text(REF_ASK, reply_markup=REF_ASK_BUTTONS)
+        await update.message.reply_text(REF_ASK)
         return False
     await request_access(user)
     await update.message.reply_text(closed_text(state, user.id))
@@ -1469,26 +1455,13 @@ async def gate(update, ctx, state):
 
 
 def parse_ref(state, uid, text):
-    """ID пригласившего из текста или ссылки («ID 123», «ref_123», «123 456»); None — если такого клиента нет."""
-    rid = re.sub(r"\D", "", (text or "").strip())
-    if not rid or rid == str(uid) or rid not in state["users"]:
+    """ID пригласившего из текста или ссылки; None — если такого клиента нет."""
+    rid = re.sub(r"^ref_", "", (text or "").strip())
+    if not rid.isdigit() or rid == str(uid) or rid not in state["users"]:
         return None
     if not is_approved(state, rid) and not is_admin(rid):
         return None
     return rid
-
-
-def ref_error(state, uid, text):
-    """Почему ID не подошёл — понятным текстом."""
-    rid = re.sub(r"\D", "", text or "")
-    if not rid:
-        return "Пришлите ID числом, например 123456789."
-    if rid == str(uid):
-        return "Это ваш собственный ID. Пришлите ID друга, который вас пригласил."
-    if rid not in state["users"]:
-        return (f"Клиента с ID {rid} нет в боте. Проверьте число: друг видит свой ID в «{BTN_BALANCE}». "
-                "Другу нужно хотя бы раз открыть бота.")
-    return f"Клиент с ID {rid} ещё сам не получил доступ — пригласить вас пока не может."
 
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2339,13 +2312,6 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if action == "topa":
         await topup_screen(query.message, ctx, int(arg), query)
         return
-    if action == "refin":
-        ctx.user_data["await"] = "ref"
-        await mark_await_ref(uid)
-        await query.edit_message_text("✍️ Пришлите ID друга одним числом, например 123456789.\n"
-                                      f"Друг видит свой ID в «{BTN_BALANCE}».")
-        return
-
     if action == "refset":
         ctx.user_data["await"] = "ref_set"
         await query.edit_message_text("✏️ Пришлите ID друга, который вас пригласил, — одним числом.")
@@ -4580,10 +4546,6 @@ async def rename_peer(update, ctx, pub, label):
 async def user_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Свободный текст клиента: обращение, реквизиты для возврата или просто возврат в меню."""
     waiting = ctx.user_data.get("await") or ""
-    _st = load_state()
-    if (not waiting and _st["users"].get(str(update.effective_user.id), {}).get("await_ref")
-            and not is_approved(_st, update.effective_user.id)):
-        waiting = "ref"  # ждали ID пригласившего, а бот успел перезапуститься
     if waiting in ("ref", "ref_set"):
         text = update.message.text.strip()
         async with lock:
@@ -4592,13 +4554,11 @@ async def user_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             rid = parse_ref(state, update.effective_user.id, text)
             if rid:
                 u["ref"] = rid
-                u.pop("await_ref", None)
-            save_state(state)
+                save_state(state)
         if not rid:
-            await update.message.reply_text(ref_error(state, update.effective_user.id, text),
-                                            reply_markup=REF_ASK_BUTTONS if waiting == "ref" else None)
+            await update.message.reply_text("Такого клиента нет. Проверьте ID (одно число) и пришлите ещё раз.")
             return
-        ctx.user_data.pop("await", None)
+        ctx.user_data.pop("await")
         if waiting == "ref_set":
             await update.message.reply_text(f"✅ Записал: вас пригласил {user_name(state, rid)}. Когда оплатите VPN, "
                                             "друг получит зачёт.", reply_markup=KEYBOARD)
