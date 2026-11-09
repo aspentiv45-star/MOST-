@@ -212,7 +212,9 @@ BTN_NEWS = "🆕 Что нового"
 BTN_SUPPORT = "🆘 Нужна помощь"
 BTN_CLEAR = "🧹 Почистить чат"
 BTN_BALANCE = "💰 Баланс и друзья"
-KEYBOARD = ReplyKeyboardMarkup([[BTN_BUY], [BTN_LIST, BTN_HELP], [BTN_BALANCE, BTN_NEWS], [BTN_SUPPORT, BTN_CLEAR]],
+BTN_GIVEAWAY = "🎉 Розыгрыш"
+KEYBOARD = ReplyKeyboardMarkup([[BTN_BUY], [BTN_LIST, BTN_HELP], [BTN_BALANCE, BTN_NEWS], [BTN_GIVEAWAY, BTN_SUPPORT],
+                                [BTN_CLEAR]],
                                resize_keyboard=True)
 
 async def clear_chat(bot, chat_id, last_id):
@@ -3309,6 +3311,29 @@ async def gw_broadcast(gid):
     return len(msgs)
 
 
+async def giveaway_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Кнопка «🎉 Розыгрыш»: текущий розыгрыш (участвовать / напомнить) — и для тех, кто пришёл позже."""
+    state = load_state()
+    if not await gate(update, ctx, state):
+        return
+    uid = str(update.effective_user.id)
+    gid, g = gw_current(state)
+    if not g:
+        await update.message.reply_text("🎉 Сейчас розыгрышей нет. Когда появится новый — бот пришлёт объявление.")
+        return
+    status = ""
+    if uid in g["users"]:
+        status = "\n\n✅ Вы уже участвуете."
+    elif uid in g["remind"] and g["status"] == "soon":
+        status = "\n\n🔔 Напомню, когда начнётся."
+    m = await update.message.reply_text(gw_text(g) + status, reply_markup=gw_client_buttons(gid, g))
+    async with lock:  # чтобы в начале и в конце розыгрыша это сообщение тоже обновилось
+        state = load_state()
+        if gid in state["giveaways"]:
+            state["giveaways"][gid].setdefault("msgs", {})[uid] = m.message_id
+            save_state(state)
+
+
 async def gw_start(gid):
     """Розыгрыш начался: объявления превращаются в «Участвовать», ждавшим напоминания — отдельное сообщение."""
     async with lock:
@@ -4679,7 +4704,7 @@ async def user_menu_begin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def build_user_app():
     app = Application.builder().bot(ScreenBot(token=TOKEN)).build()
     # Кнопки меню и команды: выход из переписки по обращению и чистый чат (прошлый экран удаляется).
-    menu = filters.Text([BTN_BUY, BTN_LIST, BTN_HELP, BTN_NEWS, BTN_SUPPORT, BTN_CLEAR, BTN_BALANCE]) \
+    menu = filters.Text([BTN_BUY, BTN_LIST, BTN_HELP, BTN_NEWS, BTN_SUPPORT, BTN_CLEAR, BTN_BALANCE, BTN_GIVEAWAY]) \
         | filters.Command(["start", "help", "news"])
     app.add_handler(MessageHandler(menu, user_menu_begin), group=-1)
     app.add_handler(MessageHandler(menu, screen_end), group=1)
@@ -4690,6 +4715,7 @@ def build_user_app():
     app.add_handler(MessageHandler(filters.Text([BTN_HELP]), help_cmd))
     app.add_handler(MessageHandler(filters.Text([BTN_NEWS]), news_cmd))
     app.add_handler(MessageHandler(filters.Text([BTN_BALANCE]), balance_cmd))
+    app.add_handler(MessageHandler(filters.Text([BTN_GIVEAWAY]), giveaway_cmd))
     app.add_handler(CommandHandler("balance", balance_cmd))
     app.add_handler(CommandHandler("news", news_cmd))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_screenshot))
