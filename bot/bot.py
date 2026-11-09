@@ -376,6 +376,10 @@ def load_state():
     state.setdefault("news", [])  # история обновлений для «Что нового»: [{"date": ts, "text": ...}]
     # Опросы: {id: {"q", "opts", "votes": {uid: номер варианта}, "created", "closed"}}
     state.setdefault("polls", {})
+    # Розыгрыши: {id: {"winners", "days", "start", "end", "status": soon|running|done|cancelled,
+    #                  "users": [кто участвует], "remind": [кому напомнить], "msgs": {uid: id сообщения}, "won": []}}
+    state.setdefault("giveaways", {})
+    state.setdefault("next_giveaway", 1)
     state.setdefault("next_poll", 1)
     state.setdefault("settings", {})
     # VLESS убран: выданные подписки VLESS удаляем, за действующие возвращаем цену на баланс.
@@ -1926,7 +1930,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
     action, _, arg = query.data.partition(":")
-    await query.answer()
+    if action not in ("gwj", "gwr"):  # там ответ — всплывающим окном
+        await query.answer()
 
     if action == "close":
         try:
@@ -1959,6 +1964,37 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # Сначала экран конфига (с пометкой), потом файлы под ним.
             await show_card(query, pub, "✅ Отправил ниже 👇")
             await deliver_peer(query.message.chat_id, peer, how)
+        return
+
+    if action in ("gwj", "gwr"):
+        async with lock:
+            state = load_state()
+            g = state["giveaways"].get(arg)
+            if not g or g["status"] not in ("soon", "running"):
+                save_state(state)
+                g = None
+            else:
+                get_user(state, query.from_user)
+                key = "users" if action == "gwj" else "remind"
+                fresh = str(uid) not in g[key]
+                if fresh and (action == "gwr" or g["status"] == "running"):
+                    g[key].append(str(uid))
+                save_state(state)
+        if not g:
+            await query.answer("Розыгрыш уже закончился.", show_alert=True)
+            return
+        if action == "gwr":
+            await query.answer("🔔 Напомню, когда розыгрыш начнётся!" if fresh else "Уже напомню 👍", show_alert=True)
+            return
+        if g["status"] != "running":
+            await query.answer("Розыгрыш ещё не начался.", show_alert=True)
+            return
+        await query.answer("🎉 Вы участвуете! Итоги — " + fmt_date(g["end"]) if fresh else "Вы уже участвуете 👍",
+                           show_alert=True)
+        try:
+            await query.edit_message_text(gw_text(g), reply_markup=gw_client_buttons(arg, g))
+        except Exception:
+            pass
         return
 
     if action == "rsn":
@@ -2265,8 +2301,9 @@ ABTN_TICKETS = "📨 Жалобы"
 ABTN_POLL = "🗳 Опрос"
 ABTN_SERVERS = "🖥 Серверы"
 ABTN_FORECAST = "💸 Прогноз"
+ABTN_GIVEAWAY = "🎉 Розыгрыш"
 ADMIN_KEYBOARD = ReplyKeyboardMarkup([[ABTN_PAY, ABTN_TICKETS], [ABTN_USERS, ABTN_GIVE], [ABTN_STATS, ABTN_FORECAST],
-                                      [ABTN_RESEND, ABTN_NEWS], [ABTN_POLL, ABTN_SERVERS], [BTN_CLEAR]],
+                                      [ABTN_RESEND, ABTN_NEWS], [ABTN_POLL, ABTN_GIVEAWAY], [ABTN_SERVERS, BTN_CLEAR]],
                                      resize_keyboard=True)
 
 
@@ -2447,6 +2484,7 @@ async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{ABTN_GIVE} — начислить (или списать) деньги на баланс клиента по ID\n"
         f"{ABTN_STATS} — кто подключён и трафик\n"
         f"{ABTN_FORECAST} — ближайшие оплаты и сколько придёт, если все продлят\n"
+        f"{ABTN_GIVEAWAY} — розыгрыш дней VPN: победители, срок, досрочно завершить или отменить\n"
         f"{ABTN_RESEND} — отправить всем клиентам актуальные файлы их конфигов\n"
         f"{ABTN_NEWS} — написать всем клиентам, что нового (попадёт в «{BTN_NEWS}»)\n"
         f"{ABTN_TICKETS} — обращения клиентов: ответить, дать конфиг, вернуть деньги, отклонить\n\n"
@@ -2784,6 +2822,85 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await on_ticket_button(query, ctx, kind, tid)
         return
 
+    if action == "gwa":
+        await query.answer()
+        what, _, rest = arg.partition(":")
+        draft = ctx.user_data.setdefault("gw_draft", {})
+        back = [InlineKeyboardButton("⬅️ Назад", callback_data="gwa:show")]
+        if what == "new":
+            if gw_current(load_state())[1]:
+                text, buttons = gw_admin_screen(load_state())
+                await query.edit_message_text("Сначала завершите текущий розыгрыш.\n\n" + text, reply_markup=buttons)
+                return
+            ctx.user_data["gw_draft"] = {}
+            await query.edit_message_text("🎉 Новый розыгрыш. Сколько будет победителей?", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(str(n), callback_data=f"gwa:w:{n}") for n in GW_WINNERS], back]))
+        elif what == "w":
+            draft["winners"] = int(rest)
+            await query.edit_message_text(f"Победителей: {rest}. Сколько дней VPN получит каждый?",
+                                          reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(f"+{d} дн.", callback_data=f"gwa:d:{d}") for d in GW_DAYS], back]))
+        elif what == "d":
+            draft["days"] = int(rest)
+            await query.edit_message_text(f"Приз: +{rest} дней. Когда начать?", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(v, callback_data=f"gwa:s:{k}")] for k, v in GW_START.items()] + [back]))
+        elif what == "s":
+            draft["start_in"] = int(rest)
+            await query.edit_message_text(f"Начало: {GW_START[rest]}. Сколько будет идти?", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(v, callback_data=f"gwa:l:{k}") for k, v in GW_LENGTH.items()], back]))
+        elif what == "l":
+            draft["length"] = int(rest)
+            if not all(k in draft for k in ("winners", "days", "start_in")):
+                await query.edit_message_text("Черновик потерялся — начните заново.", reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("➕ Новый розыгрыш", callback_data="gwa:new")]]))
+                return
+            n = len(gw_clients(load_state()))
+            await query.edit_message_text(
+                f"Проверьте:\n🏆 победителей: {draft['winners']}\n🎁 приз: +{draft['days']} дней\n"
+                f"▶️ начало: {GW_START[str(draft['start_in'])]}\n⏱ идёт: {GW_LENGTH[rest]}\n\n"
+                f"Объявление получат {n} клиентов." + ("\nДо начала у них будет кнопка «🔔 Напомнить»."
+                                                       if draft["start_in"] else ""),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Запустить", callback_data="gwa:go"),
+                                                    InlineKeyboardButton("❌ Отмена", callback_data="gwa:show")]]))
+        elif what == "go":
+            if not all(k in draft for k in ("winners", "days", "start_in", "length")) or gw_current(load_state())[1]:
+                text, buttons = gw_admin_screen(load_state())
+                await query.edit_message_text(text, reply_markup=buttons)
+                return
+            now = int(time.time())
+            start = now + draft["start_in"] * 3600
+            async with lock:
+                state = load_state()
+                gid = str(state["next_giveaway"])
+                state["next_giveaway"] += 1
+                state["giveaways"][gid] = {
+                    "winners": draft["winners"], "days": draft["days"], "length": draft["length"],
+                    "start": start, "end": start + draft["length"] * 3600,
+                    "status": "running" if not draft["start_in"] else "soon",
+                    "users": [], "remind": [], "msgs": {}, "won": [], "created": now}
+                save_state(state)
+            ctx.user_data.pop("gw_draft", None)
+            await query.edit_message_text("📤 Рассылаю объявление…")
+            sent = await gw_broadcast(gid)
+            text, buttons = gw_admin_screen(load_state())
+            await query.edit_message_text(f"✅ Объявление получили {sent} клиентов.\n\n{text}", reply_markup=buttons)
+        elif what in ("start", "end", "cancel"):
+            if what == "start":
+                await gw_start(rest)
+                result = "▶️ Розыгрыш начался."
+            else:
+                await query.edit_message_text("⏳ Подвожу итоги…" if what == "end" else "⏳ Отменяю…")
+                result = await gw_finish(rest, cancel=what == "cancel") or "Розыгрыш уже завершён."
+            text, buttons = gw_admin_screen(load_state())
+            await query.edit_message_text(f"{result}\n\n{text}", reply_markup=buttons)
+        else:
+            text, buttons = gw_admin_screen(load_state())
+            try:
+                await query.edit_message_text(text, reply_markup=buttons)
+            except Exception:
+                pass
+        return
+
     if action in ("fc", "fce", "fcx"):
         await query.answer()
         if action == "fcx":
@@ -3066,6 +3183,201 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_caption(f"{query.message.caption}\n\n{result}")
     else:
         await query.edit_message_text(f"{query.message.text}\n\n{result}")
+
+
+# ---------- розыгрыши ----------
+
+GW_WINNERS = (1, 2, 3, 5, 10)
+GW_DAYS = (3, 7, 14, 30)
+GW_START = {"0": "сейчас", "1": "через 1 час", "3": "через 3 часа", "24": "через сутки"}
+GW_LENGTH = {"1": "1 час", "6": "6 часов", "24": "1 сутки", "72": "3 дня"}
+
+
+def gw_current(state):
+    """Идущий или объявленный розыгрыш (один за раз)."""
+    for gid, g in sorted(state["giveaways"].items(), key=lambda kv: int(kv[0]), reverse=True):
+        if g["status"] in ("soon", "running"):
+            return gid, g
+    return None, None
+
+
+def gw_clients(state):
+    """Кому рассылать: все клиенты бота, кроме админов и тех, кому отказали в доступе."""
+    return [uid for uid, u in state["users"].items() if not is_admin(uid) and u.get("approved") is not False]
+
+
+def gw_text(g):
+    prize = f"🎁 Приз: +{g['days']} дней VPN · победителей: {g['winners']}"
+    if g["status"] == "soon":
+        return (f"🎉 Скоро розыгрыш!\n{prize}\n\nНачало: {fmt_date(g['start'])}. "
+                "Нажмите «🔔 Напомнить» — бот напишет, когда можно будет участвовать.")
+    if g["status"] == "running":
+        return (f"🎉 Розыгрыш!\n{prize}\n\nИтоги: {fmt_date(g['end'])}. Участвуют: {len(g['users'])}.\n"
+                "Нажмите «🎉 Участвовать». Победителям дни добавятся к конфигу сами.")
+    if g["status"] == "done":
+        return f"🎉 Розыгрыш завершён.\n{prize}\nУчаствовали: {len(g['users'])}."
+    return "Розыгрыш отменён."
+
+
+def gw_client_buttons(gid, g):
+    if g["status"] == "soon":
+        return InlineKeyboardMarkup([[InlineKeyboardButton("🔔 Напомнить", callback_data=f"gwr:{gid}")]])
+    if g["status"] == "running":
+        return InlineKeyboardMarkup([[InlineKeyboardButton("🎉 Участвовать", callback_data=f"gwj:{gid}")]])
+    return None
+
+
+def gw_admin_screen(state):
+    gid, g = gw_current(state)
+    if not g:
+        return "🎉 Розыгрышей сейчас нет.", InlineKeyboardMarkup([[InlineKeyboardButton("➕ Новый розыгрыш",
+                                                                                     callback_data="gwa:new")]])
+    when = f"начнётся {fmt_date(g['start'])}" if g["status"] == "soon" else f"итоги {fmt_date(g['end'])}"
+    text = (f"🎉 Розыгрыш №{gid}: +{g['days']} дней, победителей {g['winners']}\n"
+            f"{'⏳ объявлен' if g['status'] == 'soon' else '🟢 идёт'} · {when}\n"
+            f"Участвуют: {len(g['users'])} · ждут напоминания: {len(g['remind'])}")
+    rows = [[InlineKeyboardButton("🔄 Обновить", callback_data="gwa:show")]]
+    if g["status"] == "soon":
+        rows.append([InlineKeyboardButton("▶️ Начать сейчас", callback_data=f"gwa:start:{gid}")])
+    else:
+        rows.append([InlineKeyboardButton("⏹ Завершить сейчас и выбрать победителей", callback_data=f"gwa:end:{gid}")])
+    rows.append([InlineKeyboardButton("❌ Отменить розыгрыш", callback_data=f"gwa:cancel:{gid}")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+@admin_only
+async def admin_giveaway(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text, buttons = gw_admin_screen(load_state())
+    await update.message.reply_text(text, reply_markup=buttons)
+
+
+async def gw_broadcast(gid):
+    """Объявление (или начало) розыгрыша всем клиентам; запоминаем сообщения, чтобы потом их обновить."""
+    state = load_state()
+    g = state["giveaways"][gid]
+    msgs = {}
+    for uid in gw_clients(state):
+        try:
+            m = await USER_BOT.send_message(int(uid), gw_text(g), reply_markup=gw_client_buttons(gid, g))
+            msgs[uid] = m.message_id
+        except Exception:
+            pass
+        await asyncio.sleep(0.05)
+    async with lock:
+        state = load_state()
+        state["giveaways"][gid]["msgs"] = msgs
+        save_state(state)
+    return len(msgs)
+
+
+async def gw_start(gid):
+    """Розыгрыш начался: объявления превращаются в «Участвовать», ждавшим напоминания — отдельное сообщение."""
+    async with lock:
+        state = load_state()
+        g = state["giveaways"].get(gid)
+        if not g or g["status"] != "soon":
+            return
+        g["status"] = "running"
+        g["start"] = int(time.time())
+        g["end"] = g["start"] + g["length"] * 3600
+        save_state(state)
+    for uid, mid in g.get("msgs", {}).items():
+        try:
+            await USER_BOT.edit_message_text(gw_text(g), chat_id=int(uid), message_id=mid,
+                                             reply_markup=gw_client_buttons(gid, g))
+        except Exception:
+            pass
+        await asyncio.sleep(0.03)
+    for uid in g["remind"]:
+        try:
+            await USER_BOT.send_message(int(uid), "🔔 Розыгрыш начался!\n\n" + gw_text(g),
+                                        reply_markup=gw_client_buttons(gid, g))
+        except Exception:
+            pass
+    if not g.get("msgs"):
+        await gw_broadcast(gid)
+
+
+async def gw_prize(uid, days):
+    """Добавить дни победителю: к конфигу, который кончается раньше всех; нет конфигов — новый."""
+    async with lock:
+        state = load_state()
+        old_state = json.loads(json.dumps(state))
+        mine = [(k, p) for k, p in user_peers(state, uid).items() if p.get("kind") not in ROUTER_KINDS] \
+            or list(user_peers(state, uid).items())
+        if mine:
+            pub, peer = min(mine, key=lambda kv: kv[1]["until"] if peer_active(kv[1]) else float("inf"))
+            peer["until"] = max(peer["until"], time.time()) + days * DAY
+            peer["warned"] = 0
+            apply_or_rollback(state, old_state)
+            save_state(state)
+            return f"{title(peer)} продлён на {days} дней, до {fmt_date(peer['until'])}"
+    await grant(int(uid), NEW, days, paid=False)
+    return f"новый конфиг на {days} дней (уже в чате)"
+
+
+async def gw_finish(gid, cancel=False):
+    """Итоги: случайные победители получают дни; всем участникам — результат."""
+    async with lock:
+        state = load_state()
+        g = state["giveaways"].get(gid)
+        if not g or g["status"] not in ("soon", "running"):
+            return None
+        g["status"] = "cancelled" if cancel else "done"
+        g["end"] = int(time.time())
+        if not cancel:
+            g["won"] = random.sample(g["users"], min(g["winners"], len(g["users"])))
+        save_state(state)
+    for uid, mid in g.get("msgs", {}).items():  # кнопки в объявлениях больше не нужны
+        try:
+            await USER_BOT.edit_message_reply_markup(chat_id=int(uid), message_id=mid, reply_markup=None)
+        except Exception:
+            pass
+        await asyncio.sleep(0.03)
+    if cancel:
+        for uid in set(g["users"]) | set(g["remind"]):
+            try:
+                await USER_BOT.send_message(int(uid), f"Розыгрыш +{g['days']} дней VPN отменён администратором.")
+            except Exception:
+                pass
+        return "❌ Розыгрыш отменён, участникам сообщено."
+    names = []
+    for uid in g["won"]:
+        try:
+            got = await gw_prize(uid, g["days"])
+            await USER_BOT.send_message(int(uid), f"🎉 Вы выиграли в розыгрыше! Подарок: {got}.", reply_markup=KEYBOARD)
+        except Exception:
+            got = "не удалось выдать — проверьте вручную"
+        names.append(f"• {user_name(state, uid)} (ID {uid}): {got}")
+    # Другим участникам — только имена победителей, без @ника и ID.
+    won_text = "\n".join("• " + user_name(state, uid).split(" (@")[0] for uid in g["won"]) or "—"
+    for uid in g["users"]:
+        if uid in g["won"]:
+            continue
+        try:
+            await USER_BOT.send_message(int(uid), f"🎉 Итоги розыгрыша +{g['days']} дней VPN.\nПобедители:\n{won_text}\n\n"
+                                                  "В этот раз не повезло — следите за новыми розыгрышами!")
+        except Exception:
+            pass
+        await asyncio.sleep(0.05)
+    return (f"🏁 Розыгрыш №{gid} завершён. Участвовали: {len(g['users'])}.\nПобедители:\n" +
+            ("\n".join(names) if names else "никто не участвовал"))
+
+
+async def giveaway_loop():
+    """Раз в 30 секунд: пора начать объявленный розыгрыш или подвести итоги идущего."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            gid, g = gw_current(load_state())
+            if not g:
+                continue
+            if g["status"] == "soon" and time.time() >= g["start"]:
+                await gw_start(gid)
+            elif g["status"] == "running" and time.time() >= g["end"]:
+                await notify_admins(await gw_finish(gid) or "")
+        except Exception as e:
+            await report_error("Ошибка розыгрыша", e)
 
 
 # ---------- прогноз оплат ----------
@@ -4354,7 +4666,7 @@ def build_user_app():
 def build_admin_app():
     app = Application.builder().bot(ScreenBot(token=ADMIN_TOKEN)).build()
     menu = filters.Text([ABTN_PAY, ABTN_USERS, ABTN_GIVE, ABTN_STATS, ABTN_RESEND, ABTN_NEWS, ABTN_TICKETS,
-                         ABTN_POLL, ABTN_SERVERS, ABTN_FORECAST, BTN_CLEAR]) | filters.Command(["start", "help"])
+                         ABTN_POLL, ABTN_SERVERS, ABTN_FORECAST, ABTN_GIVEAWAY, BTN_CLEAR]) | filters.Command(["start", "help"])
     admin_menu = filters.User(user_id=ADMINS, allow_empty=True) & menu
     app.add_handler(MessageHandler(admin_menu, screen_begin), group=-1)
     app.add_handler(MessageHandler(admin_menu, screen_end), group=1)
@@ -4373,6 +4685,7 @@ def build_admin_app():
     app.add_handler(MessageHandler(filters.Text([ABTN_POLL]), admin_poll))
     app.add_handler(MessageHandler(filters.Text([ABTN_SERVERS]), admin_servers))
     app.add_handler(MessageHandler(filters.Text([ABTN_FORECAST]), admin_forecast))
+    app.add_handler(MessageHandler(filters.Text([ABTN_GIVEAWAY]), admin_giveaway))
     app.add_handler(MessageHandler(filters.Text([ABTN_TICKETS]), admin_tickets))
     app.add_handler(MessageHandler(filters.Text([BTN_CLEAR]), admin_only(clear_and_start)))
     app.add_handler(CommandHandler("resend", admin_resend_ask))
@@ -4395,7 +4708,7 @@ async def amain():
             await app.updater.start_polling()
         tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop()),
                  asyncio.create_task(dynamic_loop()), asyncio.create_task(monitor_loop()),
-                 asyncio.create_task(tunnel_loop())]
+                 asyncio.create_task(tunnel_loop()), asyncio.create_task(giveaway_loop())]
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
