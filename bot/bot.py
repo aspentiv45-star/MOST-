@@ -270,10 +270,11 @@ GUIDES = {
     ),
     "ios": (
         "🍏 iPhone и iPad\n\n"
-        "1. Установите AmneziaWG из App Store.\n"
+        "1. Установите AmneziaVPN (или AmneziaWG) из App Store.\n"
         f"2. «{BTN_LIST}» → «⬇️ Скачать» → «iPhone».\n"
-        "3. Нажмите на файл → «Поделиться» → AmneziaWG → «Разрешить».\n"
-        "4. Включите переключатель."
+        "3. Нажмите на файл → «Поделиться» → AmneziaVPN → «Разрешить».\n"
+        "4. Нажмите кнопку подключения.\n\n"
+        "🎬 Видео-инструкция — кнопка ниже."
     ),
     "android": (
         "🤖 Android\n\n"
@@ -281,7 +282,8 @@ GUIDES = {
         f"2. «{BTN_LIST}» → «⬇️ Скачать» → «Android» → «🔑 Ключ».\n"
         "3. Нажмите на ключ (он скопируется) → в AmneziaVPN «➕» → «Вставить ключ».\n"
         "4. Нажмите «Подключиться».\n\n"
-        "Или файлом в AmneziaWG: «➕» → «Импорт из файла»."
+        "Или файлом в AmneziaWG: «➕» → «Импорт из файла».\n\n"
+        "🎬 Видео-инструкция — кнопка ниже."
     ),
     "pc": (
         "💻 Компьютер\n\n"
@@ -320,6 +322,8 @@ HELP_BUTTONS = InlineKeyboardMarkup([
     [InlineKeyboardButton("🛒 Что купить?", callback_data="help:what")],
     [InlineKeyboardButton("🍏 iPhone", callback_data="help:ios"),
      InlineKeyboardButton("🤖 Android", callback_data="help:android")],
+    [InlineKeyboardButton("🎬 Видео: iPhone", callback_data="vid:ios"),
+     InlineKeyboardButton("🎬 Видео: Android", callback_data="vid:android")],
     [InlineKeyboardButton("💻 Компьютер", callback_data="help:pc")],
     [InlineKeyboardButton("📡 Роутер (Keenetic, OpenWrt)", callback_data="help:router-awg")],
     [InlineKeyboardButton("🔀 Режимы: что это и как поменять", callback_data="help:mode")],
@@ -1217,6 +1221,40 @@ async def deliver_all_modes(chat_id, peer, fmt="amf"):
             "✅ Готово — убрать", callback_data="kdone:" + ",".join(map(str, ids)))]]))
 
 
+# Видео-инструкции (лежат рядом с bot.py в videos/). После первой отправки Telegram отдаёт file_id —
+# дальше шлём по нему, без повторной загрузки.
+VIDEO_DIR = os.environ.get("VIDEO_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "videos"))
+VIDEOS = {"ios": ("aspentiv-iphone.mp4", "🎬 Как подключить на iPhone"),
+          "android": ("aspentiv-android.mp4", "🎬 Как подключить на Android")}
+
+
+def video_button(which):
+    return InlineKeyboardButton("🎬 Видео-инструкция", callback_data=f"vid:{which}")
+
+
+async def send_guide_video(chat_id, which):
+    name, caption = VIDEOS[which]
+    markup = InlineKeyboardMarkup([[CLOSE_BUTTON]])
+    cached = load_state().get("video_ids", {}).get(which)
+    if cached:
+        try:
+            await USER_BOT.send_video(chat_id, video=cached, caption=caption, reply_markup=markup)
+            return True
+        except Exception:
+            pass  # file_id устарел — загрузим заново
+    path = os.path.join(VIDEO_DIR, name)
+    if not os.path.exists(path):
+        return False
+    with open(path, "rb") as f:
+        msg = await USER_BOT.send_video(chat_id, video=f, caption=caption, reply_markup=markup,
+                                        width=720, height=1280, supports_streaming=True)
+    async with lock:
+        state = load_state()
+        state.setdefault("video_ids", {})[which] = msg.video.file_id
+        save_state(state)
+    return True
+
+
 async def deliver_peer(chat_id, peer, how):
     """how: file — файл; qr — QR-код; key — ключ для AmneziaVPN; ios — файл и QR; all — всё (роутеры)."""
     if how in ALL_MODES_HINT and peer.get("kind") not in ROUTER_KINDS:
@@ -1239,8 +1277,11 @@ async def deliver_peer(chat_id, peer, how):
                 # Файл и QR пришли вместе (iPhone) — одна кнопка под QR убирает оба.
                 done = (InlineKeyboardButton("✅ Готово — убрать файл и QR", callback_data=f"kdone:{file_msg.message_id}")
                         if file_msg else CLOSE_BUTTON)
+                rows = [[done]]
+                if how == "ios" and peer.get("os") != "pc":
+                    rows.insert(0, [video_button("ios")])
                 await USER_BOT.send_photo(chat_id, photo=png, caption=f"QR-код: {filename}",
-                                          reply_markup=InlineKeyboardMarkup([[done]]))
+                                          reply_markup=InlineKeyboardMarkup(rows))
             elif how == "qr":
                 await USER_BOT.send_message(chat_id, f"{filename}: в этом режиме конфиг слишком длинный для QR-кода — "
                                                      "возьмите ключ или файл.",
@@ -1253,7 +1294,7 @@ async def deliver_peer(chat_id, peer, how):
             key_msg = await USER_BOT.send_message(chat_id, f"<code>{key}</code>", parse_mode="HTML")
             await USER_BOT.send_message(chat_id, "👆 Нажмите на ключ — он скопируется.\n"
                                                  "Затем AmneziaVPN → «➕» → «Вставить ключ» → «Подключиться».",
-                                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                                        reply_markup=InlineKeyboardMarkup([[video_button("android")], [InlineKeyboardButton(
                                             "✅ Готово", callback_data=f"kdone:{key_msg.message_id}")]]))
     if peer.get("kind") in ROUTER_KINDS:
         await USER_BOT.send_message(chat_id, router_help(peer, params))
@@ -2147,6 +2188,11 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             get_user(state, query.from_user)["op"] = op
             save_state(state)
         await show_download(query, pub, f"✅ Оператор: {OPERATORS[op]}.")
+        return
+
+    if action == "vid" and arg in VIDEOS:
+        if not await send_guide_video(query.message.chat_id, arg):
+            await query.message.reply_text("Видео-инструкция пока не загружена — напишите в «🆘 Нужна помощь».")
         return
 
     if action == "help":
