@@ -2648,7 +2648,8 @@ async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{ABTN_RESEND} — отправить всем клиентам актуальные файлы их конфигов\n"
         f"{ABTN_NEWS} — написать всем клиентам, что нового (попадёт в «{BTN_NEWS}»)\n"
         f"{ABTN_TICKETS} — обращения клиентов: ответить, дать конфиг, вернуть деньги, отклонить\n\n"
-        "Команды: /send ID текст — написать клиенту, /broadcast текст — написать всем.",
+        "Команды: /send ID текст — написать клиенту, /broadcast текст — написать всем."
+        + waiting_line(load_state()),
         reply_markup=ADMIN_KEYBOARD)
 
 
@@ -2705,6 +2706,44 @@ def user_groups(state):
     none = [uid for uid in state["users"] if uid not in with_peers and not is_admin(uid)]
     return {"act": active, "on": [kv for kv in active if is_online(hs.get(kv[0], 0))],
             "idle": [kv for kv in active if not is_online(hs.get(kv[0], 0))], "off": off, "none": none, "hs": hs}
+
+
+def waiting_line(state):
+    """Строка для приветствия админа: кто ждёт решения (пусто — никто)."""
+    waiting, pending = waiting_items(state)
+    if not waiting and not pending:
+        return "\n\n✅ Никто не ждёт решения."
+    parts = []
+    if waiting:
+        parts.append(f"запросов доступа: {len(waiting)}")
+    if pending:
+        parts.append(f"оплат на проверке: {len(pending)}")
+    return f"\n\n🙋 Ждут решения — {', '.join(parts)}. Показать: «⏳ Оплаты»."
+
+
+WAIT_REMIND_AFTER = 3600       # напомнить, если ждут дольше часа
+WAIT_REMIND_EVERY = 3 * 3600   # и не чаще раза в 3 часа
+
+
+async def waiting_loop():
+    """Напоминание админам: запрос доступа или оплата ждут решения дольше часа."""
+    last = 0
+    while True:
+        await asyncio.sleep(900)
+        try:
+            state = load_state()
+            waiting, pending = waiting_items(state)
+            now = time.time()
+            old = [u for u in waiting if now - state["users"][u].get("requested", now) > WAIT_REMIND_AFTER] + \
+                  [pid for pid, p in pending if now - p.get("created", now) > WAIT_REMIND_AFTER]
+            if not old or now - last < WAIT_REMIND_EVERY:
+                continue
+            last = now
+            await notify_admins(f"⏰ Ждут вашего решения больше часа: {len(waiting) + len(pending)}"
+                                f" ({len(waiting)} запросов доступа, {len(pending)} оплат).",
+                                InlineKeyboardMarkup([[InlineKeyboardButton("🙋 Показать", callback_data="usrw:")]]))
+        except Exception:
+            log.exception("напоминание о заявках не удалось")
 
 
 def waiting_items(state):
@@ -4980,7 +5019,8 @@ async def amain():
             await app.updater.start_polling()
         tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop()),
                  asyncio.create_task(dynamic_loop()), asyncio.create_task(monitor_loop()),
-                 asyncio.create_task(tunnel_loop()), asyncio.create_task(giveaway_loop())]
+                 asyncio.create_task(tunnel_loop()), asyncio.create_task(giveaway_loop()),
+                 asyncio.create_task(waiting_loop())]
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
