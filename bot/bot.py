@@ -2264,8 +2264,9 @@ ABTN_NEWS = "📢 Оповестить об обновлении"
 ABTN_TICKETS = "📨 Жалобы"
 ABTN_POLL = "🗳 Опрос"
 ABTN_SERVERS = "🖥 Серверы"
-ADMIN_KEYBOARD = ReplyKeyboardMarkup([[ABTN_PAY, ABTN_TICKETS], [ABTN_USERS, ABTN_GIVE], [ABTN_STATS, ABTN_RESEND],
-                                      [ABTN_NEWS, ABTN_POLL], [ABTN_SERVERS, BTN_CLEAR]],
+ABTN_FORECAST = "💸 Прогноз"
+ADMIN_KEYBOARD = ReplyKeyboardMarkup([[ABTN_PAY, ABTN_TICKETS], [ABTN_USERS, ABTN_GIVE], [ABTN_STATS, ABTN_FORECAST],
+                                      [ABTN_RESEND, ABTN_NEWS], [ABTN_POLL, ABTN_SERVERS], [BTN_CLEAR]],
                                      resize_keyboard=True)
 
 
@@ -2445,6 +2446,7 @@ async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{ABTN_USERS} — клиенты и их конфиги: продлить, отключить, удалить неоплаченные; кто ждёт решения\n"
         f"{ABTN_GIVE} — начислить (или списать) деньги на баланс клиента по ID\n"
         f"{ABTN_STATS} — кто подключён и трафик\n"
+        f"{ABTN_FORECAST} — ближайшие оплаты и сколько придёт, если все продлят\n"
         f"{ABTN_RESEND} — отправить всем клиентам актуальные файлы их конфигов\n"
         f"{ABTN_NEWS} — написать всем клиентам, что нового (попадёт в «{BTN_NEWS}»)\n"
         f"{ABTN_TICKETS} — обращения клиентов: ответить, дать конфиг, вернуть деньги, отклонить\n\n"
@@ -2782,6 +2784,29 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await on_ticket_button(query, ctx, kind, tid)
         return
 
+    if action in ("fc", "fce", "fcx"):
+        await query.answer()
+        if action == "fcx":
+            page, _, uid = arg.partition(":")
+            async with lock:
+                state = load_state()
+                skip = state["settings"].setdefault("forecast_skip", [])
+                if uid in skip:
+                    skip.remove(uid)
+                else:
+                    skip.append(uid)
+                save_state(state)
+            text, buttons = exclusions_screen(state, int(page or 0))
+        elif action == "fce":
+            text, buttons = exclusions_screen(load_state(), int(arg or 0))
+        else:
+            text, buttons = forecast_screen(load_state())
+        try:
+            await query.edit_message_text(text, reply_markup=buttons)
+        except Exception:
+            pass  # ничего не изменилось
+        return
+
     if action == "tun":
         await query.answer()
         if arg == "keep":
@@ -3041,6 +3066,95 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_caption(f"{query.message.caption}\n\n{result}")
     else:
         await query.edit_message_text(f"{query.message.text}\n\n{result}")
+
+
+# ---------- прогноз оплат ----------
+
+FORECAST_LIST = 15
+
+
+def expected_price(state, pub, p):
+    """Сколько клиент, скорее всего, заплатит за продление: как в прошлый раз (месяц или 3 месяца)."""
+    paid = [x for x in state["payments"].values() if x.get("target") == pub and x["status"] == "approved"]
+    if paid:
+        last = max(paid, key=lambda x: x.get("created", 0))
+        if last.get("price"):
+            return last["price"]
+    return price_for(state, pub)
+
+
+def forecast(state):
+    """Конфиги, за которые ждём оплату (по сроку), без исключённых клиентов: [(до, pub, peer, цена)]."""
+    skip = set(state["settings"].get("forecast_skip", []))
+    rows = []
+    for pub, p in state["peers"].items():
+        if is_admin(p["user"]) or p["user"] in skip or not p.get("until"):
+            continue
+        if p["until"] < time.time() - 3 * DAY:  # давно кончился — уже не ждём
+            continue
+        rows.append((p["until"], pub, p, expected_price(state, pub, p)))
+    return sorted(rows, key=lambda r: r[0])
+
+
+def forecast_screen(state):
+    rows = forecast(state)
+    now = time.time()
+    skip = state["settings"].get("forecast_skip", [])
+    in_days = lambda d: sum(r[3] for r in rows if r[0] <= now + d * DAY)
+    lines = ["💸 Прогноз оплат", ""]
+    if rows:
+        until, pub, p, price = rows[0]
+        when = "просрочен с " + fmt_date(until) if until < now else fmt_date(until)
+        lines += [f"Ближайшая: {when} — {user_name(state, p['user'])}, {title(p)}, {price} ₽", ""]
+    lines += [f"За 7 дней: {in_days(7)} ₽ · за 30 дней: {in_days(30)} ₽",
+              f"Если продлят все ({len(rows)} конфигов): {sum(r[3] for r in rows)} ₽"]
+    if skip:
+        lines.append(f"Не считаются: {len(skip)} клиентов (исключения)")
+    lines.append("")
+    for until, pub, p, price in rows[:FORECAST_LIST]:
+        mark = "🔴" if until < now else "🎁" if p.get("trial") and not p.get("paid") else "🟢"
+        lines.append(f"{mark} {fmt_day(until)} · {user_name(state, p['user'])[:25]} · {title(p)} · {price} ₽")
+    if len(rows) > FORECAST_LIST:
+        lines.append(f"…и ещё {len(rows) - FORECAST_LIST}")
+    if not rows:
+        lines.append("Ждать оплат пока не от кого.")
+    lines.append("\n🔴 срок уже кончился · 🎁 пробный период (первая оплата) · 🟢 действует")
+    return "\n".join(lines), InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🚫 Исключения ({len(skip)})", callback_data="fce:0")],
+        [InlineKeyboardButton("🔄 Обновить", callback_data="fc:")]])
+
+
+FORECAST_PAGE = 20
+
+
+def exclusions_screen(state, page=0):
+    """Клиенты с конфигами: нажатие — не считать в прогнозе / снова считать."""
+    skip = set(state["settings"].get("forecast_skip", []))
+    uids = sorted({p["user"] for p in state["peers"].values() if not is_admin(p["user"])},
+                  key=lambda u: (u not in skip, user_name(state, u).lower()))
+    pages = max(1, (len(uids) + FORECAST_PAGE - 1) // FORECAST_PAGE)
+    page = min(page, pages - 1)
+    part = uids[page * FORECAST_PAGE:(page + 1) * FORECAST_PAGE]
+    rows = [[InlineKeyboardButton(("🚫 " if u in skip else "✅ ") + user_name(state, u)[:28],
+                                  callback_data=f"fcx:{page}:{u}")] for u in part]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"fce:{page - 1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"fce:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ Прогноз", callback_data="fc:")])
+    text = ("🚫 Исключения из прогноза\n\n✅ — клиент считается, 🚫 — не считается (друзья, бесплатные, "
+            "«точно не продлит»). Нажмите на клиента, чтобы переключить."
+            + (f"\nСтр. {page + 1}/{pages}" if pages > 1 else ""))
+    return text, InlineKeyboardMarkup(rows)
+
+
+@admin_only
+async def admin_forecast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text, buttons = forecast_screen(load_state())
+    await update.message.reply_text(text, reply_markup=buttons)
 
 
 # ---------- состояние серверов ----------
@@ -4240,7 +4354,7 @@ def build_user_app():
 def build_admin_app():
     app = Application.builder().bot(ScreenBot(token=ADMIN_TOKEN)).build()
     menu = filters.Text([ABTN_PAY, ABTN_USERS, ABTN_GIVE, ABTN_STATS, ABTN_RESEND, ABTN_NEWS, ABTN_TICKETS,
-                         ABTN_POLL, ABTN_SERVERS, BTN_CLEAR]) | filters.Command(["start", "help"])
+                         ABTN_POLL, ABTN_SERVERS, ABTN_FORECAST, BTN_CLEAR]) | filters.Command(["start", "help"])
     admin_menu = filters.User(user_id=ADMINS, allow_empty=True) & menu
     app.add_handler(MessageHandler(admin_menu, screen_begin), group=-1)
     app.add_handler(MessageHandler(admin_menu, screen_end), group=1)
@@ -4258,6 +4372,7 @@ def build_admin_app():
     app.add_handler(MessageHandler(filters.Text([ABTN_NEWS]), admin_news_ask))
     app.add_handler(MessageHandler(filters.Text([ABTN_POLL]), admin_poll))
     app.add_handler(MessageHandler(filters.Text([ABTN_SERVERS]), admin_servers))
+    app.add_handler(MessageHandler(filters.Text([ABTN_FORECAST]), admin_forecast))
     app.add_handler(MessageHandler(filters.Text([ABTN_TICKETS]), admin_tickets))
     app.add_handler(MessageHandler(filters.Text([BTN_CLEAR]), admin_only(clear_and_start)))
     app.add_handler(CommandHandler("resend", admin_resend_ask))
