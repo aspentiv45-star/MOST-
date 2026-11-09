@@ -231,11 +231,10 @@ async def clear_chat(bot, chat_id, last_id):
 
 HELP_TEXT = (
     "Как подключиться:\n"
-    "1. Установите приложение AmneziaWG (App Store / Google Play).\n"
-    f"2. «{BTN_BUY}» → оплатите → пришлите скриншот перевода.\n"
+    "1. Установите AmneziaVPN (App Store / Google Play).\n"
+    f"2. «{BTN_BUY}» → оплатите с баланса.\n"
     "3. Бот пришлёт конфиг — добавьте его в приложение и включите.\n\n"
-    f"{PRICE} ₽ за {DAYS} дней на устройство, роутер — {ROUTER_PRICE} ₽.\n"
-    "👇 Инструкция для вашего устройства:"
+    "👇 Видео-инструкция для вашего телефона:"
 )
 
 # Подробные инструкции для клиентов — открываются кнопками из «❓ Как подключить».
@@ -319,12 +318,8 @@ GUIDES = {
 }
 
 HELP_BUTTONS = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🛒 Что купить?", callback_data="help:what")],
-    [InlineKeyboardButton("🍏 iPhone", callback_data="help:ios"),
-     InlineKeyboardButton("🤖 Android", callback_data="help:android")],
     [InlineKeyboardButton("🎬 Видео: iPhone", callback_data="vid:ios"),
      InlineKeyboardButton("🎬 Видео: Android", callback_data="vid:android")],
-    [InlineKeyboardButton("💻 Компьютер", callback_data="help:pc")],
     [InlineKeyboardButton("📡 Роутер (Keenetic, OpenWrt)", callback_data="help:router-awg")],
     [InlineKeyboardButton("🔀 Режимы: что это и как поменять", callback_data="help:mode")],
     [InlineKeyboardButton("🆘 Не работает", callback_data="help:trouble")],
@@ -1228,13 +1223,19 @@ VIDEOS = {"ios": ("aspentiv-iphone.mp4", "🎬 Как подключить на 
           "android": ("aspentiv-android.mp4", "🎬 Как подключить на Android")}
 
 
+def no_video(uid):
+    return bool(load_state()["users"].get(str(uid), {}).get("no_video"))
+
+
 def video_button(which):
     return InlineKeyboardButton("🎬 Видео-инструкция", callback_data=f"vid:{which}")
 
 
-async def send_guide_video(chat_id, which):
+async def send_guide_video(chat_id, which, auto=False):
+    """auto — само после скачивания конфига: с кнопкой «больше не показывать»."""
     name, caption = VIDEOS[which]
-    markup = InlineKeyboardMarkup([[CLOSE_BUTTON]])
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Понял, больше не показывать", callback_data="vidno:")]]
+                                  if auto else [[CLOSE_BUTTON]])
     cached = load_state().get("video_ids", {}).get(which)
     if cached:
         try:
@@ -1278,7 +1279,7 @@ async def deliver_peer(chat_id, peer, how):
                 done = (InlineKeyboardButton("✅ Готово — убрать файл и QR", callback_data=f"kdone:{file_msg.message_id}")
                         if file_msg else CLOSE_BUTTON)
                 rows = [[done]]
-                if how == "ios" and peer.get("os") != "pc":
+                if how == "ios" and peer.get("os") != "pc" and no_video(chat_id):
                     rows.insert(0, [video_button("ios")])
                 await USER_BOT.send_photo(chat_id, photo=png, caption=f"QR-код: {filename}",
                                           reply_markup=InlineKeyboardMarkup(rows))
@@ -1294,10 +1295,16 @@ async def deliver_peer(chat_id, peer, how):
             key_msg = await USER_BOT.send_message(chat_id, f"<code>{key}</code>", parse_mode="HTML")
             await USER_BOT.send_message(chat_id, "👆 Нажмите на ключ — он скопируется.\n"
                                                  "Затем AmneziaVPN → «➕» → «Вставить ключ» → «Подключиться».",
-                                        reply_markup=InlineKeyboardMarkup([[video_button("android")], [InlineKeyboardButton(
-                                            "✅ Готово", callback_data=f"kdone:{key_msg.message_id}")]]))
+                                        reply_markup=InlineKeyboardMarkup(
+                                            ([[video_button("android")]] if no_video(chat_id) else []) + [[InlineKeyboardButton(
+                                                "✅ Готово", callback_data=f"kdone:{key_msg.message_id}")]]))
     if peer.get("kind") in ROUTER_KINDS:
         await USER_BOT.send_message(chat_id, router_help(peer, params))
+    elif how in ("ios", "key", "file", "qr") and peer.get("os") != "pc" and not no_video(chat_id):
+        try:
+            await send_guide_video(chat_id, "ios" if how == "ios" else "android", auto=True)
+        except Exception:
+            log.exception("видео-инструкция не отправилась")
 
 
 def router_requirements(target):
@@ -2188,6 +2195,17 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             get_user(state, query.from_user)["op"] = op
             save_state(state)
         await show_download(query, pub, f"✅ Оператор: {OPERATORS[op]}.")
+        return
+
+    if action == "vidno":
+        async with lock:
+            state = load_state()
+            get_user(state, query.from_user)["no_video"] = True
+            save_state(state)
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.edit_message_reply_markup(None)
         return
 
     if action == "vid" and arg in VIDEOS:
