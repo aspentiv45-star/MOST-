@@ -1217,6 +1217,24 @@ async def deliver_all_modes(chat_id, peer, fmt="amf"):
             "✅ Готово — убрать", callback_data="kdone:" + ",".join(map(str, ids)))]]))
 
 
+# «🔌 Подключить»: открывает страницу приложения в магазине — установлено, там кнопка «Открыть», нет — «Установить».
+# Telegram не даёт кнопкам открывать приложения напрямую (только ссылки https), поэтому через магазин.
+STORE_AWG_IOS = "https://apps.apple.com/app/id6478942365"                       # AmneziaWG для iPhone
+STORE_AWG_ANDROID = "https://play.google.com/store/apps/details?id=org.amnezia.awg"
+STORE_VPN_ANDROID = "https://play.google.com/store/apps/details?id=org.amnezia.vpn"  # AmneziaVPN (ключи)
+
+
+def connect_button(peer, how):
+    """Кнопка «🔌 Подключить» под файлом/ключом; на компьютере и у роутеров её нет."""
+    if peer.get("kind") in ROUTER_KINDS or peer.get("os") == "pc":
+        return None
+    if how == "key":
+        return InlineKeyboardButton("🔌 Подключить — AmneziaVPN", url=STORE_VPN_ANDROID)
+    if how == "file" or peer.get("os") == "android":
+        return InlineKeyboardButton("🔌 Подключить — AmneziaWG", url=STORE_AWG_ANDROID)
+    return InlineKeyboardButton("🔌 Подключить — AmneziaWG", url=STORE_AWG_IOS)
+
+
 async def deliver_peer(chat_id, peer, how):
     """how: file — файл; qr — QR-код; key — ключ для AmneziaVPN; ios — файл и QR; all — всё (роутеры)."""
     if how in ALL_MODES_HINT and peer.get("kind") not in ROUTER_KINDS:
@@ -1228,9 +1246,12 @@ async def deliver_peer(chat_id, peer, how):
         text = client_conf(peer, params, host, port)
         file_msg = None
         if how in ("file", "ios", "all"):
+            connect = connect_button(peer, how)
             file_msg = await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()), filename=filename,
-                                                    caption=f"{filename} — {peer_status(peer)}",
-                                                    reply_markup=InlineKeyboardMarkup([[CLOSE_BUTTON]]))
+                                                    caption=f"{filename} — {peer_status(peer)}"
+                                                    + ("\n🔌 Нет приложения? «Подключить» — откроется магазин." if connect else ""),
+                                                    reply_markup=InlineKeyboardMarkup(
+                                                        ([[connect]] if connect else []) + [[CLOSE_BUTTON]]))
         if peer.get("kind") in ROUTER_KINDS:
             continue
         if how in ("qr", "ios"):
@@ -1251,10 +1272,12 @@ async def deliver_peer(chat_id, peer, how):
             # поэтому ключ — моноширинным текстом: одно нажатие на него копирует целиком.
             # Отдельным сообщением только ключ — его удобно скопировать целиком, без лишнего текста.
             key_msg = await USER_BOT.send_message(chat_id, f"<code>{key}</code>", parse_mode="HTML")
+            connect = connect_button(peer, "key")
             await USER_BOT.send_message(chat_id, "👆 Нажмите на ключ — он скопируется.\n"
-                                                 "Затем AmneziaVPN → «➕» → «Вставить ключ» → «Подключиться».",
-                                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-                                            "✅ Готово", callback_data=f"kdone:{key_msg.message_id}")]]))
+                                                 "Затем «🔌 Подключить» → «Открыть» (нет приложения — «Установить») → "
+                                                 "«➕» → «Вставить ключ» → «Подключиться».",
+                                        reply_markup=InlineKeyboardMarkup(([[connect]] if connect else []) + [[
+                                            InlineKeyboardButton("✅ Готово", callback_data=f"kdone:{key_msg.message_id}")]]))
     if peer.get("kind") in ROUTER_KINDS:
         await USER_BOT.send_message(chat_id, router_help(peer, params))
 
