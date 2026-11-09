@@ -1108,6 +1108,7 @@ async def send_peer(chat_id, peer):
         return
     await USER_BOT.send_message(chat_id, f"📥 {title(peer)}: на каком устройстве подключаете?",
                                 reply_markup=download_buttons(pub))
+    await maybe_video(chat_id, peer)
 
 
 async def remember_smart_snapshot(peer):
@@ -1227,6 +1228,24 @@ def no_video(uid):
     return bool(load_state()["users"].get(str(uid), {}).get("no_video"))
 
 
+RECENT_VIDEO = {}  # chat -> (какое видео, когда) — не присылать одно и то же дважды подряд
+
+
+async def maybe_video(chat_id, peer, which=None):
+    """Видео-инструкция при «⬇️ Скачать»: по устройству конфига (или выбранному); один раз за пару минут."""
+    which = which or {"ios": "ios", "android": "android"}.get(peer.get("os"))
+    if not which or peer.get("kind") in ROUTER_KINDS or no_video(chat_id):
+        return
+    last = RECENT_VIDEO.get(chat_id)
+    if last and last[0] == which and time.time() - last[1] < 120:
+        return
+    RECENT_VIDEO[chat_id] = (which, time.time())
+    try:
+        await send_guide_video(chat_id, which, auto=True)
+    except Exception:
+        log.exception("видео-инструкция не отправилась")
+
+
 def video_button(which):
     return InlineKeyboardButton("🎬 Видео-инструкция", callback_data=f"vid:{which}")
 
@@ -1300,11 +1319,7 @@ async def deliver_peer(chat_id, peer, how):
                                                 "✅ Готово", callback_data=f"kdone:{key_msg.message_id}")]]))
     if peer.get("kind") in ROUTER_KINDS:
         await USER_BOT.send_message(chat_id, router_help(peer, params))
-    elif how in ("ios", "key", "file", "qr") and peer.get("os") != "pc" and not no_video(chat_id):
-        try:
-            await send_guide_video(chat_id, "ios" if how == "ios" else "android", auto=True)
-        except Exception:
-            log.exception("видео-инструкция не отправилась")
+
 
 
 def router_requirements(target):
@@ -2004,6 +2019,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                           "🔑 Ключ — для AmneziaVPN, проще всего.\n"
                                           "📄 Файл — для AmneziaWG.",
                                           reply_markup=android_buttons(pub))
+            await maybe_video(query.message.chat_id, peer, "android")
         elif how == "allm":
             await query.edit_message_text(f"📦 {title(peer)}: все режимы сразу. Как прислать?",
                                           reply_markup=all_modes_buttons(pub))
@@ -2014,6 +2030,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # Сначала экран конфига (с пометкой), потом файлы под ним.
             await show_card(query, pub, "✅ Отправил ниже 👇")
             await deliver_peer(query.message.chat_id, peer, how)
+            if how == "ios" and peer.get("os") != "pc":
+                await maybe_video(query.message.chat_id, peer, "ios")
         return
 
     if action == "gwp":
@@ -2352,6 +2370,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_text(f"📥 {title(peer)}: на каком устройстве подключаете?",
                                       reply_markup=download_buttons(arg))
+        await maybe_video(query.message.chat_id, peer)
     elif action == "del":
         await query.edit_message_text(
             f"Удалить {title(peer)}? Оплаченные дни не вернутся.",
