@@ -26,7 +26,7 @@ if [[ ! -f "$ENV" ]]; then
   cat >"$ENV" <<'EOF'
 # Данные для сайта. Заполните все строки и снова запустите: sudo bash site-setup.sh
 DOMAIN=most-vpn.ru
-BRAND=MOST VPN
+BRAND=aspentiv VPN
 # Как в документах: «ИП Иванов Иван Иванович»
 NAME=ИП Фамилия Имя Отчество
 INN=000000000000

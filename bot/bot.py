@@ -1024,7 +1024,7 @@ def vpn_key(peer, params, host, port, conf_text):
                                 "last_config": json.dumps(inner, ensure_ascii=False, separators=(",", ":")),
                                 "port": str(port), "protocol_version": "2", "transport_proto": "udp"},
                         "container": "amnezia-awg"}],
-        "defaultContainer": "amnezia-awg", "description": f"MOST {title(peer)}",
+        "defaultContainer": "amnezia-awg", "description": f"aspentiv {title(peer)}",
         "dns1": dns[0], "dns2": dns[1] if len(dns) > 1 else dns[0], "hostName": host,
     }
     raw = json.dumps(outer, ensure_ascii=False, separators=(",", ":")).encode()
@@ -1491,7 +1491,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mine = user_peers(state, update.effective_user.id)
     active = sum(1 for p in mine.values() if peer_active(p))
     await update.message.reply_text(
-        f"Привет! Это VPN MOST.\n{PRICE} ₽ за {DAYS} дней на устройство, 3 месяца — {PRICE3} ₽. "
+        f"Привет! Это aspentivVPN.\n{PRICE} ₽ за {DAYS} дней на устройство, 3 месяца — {PRICE3} ₽. "
         f"Роутер — {ROUTER_PRICE} ₽.\n\n"
         + (f"Ваших конфигов: {len(mine)}, активных: {active}. Подробнее — «{BTN_LIST}»." if mine
            else f"🎁 Попробуйте бесплатно {TRIAL_DAYS} дня: «{BTN_BUY}» → «Попробовать бесплатно»."
@@ -2636,7 +2636,7 @@ async def take(pub):
 @admin_only
 async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Админ-панель MOST.\n\n"
+        "Админ-панель aspentiv.\n\n"
         "Скриншоты оплат приходят сюда сами — с кнопками «Одобрить» / «Отклонить». "
         "После одобрения клиент сразу получает новый конфиг или продление.\n\n"
         f"{ABTN_PAY} — неразобранные оплаты и запросы доступа\n"
