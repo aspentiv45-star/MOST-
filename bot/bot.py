@@ -2706,6 +2706,26 @@ async def give_money(uid, amount):
 @admin_only
 async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     waiting = ctx.user_data.pop("await", None)
+    if waiting in ("gw_winners", "gw_days"):
+        text = update.message.text.strip()
+        hi = 100 if waiting == "gw_winners" else 365
+        if not text.isdigit() or not 1 <= int(text) <= hi:
+            ctx.user_data["await"] = waiting
+            await update.message.reply_text(f"Нужно число от 1 до {hi}.")
+            return
+        draft = ctx.user_data.setdefault("gw_draft", {})
+        draft["winners" if waiting == "gw_winners" else "days"] = int(text)
+        screen = gw_days_step(text) if waiting == "gw_winners" else gw_start_step(text)
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        chat, mid = ctx.user_data.pop("gw_msg", (None, None))
+        try:
+            await ctx.bot.edit_message_text(screen[0], chat_id=chat, message_id=mid, reply_markup=screen[1])
+        except Exception:
+            await update.message.reply_text(screen[0], reply_markup=screen[1])
+        return
     if waiting and waiting.startswith(("tk_reply:", "tk_give:", "tk_spam:")):
         await admin_ticket_text(update, ctx, waiting)
         return
@@ -2834,16 +2854,22 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 return
             ctx.user_data["gw_draft"] = {}
             await query.edit_message_text("🎉 Новый розыгрыш. Сколько будет победителей?", reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(str(n), callback_data=f"gwa:w:{n}") for n in GW_WINNERS], back]))
+                [[InlineKeyboardButton(str(n), callback_data=f"gwa:w:{n}") for n in GW_WINNERS],
+                 [InlineKeyboardButton("✏️ Своё число", callback_data="gwa:wc")], back]))
+        elif what in ("wc", "dc"):
+            ctx.user_data["await"] = "gw_winners" if what == "wc" else "gw_days"
+            ctx.user_data["gw_msg"] = (query.message.chat_id, query.message.message_id)
+            await query.edit_message_text("✏️ Напишите число победителей (1–100)." if what == "wc" else
+                                          "✏️ Напишите, сколько дней получит каждый победитель (1–365).",
+                                          reply_markup=InlineKeyboardMarkup([back]))
         elif what == "w":
             draft["winners"] = int(rest)
-            await query.edit_message_text(f"Победителей: {rest}. Сколько дней VPN получит каждый?",
-                                          reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(f"+{d} дн.", callback_data=f"gwa:d:{d}") for d in GW_DAYS], back]))
+            text, buttons = gw_days_step(rest)
+            await query.edit_message_text(text, reply_markup=buttons)
         elif what == "d":
             draft["days"] = int(rest)
-            await query.edit_message_text(f"Приз: +{rest} дней. Когда начать?", reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(v, callback_data=f"gwa:s:{k}")] for k, v in GW_START.items()] + [back]))
+            text, buttons = gw_start_step(rest)
+            await query.edit_message_text(text, reply_markup=buttons)
         elif what == "s":
             draft["start_in"] = int(rest)
             await query.edit_message_text(f"Начало: {GW_START[rest]}. Сколько будет идти?", reply_markup=InlineKeyboardMarkup(
@@ -3191,6 +3217,19 @@ GW_WINNERS = (1, 2, 3, 5, 10)
 GW_DAYS = (3, 7, 14, 30)
 GW_START = {"0": "сейчас", "1": "через 1 час", "3": "через 3 часа", "24": "через сутки"}
 GW_LENGTH = {"1": "1 час", "6": "6 часов", "24": "1 сутки", "72": "3 дня"}
+
+
+def gw_days_step(winners):
+    back = [InlineKeyboardButton("⬅️ Назад", callback_data="gwa:show")]
+    return (f"Победителей: {winners}. Сколько дней VPN получит каждый?", InlineKeyboardMarkup(
+        [[InlineKeyboardButton(f"+{d} дн.", callback_data=f"gwa:d:{d}") for d in GW_DAYS],
+         [InlineKeyboardButton("✏️ Своё число", callback_data="gwa:dc")], back]))
+
+
+def gw_start_step(days):
+    back = [InlineKeyboardButton("⬅️ Назад", callback_data="gwa:show")]
+    return (f"Приз: +{days} дней. Когда начать?", InlineKeyboardMarkup(
+        [[InlineKeyboardButton(v, callback_data=f"gwa:s:{k}")] for k, v in GW_START.items()] + [back]))
 
 
 def gw_current(state):
