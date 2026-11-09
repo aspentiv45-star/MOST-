@@ -1968,6 +1968,27 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await deliver_peer(query.message.chat_id, peer, how)
         return
 
+    if action == "gwp":
+        # Победитель выбрал, какой конфиг продлить призом.
+        gid, _, pub = arg.partition(":")
+        async with lock:
+            state = load_state()
+            g = state["giveaways"].get(gid, {})
+            days = g.get("pending", {}).get(str(uid))
+            peer = state["peers"].get(pub)
+            if days and peer and peer["user"] == str(uid):
+                old_state = json.loads(json.dumps(state))
+                got = gw_extend(state, pub, days)
+                g["pending"].pop(str(uid))
+                apply_or_rollback(state, old_state)
+                save_state(state)
+            else:
+                got = None
+        await query.edit_message_text(f"🎉 Готово: {got}." if got else "Приз уже получен.")
+        if got:
+            await notify_admins(f"🎉 Розыгрыш №{gid}, приз {user_name(state, uid)}: {got}.")
+        return
+
     if action in ("gwj", "gwr"):
         async with lock:
             state = load_state()
@@ -3362,22 +3383,33 @@ async def gw_start(gid):
         await gw_broadcast(gid)
 
 
-async def gw_prize(uid, days):
-    """Добавить дни победителю: к конфигу, который кончается раньше всех; нет конфигов — новый."""
+def gw_extend(state, pub, days):
+    peer = state["peers"][pub]
+    peer["until"] = max(peer["until"], time.time()) + days * DAY
+    peer["warned"] = 0
+    return f"{title(peer)} продлён на {days} дней, до {fmt_date(peer['until'])}"
+
+
+async def gw_prize(gid, uid, days):
+    """Приз победителю. Один конфиг — дни сразу к нему; нет конфигов — новый конфиг;
+    несколько — победитель сам выбирает кнопкой (приз ждёт в «pending»). Возвращает (итог, кнопки)."""
     async with lock:
         state = load_state()
-        old_state = json.loads(json.dumps(state))
-        mine = [(k, p) for k, p in user_peers(state, uid).items() if p.get("kind") not in ROUTER_KINDS] \
-            or list(user_peers(state, uid).items())
-        if mine:
-            pub, peer = min(mine, key=lambda kv: kv[1]["until"] if peer_active(kv[1]) else float("inf"))
-            peer["until"] = max(peer["until"], time.time()) + days * DAY
-            peer["warned"] = 0
+        mine = user_peers(state, uid)
+        if len(mine) == 1:
+            old_state = json.loads(json.dumps(state))
+            got = gw_extend(state, next(iter(mine)), days)
             apply_or_rollback(state, old_state)
             save_state(state)
-            return f"{title(peer)} продлён на {days} дней, до {fmt_date(peer['until'])}"
+            return got, None
+        if mine:
+            state["giveaways"][gid].setdefault("pending", {})[uid] = days
+            save_state(state)
+            rows = [[InlineKeyboardButton(f"{'📡' if p.get('kind') in ROUTER_KINDS else '📱'} {title(p)} — {peer_status(p)}"[:60],
+                                          callback_data=f"gwp:{gid}:{k}")] for k, p in mine.items()]
+            return "выберите конфиг, к которому добавить дни 👇", InlineKeyboardMarkup(rows)
     await grant(int(uid), NEW, days, paid=False)
-    return f"новый конфиг на {days} дней (уже в чате)"
+    return f"новый конфиг на {days} дней (уже в чате)", None
 
 
 async def gw_finish(gid, cancel=False):
@@ -3408,8 +3440,12 @@ async def gw_finish(gid, cancel=False):
     names = []
     for uid in g["won"]:
         try:
-            got = await gw_prize(uid, g["days"])
-            await USER_BOT.send_message(int(uid), f"🎉 Вы выиграли в розыгрыше! Подарок: {got}.", reply_markup=KEYBOARD)
+            got, buttons = await gw_prize(gid, uid, g["days"])
+            await USER_BOT.send_message(int(uid), f"🎉 Вы выиграли в розыгрыше +{g['days']} дней VPN! "
+                                                  f"{'Подарок: ' + got + '.' if not buttons else got[0].upper() + got[1:]}",
+                                        reply_markup=buttons or KEYBOARD)
+            if buttons:
+                got = "ждёт, пока победитель выберет конфиг"
         except Exception:
             got = "не удалось выдать — проверьте вручную"
         names.append(f"• {user_name(state, uid)} (ID {uid}): {got}")
