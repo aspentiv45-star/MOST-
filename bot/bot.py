@@ -1255,22 +1255,25 @@ async def send_guide_video(chat_id, which, auto=False):
     name, caption = VIDEOS[which]
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Понял, больше не показывать", callback_data="vidno:")]]
                                   if auto else [[CLOSE_BUTTON]])
+    path = os.path.join(VIDEO_DIR, name)
+    size = os.path.getsize(path) if os.path.exists(path) else 0
     cached = load_state().get("video_ids", {}).get(which)
+    # Видео заменили (другой размер файла) — загружаем заново, старый file_id не годится.
+    cached = cached.get("id") if isinstance(cached, dict) and cached.get("size") == size else None
     if cached:
         try:
             await USER_BOT.send_video(chat_id, video=cached, caption=caption, reply_markup=markup)
             return True
         except Exception:
             pass  # file_id устарел — загрузим заново
-    path = os.path.join(VIDEO_DIR, name)
-    if not os.path.exists(path):
+    if not size:
         return False
     with open(path, "rb") as f:
         msg = await USER_BOT.send_video(chat_id, video=f, caption=caption, reply_markup=markup,
                                         width=720, height=1280, supports_streaming=True)
     async with lock:
         state = load_state()
-        state.setdefault("video_ids", {})[which] = msg.video.file_id
+        state.setdefault("video_ids", {})[which] = {"id": msg.video.file_id, "size": size}
         save_state(state)
     return True
 
