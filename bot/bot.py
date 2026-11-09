@@ -437,6 +437,20 @@ def closed_text(state, uid):
     return "Доступ по приглашению. Запрос отправлен администратору — бот напишет, когда вас пустят."
 
 
+FOREVER = 4102444800  # 01.01.2100 — «навсегда»
+
+
+def blocked_until(state, uid):
+    """До какого времени клиент заблокирован (0 — не заблокирован)."""
+    until = state["users"].get(str(uid), {}).get("blocked_until", 0)
+    return until if until > time.time() else 0
+
+
+def blocked_text(until):
+    return ("🚫 Ваш доступ к VPN заблокирован администратором"
+            + ("." if until >= FOREVER else f" до {fmt_date(until)}.") + " VPN сейчас не работает.")
+
+
 def peer_active(peer):
     return is_admin(peer["user"]) or peer["until"] > time.time()
 
@@ -504,7 +518,7 @@ def write_server_conf(state):
     for iface, conf in ifaces:
         out = interface_section(conf)
         for pub, p in state["peers"].items():
-            if peer_active(p) and peer_iface(p)[0] == iface:
+            if peer_active(p) and not blocked_until(state, p["user"]) and peer_iface(p)[0] == iface:
                 out += ["", "[Peer]", f"# {p['user']} {p['name']}", f"PublicKey = {pub}", f"AllowedIPs = {p['ip']}/32"]
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(conf))
         with os.fdopen(fd, "w") as f:
@@ -1424,6 +1438,10 @@ async def gate(update, ctx, state):
     """Пускает дальше, только если доступ открыт. Новичка сначала спрашивает, кто его пригласил,
     и только потом отправляет запрос администратору."""
     user = update.effective_user
+    until = blocked_until(state, user.id)
+    if until:
+        await update.message.reply_text(blocked_text(until))
+        return False
     if is_approved(state, user.id):
         return True
     u = state["users"].get(str(user.id), {})
@@ -1998,6 +2016,10 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
     action, _, arg = query.data.partition(":")
+    until = blocked_until(load_state(), uid)
+    if until and action not in ("close", "kdone"):
+        await query.answer(blocked_text(until), show_alert=True)
+        return
     if action not in ("gwj", "gwr"):  # там ответ — всплывающим окном
         await query.answer()
 
@@ -2443,13 +2465,37 @@ def user_buttons(uid):
     back = [InlineKeyboardButton("⬅️ К списку", callback_data="usrb:")]
     if is_admin(uid):
         return InlineKeyboardMarkup([[copy], back])
-    return InlineKeyboardMarkup([[
+    state = load_state()
+    rows = [[
         InlineKeyboardButton("➕ Продлить", callback_data=f"uact:ext:{uid}"),
         InlineKeyboardButton("⛔️ Отключить", callback_data=f"uact:take:{uid}"),
     ], [
         InlineKeyboardButton("🏓 Пинг", callback_data=f"uact:png:{uid}"),
         InlineKeyboardButton("💰 Деньги", callback_data=f"money:{uid}"),
-    ], [copy], back])
+    ]]
+    rows.append([InlineKeyboardButton("✅ Разблокировать", callback_data=f"unblk:{uid}") if blocked_until(state, uid)
+                 else InlineKeyboardButton("🚫 Заблокировать", callback_data=f"blk:{uid}")])
+    if state["users"].get(str(uid), {}).get("support_ban_until", 0) > time.time():
+        rows.append([InlineKeyboardButton("🔓 Снять бан за спам", callback_data=f"unspam:{uid}")])
+    return InlineKeyboardMarkup(rows + [[copy], back])
+
+
+async def set_block(uid, until):
+    """Блокирует (until > 0) или разблокирует клиента; VPN включается/выключается сразу."""
+    async with lock:
+        state = load_state()
+        old_state = json.loads(json.dumps(state))
+        u = state["users"].setdefault(str(uid), {"name": str(uid)})
+        if until:
+            u["blocked_until"] = int(until)
+        else:
+            u.pop("blocked_until", None)
+        apply_or_rollback(state, old_state)
+        save_state(state)
+    try:
+        await USER_BOT.send_message(int(uid), blocked_text(until) if until else "✅ Доступ разблокирован — VPN снова работает.")
+    except Exception:
+        pass
 
 
 def user_card(state, uid, hs=None):
@@ -2458,6 +2504,11 @@ def user_card(state, uid, hs=None):
     lines = [f"{user_name(state, uid)} · ID {uid}"]
     u = state["users"].get(str(uid), {})
     extra = []
+    bu = blocked_until(state, uid)
+    if bu:
+        lines.append("🚫 ЗАБЛОКИРОВАН" + (" навсегда" if bu >= FOREVER else f" до {fmt_date(bu)}") + " — VPN не работает")
+    if u.get("support_ban_until", 0) > time.time():
+        lines.append(f"🔇 Обращения запрещены за спам до {fmt_date(u['support_ban_until'])}")
     if u.get("balance"):
         extra.append(f"💰 {u['balance']} ₽")
     if u.get("ref_count"):
@@ -3184,6 +3235,35 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("Клиент не найден.")
                 return
             await query.edit_message_text(user_card(state, arg), reply_markup=user_buttons(arg))
+        return
+
+    if action in ("blk", "blks", "unblk", "unspam"):
+        await query.answer()
+        uid, _, minutes = arg.partition(":")
+        if action == "blk":
+            await query.edit_message_text(
+                f"🚫 Заблокировать {user_name(load_state(), uid)}? Пока блокировка действует, VPN у клиента не работает.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("1 день", callback_data=f"blks:{uid}:1440"),
+                     InlineKeyboardButton("7 дней", callback_data=f"blks:{uid}:10080"),
+                     InlineKeyboardButton("30 дней", callback_data=f"blks:{uid}:43200")],
+                    [InlineKeyboardButton("♾ Навсегда", callback_data=f"blks:{uid}:0")],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data=f"uc:{uid}")]]))
+            return
+        if action == "blks":
+            await set_block(uid, FOREVER if minutes == "0" else time.time() + int(minutes) * 60)
+        elif action == "unblk":
+            await set_block(uid, 0)
+        else:
+            async with lock:
+                state = load_state()
+                state["users"].get(uid, {}).pop("support_ban_until", None)
+                save_state(state)
+            try:
+                await USER_BOT.send_message(int(uid), "✅ Бан снят — снова можно писать в «🆘 Нужна помощь».")
+            except Exception:
+                pass
+        await query.edit_message_text(user_card(load_state(), uid), reply_markup=user_buttons(uid))
         return
 
     if action == "money":
@@ -4634,6 +4714,11 @@ async def check_expiry():
         state = load_state()
         old_state = json.loads(json.dumps(state))
         expired = False
+        unblocked = [uid for uid, u in state["users"].items() if 0 < u.get("blocked_until", 0) <= now]
+        for uid in unblocked:
+            state["users"][uid].pop("blocked_until")
+            expired = True  # конфиги снова попадут на сервер
+            notify.append((uid, "✅ Блокировка снята — VPN снова работает."))
         for pub, p in state["peers"].items():
             p.setdefault("made", int(now))  # конфигам из старых версий — отсчёт для автоудаления с сегодня
             if is_admin(p["user"]) or not p["until"]:
