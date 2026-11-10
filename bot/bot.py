@@ -96,9 +96,15 @@ CK_PAYTYPES = [x for x in os.environ.get("CKASSA_PAYTYPES", "sbp,card").replace(
 CK_PAID = ("payed", "holded", "processed")
 CK_FAILED = ("created_error", "rejected", "refunded")
 CK_TTL = 24 * 3600  # сколько ждём оплату по созданной ссылке
-# Telegram Stars: STAR_RUB — сколько рублей баланса даёт одна звезда (STARS=0 — выключить).
+# Telegram Stars (STARS=0 — выключить). Пополнение звёздами — по реальной цене звезды: Telegram платит
+# владельцу бота STAR_USD $ за звезду, переводим в рубли по курсу ЦБ и добавляем STARS_FEE % за посредников.
+# STAR_RUB — задать рубли за звезду вручную (тогда курс не используется).
+STAR_USD = float(os.environ.get("STAR_USD", "0.013"))
+STARS_FEE = float(os.environ.get("STARS_FEE", "3"))
+USD_RUB_DEFAULT = float(os.environ.get("USD_RUB", "90"))  # если курс ЦБ не скачался
+USD_RATE = {"rub": None, "at": 0}
 STARS_ON = os.environ.get("STARS", "1") != "0"
-STAR_RUB = float(os.environ.get("STAR_RUB", "1.2"))
+STAR_RUB = float(os.environ.get("STAR_RUB", "0"))
 STARS_1M = int(os.environ.get("STARS_1M", "99"))    # цена 1 месяца звёздами
 STARS_3M = int(os.environ.get("STARS_3M", "229"))   # цена 3 месяцев звёздами
 STARS_12M = int(os.environ.get("STARS_12M", "899"))  # год звёздами
@@ -1722,19 +1728,46 @@ async def topup_screen(message, ctx, amount, query=None, then=None, manual=False
 
 # ---------- Telegram Stars ----------
 
+def star_rub():
+    """Сколько рублей реально стоит одна звезда для нас."""
+    if STAR_RUB > 0:
+        return STAR_RUB
+    return STAR_USD * (USD_RATE["rub"] or USD_RUB_DEFAULT)
+
+
 def stars_for(amount):
-    """Сколько звёзд стоит пополнение на amount ₽ (округляем вверх)."""
-    return max(1, -int(-round(amount / STAR_RUB, 4) // 1))
+    """Сколько звёзд за пополнение на amount ₽: по реальной цене звезды + STARS_FEE % (округляем вверх)."""
+    return max(1, -int(-round(amount * (1 + STARS_FEE / 100) / star_rub(), 4) // 1))
+
+
+async def refresh_usd():
+    """Курс доллара ЦБ РФ (раз в 6 часов)."""
+    import httpx
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get("https://www.cbr-xml-daily.ru/daily_json.js")
+    rate = float(r.json()["Valute"]["USD"]["Value"])
+    if 30 < rate < 500:
+        USD_RATE.update(rub=rate, at=time.time())
+
+
+async def usd_loop():
+    while True:
+        try:
+            await refresh_usd()
+        except Exception as e:
+            log.warning("курс доллара не обновился: %s", e)
+        await asyncio.sleep(6 * 3600 if USD_RATE["rub"] else 600)
 
 
 async def stars_invoice(bot, uid, amount, then):
     # payload: t:сумма:месяцев:за что — по нему после оплаты зачисляем и, если нужно, покупаем
     months, target = (then[1], then[0]) if then else (0, "")
+    stars = stars_for(amount)  # число звёзд фиксируем в счёте: курс может поменяться до оплаты
     await bot.send_invoice(
         chat_id=uid, title=f"Пополнение баланса на {amount} ₽",
         description="Сервис aspentiv VPN: пополнение баланса для покупки и продления подписки.",
-        payload=f"t:{amount}:{months}:{target}", currency="XTR",
-        prices=[LabeledPrice(f"Пополнение на {amount} ₽", stars_for(amount))])
+        payload=f"t:{amount}:{stars}:{months}:{target}", currency="XTR",
+        prices=[LabeledPrice(f"Пополнение на {amount} ₽", stars)])
     await stars_shop_hint(bot, uid)
 
 
@@ -1766,7 +1799,7 @@ async def stars_shop_hint(bot, uid):
 
 
 def parse_stars_payload(payload):
-    """t:сумма:мес:за что — пополнение; p:цена:мес:за что — сразу покупка срока. -> (рублей на баланс, then, звёзд)"""
+    """t:сумма:звёзд:мес:за что — пополнение; p:цена:мес:за что — покупка срока. -> (рублей на баланс, then, звёзд)"""
     kind, _, rest = (payload or "").partition(":")
     amount, _, rest = rest.partition(":")
     months, _, target = rest.partition(":")
@@ -1774,7 +1807,12 @@ def parse_stars_payload(payload):
         return None
     then = (target, int(months)) if target else None
     if kind == "t":
-        return (int(amount), then, stars_for(int(amount))) if int(amount) >= TOPUP_MIN else None
+        # t:сумма:звёзд:мес:за что (звёзд — сколько выставили в счёте)
+        stars = months
+        months, _, target = target.partition(":")
+        if not months.isdigit() or int(amount) < TOPUP_MIN:
+            return None
+        return int(amount), ((target, int(months)) if target else None), int(stars)
     if not then:
         return None
     state = load_state()
@@ -5835,7 +5873,7 @@ async def amain():
                  asyncio.create_task(dynamic_loop()), asyncio.create_task(monitor_loop()),
                  asyncio.create_task(tunnel_loop()), asyncio.create_task(giveaway_loop()),
                  asyncio.create_task(waiting_loop()), asyncio.create_task(backup_loop()),
-                 asyncio.create_task(ckassa_loop())]
+                 asyncio.create_task(ckassa_loop()), asyncio.create_task(usd_loop())]
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
