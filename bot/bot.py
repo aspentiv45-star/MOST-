@@ -100,8 +100,8 @@ CK_TTL = 24 * 3600  # сколько ждём оплату по созданно
 STARS_ON = os.environ.get("STARS", "1") != "0"
 STAR_RUB = float(os.environ.get("STAR_RUB", "1.2"))
 STARS_1M = int(os.environ.get("STARS_1M", "99"))    # цена 1 месяца звёздами
-STARS_3M = int(os.environ.get("STARS_3M", "149"))   # цена 3 месяцев звёздами
-STARS_12M = int(os.environ.get("STARS_12M", str(round(12 * STARS_1M * 0.8))))  # год звёздами (−20%)
+STARS_3M = int(os.environ.get("STARS_3M", "229"))   # цена 3 месяцев звёздами
+STARS_12M = int(os.environ.get("STARS_12M", "899"))  # год звёздами
 STARS_SHOP = os.environ.get("STARS_SHOP", "yoostars_bot").lstrip("@")  # где купить звёзды, если их нет ("" — не показывать)
 REF_NEED = int(os.environ.get("REF_NEED", "3"))      # сколько друзей должны оплатить, чтобы получить подарок
 REF_DAYS = int(os.environ.get("REF_DAYS", "30"))     # подарок за каждых REF_NEED друзей, дней
