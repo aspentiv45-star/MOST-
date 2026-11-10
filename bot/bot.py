@@ -4962,7 +4962,8 @@ async def admin_icons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     icons = dict(zip(keys, ids))
     ICON_IDS.clear()
     ICON_IDS.update(icons)
-    ICONS_ON[0] = True
+    for b in (USER_BOT, ADMIN_BOT):
+        b._icons_ok = True  # попробовать снова
     async with lock:
         state = load_state()
         state["settings"]["icons"] = icons
@@ -5134,7 +5135,6 @@ ICON_EXACT = {BTN_BUY: "buy"}
 STYLE_SUCCESS = ("✅", "💳")      # зелёные кнопки
 STYLE_DANGER = ("🗑", "🗑️", "🚫", "❌", "⛔️")  # красные
 ICON_IDS = {}       # значок -> custom_emoji_id (из набора, созданного /icons)
-ICONS_ON = [True]   # выключаются сами, если Telegram не принимает значки
 
 
 def plain(text):
@@ -5148,7 +5148,7 @@ def variants(*texts):
     return list(dict.fromkeys([t for x in texts for t in (x, plain(x))]))
 
 
-def _dress(text, cls, keep):
+def _dress(text, cls, keep, icons=True):
     first = text.partition(" ")[0]
     kw = {}
     if first in STYLE_SUCCESS or text == BTN_BUY:
@@ -5156,7 +5156,7 @@ def _dress(text, cls, keep):
     elif first in STYLE_DANGER:
         kw["style"] = "danger"
     key = ICON_EXACT.get(text) or ICON_BY_EMOJI.get(first)
-    if ICONS_ON[0] and key in ICON_IDS:
+    if icons and key in ICON_IDS:
         kw["icon_custom_emoji_id"] = ICON_IDS[key]
         text = plain(text)
     return cls(text, **keep, **kw) if kw else None
@@ -5165,8 +5165,8 @@ def _dress(text, cls, keep):
 BUTTON_FIELDS = ("callback_data", "url", "copy_text", "switch_inline_query", "web_app", "login_url", "pay")
 
 
-def decorate(markup):
-    """Значки и цвета для всех кнопок сообщения."""
+def decorate(markup, icons=True):
+    """Значки и цвета для всех кнопок сообщения (icons=False — только цвета)."""
     if isinstance(markup, InlineKeyboardMarkup):
         rows, changed = [], False
         for row in markup.inline_keyboard:
@@ -5175,7 +5175,7 @@ def decorate(markup):
                 nb = None
                 if not (b.icon_custom_emoji_id or b.style):
                     keep = {k: getattr(b, k) for k in BUTTON_FIELDS if getattr(b, k, None) is not None}
-                    nb = _dress(b.text, InlineKeyboardButton, keep)
+                    nb = _dress(b.text, InlineKeyboardButton, keep, icons)
                 new.append(nb or b)
                 changed |= nb is not None
             rows.append(new)
@@ -5185,7 +5185,7 @@ def decorate(markup):
         for row in markup.keyboard:
             new = []
             for b in row:
-                nb = _dress(b.text, KeyboardButton, {}) if not (b.icon_custom_emoji_id or b.style) else None
+                nb = _dress(b.text, KeyboardButton, {}, icons) if not (b.icon_custom_emoji_id or b.style) else None
                 new.append(nb or b)
             rows.append(new)
         return ReplyKeyboardMarkup(rows, resize_keyboard=markup.resize_keyboard, one_time_keyboard=markup.one_time_keyboard,
@@ -5230,15 +5230,21 @@ class ScreenBot(ExtBot):
         markup = kwargs.get("reply_markup")
         if close:
             markup = with_close(markup)
-        kwargs["reply_markup"] = decorate(markup)
+        icons = getattr(self, "_icons_ok", True)
+        kwargs["reply_markup"] = decorate(markup, icons)
         try:
             return await method(*args, **kwargs)
         except Exception as e:
             text = str(e).lower()
-            if ICON_IDS and ICONS_ON[0] and ("emoji" in text or "icon" in text or "style" in text):
-                ICONS_ON[0] = False  # Telegram не принимает значки (нет Premium) — дальше без них
-                log.warning("значки на кнопках выключены: %s", e)
-                kwargs["reply_markup"] = strip_icons(kwargs["reply_markup"])
+            if ICON_IDS and icons and ("emoji" in text or "icon" in text or "style" in text):
+                # Telegram не принимает значки у этого бота (у его владельца нет Premium) — у него дальше без них.
+                self._icons_ok = False
+                try:
+                    who = self.username
+                except Exception:
+                    who = "?"
+                log.warning("значки на кнопках выключены у @%s: %s", who, e)
+                kwargs["reply_markup"] = decorate(markup, icons=False)
                 return await method(*args, **kwargs)
             raise
 
