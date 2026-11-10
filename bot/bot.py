@@ -447,6 +447,9 @@ def load_state():
     state.setdefault("next_ck", 1)
     # Оплаты звёздами: {telegram_payment_charge_id: {"user", "amount", "stars", "at"}} — чтобы не зачесть дважды
     state.setdefault("stars", {})
+    # Запросы реквизитов для перевода: {id: {"user", "amount", "then", "status": pending|ok|no|used, "created"}}
+    state.setdefault("pay_req", {})
+    state.setdefault("next_pay_req", 1)
     # VLESS убран: выданные подписки VLESS удаляем, за действующие возвращаем цену на баланс.
     for pub in [k for k, p in state["peers"].items() if p.get("kind") == "vless"]:
         p = state["peers"].pop(pub)
@@ -1709,9 +1712,12 @@ async def topup_screen(message, ctx, amount, query=None, then=None, manual=False
                 f"деньги зачислятся автоматически, через минуту после оплаты.{after}")
         markup = InlineKeyboardMarkup(rows)
     else:
-        text = (f"➕ Пополнение баланса на {amount} ₽.\n\n{pay_text()}\n\n"
-                f"Переведите ровно {amount} ₽ и пришлите сюда скриншот перевода одним фото.{after}")
-        rows = [[InlineKeyboardButton("⬅️ Другая сумма", callback_data="top:")]]
+        # Номер для перевода не показываем сразу: клиент запрашивает, админ одобряет — тогда бот присылает реквизиты.
+        ctx.user_data.pop("pay_for", None)
+        text = (f"➕ Пополнение баланса на {amount} ₽ переводом по СБП.\n\nНажмите «Запросить реквизиты» — "
+                f"администратор подтвердит запрос, и бот пришлёт номер для перевода.{after}")
+        rows = [[InlineKeyboardButton("📲 Запросить реквизиты", callback_data=f"rqp:{amount}")],
+                [InlineKeyboardButton("⬅️ Другая сумма", callback_data="top:")]]
         if STARS_ON and not manual and not os.path.exists(PAY_FILE):
             text = (f"➕ Пополнение баланса на {amount} ₽.\n\nОплатите звёздами Telegram — "
                     f"{stars_for(amount)} ⭐️, баланс пополнится сразу.{after}")
@@ -2222,6 +2228,22 @@ async def on_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     target = ctx.user_data.pop("pay_for", None)
     if target is None:
+        # Реквизиты выданы по одобренному запросу — этот скриншот и есть перевод.
+        req = None
+        async with lock:
+            state = load_state()
+            for rid, r in sorted(state["pay_req"].items(), key=lambda kv: int(kv[0]), reverse=True):
+                if r["user"] == str(update.effective_user.id) and r["status"] == "ok" \
+                        and time.time() - r.get("at", 0) < 24 * 3600:
+                    r["status"] = "used"
+                    req = r
+                    save_state(state)
+                    break
+        if req:
+            await submit_payment(update.effective_user, TOPUP, data, msg.caption, msg, 1, req["amount"],
+                                 tuple(req["then"]) if req.get("then") else None)
+            return
+    if target is None:
         # Оплату принимаем только после выбора, за что она.
         await msg.reply_text(
             "Чтобы оплатить, сначала нажмите «Пополнить»:\n"
@@ -2727,6 +2749,40 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if action == "topa":
         await topup_screen(query.message, ctx, int(arg), query)
+        return
+    if action == "rqp":
+        amount = int(arg)
+        if amount < TOPUP_MIN:
+            return
+        then = ctx.user_data.pop("pay_then", None)
+        async with lock:
+            state = load_state()
+            if any(r["user"] == str(uid) and r["status"] == "pending" and time.time() - r["created"] < 6 * 3600
+                   for r in state["pay_req"].values()):
+                busy = True
+            else:
+                busy = False
+                rid = str(state["next_pay_req"])
+                state["next_pay_req"] += 1
+                state["pay_req"][rid] = {"user": str(uid), "amount": amount, "then": list(then) if then else None,
+                                         "status": "pending", "created": time.time()}
+                save_state(state)
+            name = user_name(state, uid)
+        if busy:
+            await query.edit_message_text("⏳ Запрос реквизитов уже отправлен — дождитесь ответа администратора.")
+            return
+        for admin in ADMINS:
+            try:
+                await ADMIN_BOT.send_message(
+                    admin, f"📲 Запрос реквизитов №{rid}\n{name} · ID {uid}\nПополнение на {amount} ₽"
+                           + (f"\nЗатем: {target_label(state, then[0])}" if then else ""),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ Показать реквизиты", callback_data=f"prq:ok:{rid}"),
+                        InlineKeyboardButton("❌ Отказать", callback_data=f"prq:no:{rid}")]]))
+            except Exception:
+                pass
+        await query.edit_message_text(f"⏳ Запрос на пополнение {amount} ₽ отправлен. Как только администратор "
+                                      "подтвердит, бот пришлёт реквизиты для перевода.")
         return
     if action == "stb":
         m, _, target = arg.partition(":")
@@ -3505,6 +3561,33 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.message.delete()
         except Exception:
             await query.edit_message_reply_markup(None)  # старше 48 часов — хотя бы убрать кнопки
+        return
+
+    if action == "prq":
+        verdict, _, rid = arg.partition(":")
+        async with lock:
+            state = load_state()
+            r = state["pay_req"].get(rid)
+            if not r or r["status"] != "pending":
+                await query.answer("Этот запрос уже разобран.")
+                return
+            r["status"] = "ok" if verdict == "ok" else "no"
+            r["at"] = time.time()
+            save_state(state)
+        await query.answer()
+        uid = int(r["user"])
+        try:
+            if verdict == "ok":
+                await USER_BOT.send_message(
+                    uid, f"💳 Реквизиты для пополнения на {r['amount']} ₽:\n\n{pay_text()}\n\n"
+                         f"Переведите ровно {r['amount']} ₽ и пришлите сюда скриншот перевода одним фото. "
+                         "Реквизиты действуют 24 часа.")
+            else:
+                await USER_BOT.send_message(uid, "Запрос реквизитов отклонён. Если это ошибка — напишите в поддержку.")
+        except Exception:
+            pass
+        await query.edit_message_text(f"{query.message.text}\n\n"
+                                      + ("✅ Реквизиты отправлены" if verdict == "ok" else "❌ Отказано"))
         return
 
     if action == "acc":
