@@ -1421,7 +1421,7 @@ async def request_access(user):
         save_state(state)
     if first:
         ref = u.get("ref")
-        who = f"\n👥 Пригласил: {user_name(state, ref)} (ID {ref})" if ref else ""
+        who = f"\n👥 Пригласил: {user_name(state, ref)} (ID {ref})" if ref else "\n👤 Без приглашения"
         for admin in ADMINS:
             try:
                 await ADMIN_BOT.send_message(admin, f"🙋 Запрос доступа\n{u['name']}\nID {user.id}{who}",
@@ -1430,8 +1430,10 @@ async def request_access(user):
                 log.exception("не удалось отправить запрос доступа админу %s", admin)
 
 
-REF_ASK = ("👥 Доступ по приглашению. Пришлите ID друга, который вас пригласил, — одним числом.\n"
-           f"Он есть у друга в «{BTN_BALANCE}».")
+REF_ASK = ("👥 Пришлите ID друга, который вас пригласил, — одним числом.\n"
+           f"Он есть у друга в «{BTN_BALANCE}».\n\n"
+           "Никто не приглашал — нажмите кнопку ниже, и администратор рассмотрит запрос.")
+REF_ASK_BUTTONS = InlineKeyboardMarkup([[InlineKeyboardButton("🙋 Меня никто не пригласил", callback_data="refskip:")]])
 
 
 async def gate(update, ctx, state):
@@ -1447,7 +1449,7 @@ async def gate(update, ctx, state):
     u = state["users"].get(str(user.id), {})
     if not u.get("ref") and "requested" not in u and u.get("approved") is not False:
         ctx.user_data["await"] = "ref"
-        await update.message.reply_text(REF_ASK)
+        await update.message.reply_text(REF_ASK, reply_markup=REF_ASK_BUTTONS)
         return False
     await request_access(user)
     await update.message.reply_text(closed_text(state, user.id))
@@ -2312,6 +2314,17 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if action == "topa":
         await topup_screen(query.message, ctx, int(arg), query)
         return
+    if action == "refskip":
+        # Вход без приглашения: обычный запрос доступа администратору.
+        ctx.user_data.pop("await", None)
+        state = load_state()
+        if is_approved(state, uid):
+            await query.edit_message_text("У вас уже есть доступ 👍")
+            return
+        await request_access(query.from_user)
+        await query.edit_message_text(closed_text(load_state(), uid))
+        return
+
     if action == "refset":
         ctx.user_data["await"] = "ref_set"
         await query.edit_message_text("✏️ Пришлите ID друга, который вас пригласил, — одним числом.")
