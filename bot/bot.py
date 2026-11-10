@@ -37,6 +37,7 @@ import qrcode
 import split
 from telegram.error import NetworkError, TimedOut
 from telegram import (BotCommand, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, InputSticker, KeyboardButton,
+                      LabeledPrice,
                       LinkPreviewOptions,
                       ReplyKeyboardMarkup, Update)
 from telegram.ext import (
@@ -46,6 +47,7 @@ from telegram.ext import (
     ContextTypes,
     ExtBot,
     MessageHandler,
+    PreCheckoutQueryHandler,
     filters,
 )
 
@@ -91,6 +93,9 @@ CK_PAYTYPES = [x for x in os.environ.get("CKASSA_PAYTYPES", "sbp,card").replace(
 CK_PAID = ("payed", "holded", "processed")
 CK_FAILED = ("created_error", "rejected", "refunded")
 CK_TTL = 24 * 3600  # сколько ждём оплату по созданной ссылке
+# Telegram Stars: STAR_RUB — сколько рублей баланса даёт одна звезда (STARS=0 — выключить).
+STARS_ON = os.environ.get("STARS", "1") != "0"
+STAR_RUB = float(os.environ.get("STAR_RUB", "1.2"))
 REF_NEED = int(os.environ.get("REF_NEED", "3"))      # сколько друзей должны оплатить, чтобы получить подарок
 REF_DAYS = int(os.environ.get("REF_DAYS", "30"))     # подарок за каждых REF_NEED друзей, дней
 PAY_FILE = os.environ.get("PAY_FILE", "/etc/most/pay.txt")
@@ -402,6 +407,8 @@ def load_state():
     # Платежи Ckassa: {regPayNum: {"user", "amount", "then", "created", "status": wait|done|failed}}
     state.setdefault("ckassa", {})
     state.setdefault("next_ck", 1)
+    # Оплаты звёздами: {telegram_payment_charge_id: {"user", "amount", "stars", "at"}} — чтобы не зачесть дважды
+    state.setdefault("stars", {})
     # VLESS убран: выданные подписки VLESS удаляем, за действующие возвращаем цену на баланс.
     for pub in [k for k, p in state["peers"].items() if p.get("kind") == "vless"]:
         p = state["peers"].pop(pub)
@@ -1650,6 +1657,9 @@ async def topup_screen(message, ctx, amount, query=None, then=None, manual=False
         names = {"sbp": "🏦 Оплатить по СБП", "card": "💳 Оплатить картой", "sberPay": "💳 SberPay"}
         rows = [[InlineKeyboardButton(names.get(t, f"💳 {t}"), callback_data=f"ckp:{t}:{amount}")]
                 for t in CK_PAYTYPES]
+        if STARS_ON:
+            rows.append([InlineKeyboardButton(f"⭐️ Звёздами Telegram — {stars_for(amount)} ⭐️",
+                                              callback_data=f"stp:{amount}")])
         if os.path.exists(PAY_FILE):
             rows.append([InlineKeyboardButton("📷 Перевод со скриншотом", callback_data=f"ckm:{amount}")])
         rows.append([InlineKeyboardButton("⬅️ Другая сумма", callback_data="top:")])
@@ -1659,11 +1669,110 @@ async def topup_screen(message, ctx, amount, query=None, then=None, manual=False
     else:
         text = (f"➕ Пополнение баланса на {amount} ₽.\n\n{pay_text()}\n\n"
                 f"Переведите ровно {amount} ₽ и пришлите сюда скриншот перевода одним фото.{after}")
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Другая сумма", callback_data="top:")]])
+        rows = [[InlineKeyboardButton("⬅️ Другая сумма", callback_data="top:")]]
+        if STARS_ON and not manual and not os.path.exists(PAY_FILE):
+            text = (f"➕ Пополнение баланса на {amount} ₽.\n\nОплатите звёздами Telegram — "
+                    f"{stars_for(amount)} ⭐️, баланс пополнится сразу.{after}")
+        elif STARS_ON and not manual:
+            text += f"\n\nИли оплатите звёздами Telegram — {stars_for(amount)} ⭐️, баланс пополнится сразу."
+            rows.insert(0, [InlineKeyboardButton(f"⭐️ Оплатить звёздами — {stars_for(amount)} ⭐️",
+                                                 callback_data=f"stp:{amount}")])
+        markup = InlineKeyboardMarkup(rows)
     if query:
         await query.edit_message_text(text, reply_markup=markup)
     else:
         await message.reply_text(text, reply_markup=markup)
+
+
+# ---------- Telegram Stars ----------
+
+def stars_for(amount):
+    """Сколько звёзд стоит пополнение на amount ₽ (округляем вверх)."""
+    return max(1, -int(-round(amount / STAR_RUB, 4) // 1))
+
+
+async def stars_invoice(bot, uid, amount, then):
+    # payload: t:сумма:месяцев:за что — по нему после оплаты зачисляем и, если нужно, покупаем
+    months, target = (then[1], then[0]) if then else (0, "")
+    await bot.send_invoice(
+        chat_id=uid, title=f"Пополнение баланса на {amount} ₽",
+        description="Сервис aspentiv VPN: пополнение баланса для покупки и продления подписки.",
+        payload=f"t:{amount}:{months}:{target}", currency="XTR",
+        prices=[LabeledPrice(f"Пополнение на {amount} ₽", stars_for(amount))])
+
+
+def parse_stars_payload(payload):
+    kind, _, rest = (payload or "").partition(":")
+    amount, _, rest = rest.partition(":")
+    months, _, target = rest.partition(":")
+    if kind != "t" or not amount.isdigit() or not months.isdigit() or int(amount) < TOPUP_MIN:
+        return None
+    return int(amount), ((target, int(months)) if target else None)
+
+
+async def on_precheckout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.pre_checkout_query
+    parsed = parse_stars_payload(q.invoice_payload)
+    ok = bool(parsed) and q.currency == "XTR" and q.total_amount == stars_for(parsed[0]) \
+        and not blocked_until(load_state(), q.from_user.id)
+    await q.answer(ok=ok, error_message=None if ok else "Оплата сейчас недоступна, напишите в поддержку.")
+
+
+async def on_stars_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    pay = update.message.successful_payment
+    uid = update.effective_user.id
+    parsed = parse_stars_payload(pay.invoice_payload)
+    if not parsed:
+        return
+    amount, then = parsed
+    async with lock:
+        state = load_state()
+        if pay.telegram_payment_charge_id in state["stars"]:
+            return
+        state["stars"][pay.telegram_payment_charge_id] = {"user": str(uid), "amount": amount,
+                                                          "stars": pay.total_amount, "at": time.time()}
+        u = state["users"].setdefault(str(uid), {"name": update.effective_user.full_name or str(uid)})
+        u["balance"] = u.get("balance", 0) + amount
+        save_state(state)
+    await update.message.reply_text(f"💰 Оплата получена, баланс пополнен на {amount} ₽. Теперь {u['balance']} ₽.",
+                                    reply_markup=KEYBOARD)
+    extra = ""
+    if then:
+        ok, text = await buy_with_balance(uid, then[0], int(then[1]))
+        extra = f"\n{text}"
+        await update.message.reply_text(text)
+    for admin in ADMINS:
+        try:
+            await ADMIN_BOT.send_message(admin, f"⭐️ Звёзды: +{amount} ₽ ({pay.total_amount} ⭐️) — "
+                                                f"{u.get('name', uid)} (ID {uid}).{extra}\n"
+                                                f"Возврат: /refund {uid} {pay.telegram_payment_charge_id}")
+        except Exception:
+            pass
+
+
+async def admin_refund(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/refund ID charge_id — вернуть звёзды клиенту и списать сумму с его баланса."""
+    if len(ctx.args or []) != 2 or not ctx.args[0].isdigit():
+        await update.message.reply_text("Формат: /refund ID_клиента charge_id (есть в уведомлении об оплате).")
+        return
+    uid, charge = ctx.args
+    p = load_state()["stars"].get(charge)
+    if not p or p["user"] != uid or p.get("refunded"):
+        await update.message.reply_text("Такой оплаты звёздами нет или она уже возвращена.")
+        return
+    try:
+        await USER_BOT.refund_star_payment(int(uid), charge)
+    except Exception as e:
+        await update.message.reply_text(f"Telegram не принял возврат: {e}")
+        return
+    async with lock:
+        state = load_state()
+        state["stars"][charge]["refunded"] = time.time()
+        u = state["users"].setdefault(uid, {"name": uid})
+        u["balance"] = u.get("balance", 0) - p["amount"]
+        save_state(state)
+    await update.message.reply_text(f"↩️ Вернул {p['stars']} ⭐️, с баланса списано {p['amount']} ₽ "
+                                    f"(теперь {u['balance']} ₽).")
 
 
 # ---------- Ckassa: автоматическое пополнение ----------
@@ -2478,6 +2587,14 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if action == "topa":
         await topup_screen(query.message, ctx, int(arg), query)
+        return
+    if action == "stp":
+        amount = int(arg)
+        if not STARS_ON or amount < TOPUP_MIN:
+            return
+        ctx.user_data.pop("await", None)
+        ctx.user_data.pop("pay_for", None)
+        await stars_invoice(ctx.bot, uid, amount, ctx.user_data.pop("pay_then", None))
         return
     if action == "ckm":
         await topup_screen(query.message, ctx, int(arg), query, manual=True)
@@ -5535,6 +5652,8 @@ def build_user_app():
     app.add_handler(CommandHandler("giveaway", giveaway_cmd))
     app.add_handler(CommandHandler("support", support_start))
     app.add_handler(CommandHandler("news", news_cmd))
+    app.add_handler(PreCheckoutQueryHandler(on_precheckout))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_stars_paid))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_screenshot))
     # Старые кнопки из прошлой версии бота, оставшиеся у клиентов на экране.
     app.add_handler(MessageHandler(filters.Text(variants(BTN_SUPPORT)), support_start))
@@ -5574,6 +5693,7 @@ def build_admin_app():
     app.add_handler(MessageHandler(filters.Text(variants(ABTN_TICKETS)), admin_tickets))
     app.add_handler(MessageHandler(filters.Text(variants(BTN_CLEAR)), admin_only(clear_and_start)))
     app.add_handler(CommandHandler("icons", admin_icons))
+    app.add_handler(CommandHandler("refund", admin_only(admin_refund)))
     app.add_handler(CommandHandler("resend", admin_resend_ask))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text))
     app.add_handler(CallbackQueryHandler(on_admin_button))
