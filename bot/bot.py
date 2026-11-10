@@ -36,7 +36,9 @@ from zoneinfo import ZoneInfo
 import qrcode
 import split
 from telegram.error import NetworkError, TimedOut
-from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
+from telegram import (BotCommand, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, InputSticker, KeyboardButton,
+                      LinkPreviewOptions,
+                      ReplyKeyboardMarkup, Update)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -214,9 +216,12 @@ BTN_SUPPORT = "🆘 Нужна помощь"
 BTN_CLEAR = "🧹 Почистить чат"
 BTN_BALANCE = "💰 Баланс и друзья"
 BTN_GIVEAWAY = "🎉 Розыгрыш"
-KEYBOARD = ReplyKeyboardMarkup([[BTN_BUY], [BTN_LIST, BTN_HELP], [BTN_BALANCE, BTN_NEWS], [BTN_GIVEAWAY, BTN_SUPPORT],
-                                [BTN_CLEAR]],
-                               resize_keyboard=True)
+BTN_CABINET = "👤 Личный кабинет"
+BTN_HOME = "⬅️ Главное меню"
+# Главное меню — только самое нужное; остальное — в «Личном кабинете».
+KEYBOARD = ReplyKeyboardMarkup([[BTN_BUY], [BTN_HELP, BTN_CABINET]], resize_keyboard=True)
+CABINET_KEYBOARD = ReplyKeyboardMarkup([[BTN_LIST, BTN_BALANCE], [BTN_GIVEAWAY, BTN_NEWS], [BTN_SUPPORT, BTN_CLEAR],
+                                        [BTN_HOME]], resize_keyboard=True)
 
 async def clear_chat(bot, chat_id, last_id):
     """Удаляет сообщения чата от last_id назад, пачками по 100, пока удаляется хоть что-то."""
@@ -1612,7 +1617,8 @@ async def balance_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await gate(update, ctx, state):
         return
     text, buttons = balance_screen(state, update.effective_user.id)
-    await update.message.reply_text(text, parse_mode="HTML", reply_markup=buttons, disable_web_page_preview=True)
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=buttons,
+                                    link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 
 TOPUP_AMOUNTS = (150, 300, 500, 1000)
@@ -3566,6 +3572,26 @@ async def gw_broadcast(gid):
     return len(msgs)
 
 
+async def cabinet_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """«👤 Личный кабинет»: свои кнопки-меню и коротко о главном."""
+    state = load_state()
+    if not await gate(update, ctx, state):
+        return
+    uid = update.effective_user.id
+    mine = user_peers(state, uid)
+    active = sum(1 for p in mine.values() if peer_active(p))
+    soon = min((p["until"] for p in mine.values() if peer_active(p) and not is_admin(uid)), default=0)
+    lines = [f"👤 Личный кабинет", "", f"📄 Конфигов: {len(mine)}, активных: {active}"]
+    if soon:
+        lines.append(f"⏳ Ближайший срок: {fmt_date(soon)}")
+    lines.append(f"💰 Баланс: {balance(state, uid)} ₽")
+    await update.message.reply_text("\n".join(lines), reply_markup=CABINET_KEYBOARD)
+
+
+async def home_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Главное меню 👇", reply_markup=KEYBOARD)
+
+
 async def giveaway_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Кнопка «🎉 Розыгрыш»: текущий розыгрыш (участвовать / напомнить) — и для тех, кто пришёл позже."""
     state = load_state()
@@ -4901,6 +4927,53 @@ async def backup_loop():
 
 
 @admin_only
+async def admin_icons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/icons — создать набор своих значков (из icons/*.png) и включить их на кнопках. /icons off — выключить."""
+    if ctx.args and ctx.args[0] == "off":
+        ICON_IDS.clear()
+        async with lock:
+            state = load_state()
+            state["settings"].pop("icons", None)
+            save_state(state)
+        await update.message.reply_text("Значки на кнопках выключены.")
+        return
+    await update.message.reply_text("⏳ Создаю набор значков…")
+    bot = ctx.bot
+    name = f"aspentiv_icons_by_{bot.username}"
+    keys = [k for k in ICON_FILES if os.path.exists(os.path.join(ICON_DIR, f"{k}.png"))]
+    if not keys:
+        await update.message.reply_text(f"Нет картинок в {ICON_DIR}.")
+        return
+    try:
+        await bot.delete_sticker_set(name)  # пересоздаём, если уже был
+    except Exception:
+        pass
+    stickers = []
+    for k in keys:
+        with open(os.path.join(ICON_DIR, f"{k}.png"), "rb") as f:
+            stickers.append(InputSticker(f.read(), emoji_list=[ICON_FILES[k]], format="static"))
+    try:
+        await bot.create_new_sticker_set(update.effective_user.id, name, "aspentiv", stickers[:50],
+                                         sticker_type="custom_emoji")
+        ids = [st.custom_emoji_id for st in (await bot.get_sticker_set(name)).stickers]
+    except Exception as e:
+        await update.message.reply_text(f"Не получилось создать набор: {e}")
+        return
+    icons = dict(zip(keys, ids))
+    ICON_IDS.clear()
+    ICON_IDS.update(icons)
+    ICONS_ON[0] = True
+    async with lock:
+        state = load_state()
+        state["settings"]["icons"] = icons
+        save_state(state)
+    await update.message.reply_text(
+        f"✅ Набор значков создан: {len(icons)} шт. — t.me/addemoji/{name}\n"
+        "Значки появятся на кнопках у новых сообщений. Если у владельца бота нет Telegram Premium, "
+        "Telegram их не покажет — бот тогда сам вернёт обычные кнопки.", reply_markup=ADMIN_KEYBOARD)
+
+
+@admin_only
 async def admin_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await send_backup([update.effective_user.id])
 
@@ -5031,6 +5104,117 @@ def with_close(markup):
     return InlineKeyboardMarkup([*rows, [CLOSE_BUTTON]])
 
 
+# ---------- свои значки и цвета кнопок ----------
+# Значок ставится по первому эмодзи в тексте кнопки (эмодзи из текста убирается). Значки — свой набор
+# custom emoji (icons/*.png), его создаёт админ командой /icons. Telegram показывает их, только если у
+# владельца бота Telegram Premium (или у бота есть имя с Fragment); если Telegram откажет — значки
+# выключаются сами, кнопки остаются обычными.
+ICON_DIR = os.environ.get("ICON_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons"))
+# значок: (файл в icons/, эмодзи для набора)
+ICON_FILES = {
+    "buy": "🛒", "plus": "➕", "help": "❓", "cabinet": "👤", "configs": "📄", "balance": "💰", "news": "🆕",
+    "gift": "🎁", "support": "🆘", "clear": "🧹", "back": "⬅️", "download": "⬇️", "renew": "🔄", "delete": "🗑",
+    "close": "✖️", "video": "🎬", "friends": "👥", "mode": "🔀", "ping": "🏓", "key": "🔑", "qr": "🔳", "ok": "✅",
+    "phone": "📱", "android": "🤖", "pc": "💻", "router": "📡", "shield": "🛡", "edit": "✏️", "box": "📦",
+    "card": "💳", "bolt": "⚡️", "game": "🎮", "signal": "📶", "bell": "🔔", "chart": "📊", "ban": "🚫",
+    "copy": "📋", "hand": "🙋", "lock": "🔓",
+}
+# первое эмодзи кнопки -> значок
+ICON_BY_EMOJI = {
+    "➕": "plus", "❓": "help", "👤": "cabinet", "📄": "configs", "💰": "balance", "🆕": "news", "🎉": "gift",
+    "🎁": "gift", "🆘": "support", "🧹": "clear", "⬅️": "back", "◀️": "back", "⬇️": "download", "📥": "download",
+    "🔄": "renew", "🗑": "delete", "🗑️": "delete", "✖️": "close", "❌": "close", "🎬": "video", "👥": "friends",
+    "🔀": "mode", "🏓": "ping", "🔑": "key", "🔳": "qr", "✅": "ok", "🍏": "phone", "📱": "phone", "🤖": "android",
+    "💻": "pc", "🖥": "pc", "📡": "router", "🛡": "shield", "🛡️": "shield", "✏️": "edit", "📦": "box", "📤": "box",
+    "💳": "card", "⚡️": "bolt", "⚡": "bolt", "🎮": "game", "📶": "signal", "🔔": "bell", "📢": "bell",
+    "📊": "chart", "💸": "chart", "🚫": "ban", "⛔️": "ban", "📋": "copy", "🙋": "hand", "🔓": "lock", "▶️": "video",
+    "📨": "support", "⏳": "card", "🗳": "chart", "🎯": "gift",
+}
+ICON_EXACT = {BTN_BUY: "buy"}
+STYLE_SUCCESS = ("✅", "💳")      # зелёные кнопки
+STYLE_DANGER = ("🗑", "🗑️", "🚫", "❌", "⛔️")  # красные
+ICON_IDS = {}       # значок -> custom_emoji_id (из набора, созданного /icons)
+ICONS_ON = [True]   # выключаются сами, если Telegram не принимает значки
+
+
+def plain(text):
+    """Текст кнопки без первого эмодзи (так он выглядит, когда стоит значок)."""
+    first, _, rest = text.partition(" ")
+    return rest if rest and (first in ICON_BY_EMOJI or text in ICON_EXACT) else text
+
+
+def variants(*texts):
+    """Для фильтров: текст кнопки и с эмодзи, и без (со значком)."""
+    return list(dict.fromkeys([t for x in texts for t in (x, plain(x))]))
+
+
+def _dress(text, cls, keep):
+    first = text.partition(" ")[0]
+    kw = {}
+    if first in STYLE_SUCCESS or text == BTN_BUY:
+        kw["style"] = "success"
+    elif first in STYLE_DANGER:
+        kw["style"] = "danger"
+    key = ICON_EXACT.get(text) or ICON_BY_EMOJI.get(first)
+    if ICONS_ON[0] and key in ICON_IDS:
+        kw["icon_custom_emoji_id"] = ICON_IDS[key]
+        text = plain(text)
+    return cls(text, **keep, **kw) if kw else None
+
+
+BUTTON_FIELDS = ("callback_data", "url", "copy_text", "switch_inline_query", "web_app", "login_url", "pay")
+
+
+def decorate(markup):
+    """Значки и цвета для всех кнопок сообщения."""
+    if isinstance(markup, InlineKeyboardMarkup):
+        rows, changed = [], False
+        for row in markup.inline_keyboard:
+            new = []
+            for b in row:
+                nb = None
+                if not (b.icon_custom_emoji_id or b.style):
+                    keep = {k: getattr(b, k) for k in BUTTON_FIELDS if getattr(b, k, None) is not None}
+                    nb = _dress(b.text, InlineKeyboardButton, keep)
+                new.append(nb or b)
+                changed |= nb is not None
+            rows.append(new)
+        return InlineKeyboardMarkup(rows) if changed else markup
+    if isinstance(markup, ReplyKeyboardMarkup):
+        rows = []
+        for row in markup.keyboard:
+            new = []
+            for b in row:
+                nb = _dress(b.text, KeyboardButton, {}) if not (b.icon_custom_emoji_id or b.style) else None
+                new.append(nb or b)
+            rows.append(new)
+        return ReplyKeyboardMarkup(rows, resize_keyboard=markup.resize_keyboard, one_time_keyboard=markup.one_time_keyboard,
+                                   is_persistent=markup.is_persistent, input_field_placeholder=markup.input_field_placeholder)
+    return markup
+
+
+def strip_icons(markup):
+    """Убрать значки (если Telegram их не принял) — тексты возвращаются с эмодзи как были."""
+    if isinstance(markup, InlineKeyboardMarkup):
+        return InlineKeyboardMarkup([[InlineKeyboardButton(
+            (next((e for e, k in ICON_BY_EMOJI.items() if ICON_IDS.get(k) == b.icon_custom_emoji_id), "") + " " + b.text).strip()
+            if b.icon_custom_emoji_id else b.text,
+            **{k: getattr(b, k) for k in ("callback_data", "url", "copy_text") if getattr(b, k, None) is not None},
+            **({"style": b.style} if b.style else {})) for b in row] for row in markup.inline_keyboard])
+    if isinstance(markup, ReplyKeyboardMarkup):
+        def back(b):
+            if not b.icon_custom_emoji_id:
+                return b
+            for t in (BTN_BUY, BTN_LIST, BTN_HELP, BTN_NEWS, BTN_SUPPORT, BTN_CLEAR, BTN_BALANCE, BTN_GIVEAWAY,
+                      BTN_CABINET, BTN_HOME):
+                if plain(t) == b.text:
+                    return KeyboardButton(t, **({"style": b.style} if b.style else {}))
+            return KeyboardButton(b.text)
+        return ReplyKeyboardMarkup([[back(b) for b in row] for row in markup.keyboard], resize_keyboard=markup.resize_keyboard,
+                                   is_persistent=markup.is_persistent)
+    return markup
+
+
 class ScreenBot(ExtBot):
     """Бот, который запоминает свои ответы на кнопку меню, чтобы удалить их при следующем нажатии."""
 
@@ -5042,21 +5226,39 @@ class ScreenBot(ExtBot):
         # Поэтому такое сообщение удаляем, только когда бот уже прислал меню новым сообщением.
         self._kb = {}       # chat_id -> (id последнего сообщения с меню, было ли оно частью экрана)
 
+    async def _dressed(self, method, args, kwargs, close=True):
+        markup = kwargs.get("reply_markup")
+        if close:
+            markup = with_close(markup)
+        kwargs["reply_markup"] = decorate(markup)
+        try:
+            return await method(*args, **kwargs)
+        except Exception as e:
+            text = str(e).lower()
+            if ICON_IDS and ICONS_ON[0] and ("emoji" in text or "icon" in text or "style" in text):
+                ICONS_ON[0] = False  # Telegram не принимает значки (нет Premium) — дальше без них
+                log.warning("значки на кнопках выключены: %s", e)
+                kwargs["reply_markup"] = strip_icons(kwargs["reply_markup"])
+                return await method(*args, **kwargs)
+            raise
+
     async def edit_message_text(self, *args, **kwargs):
-        kwargs["reply_markup"] = with_close(kwargs.get("reply_markup"))
-        return await super().edit_message_text(*args, **kwargs)
+        return await self._dressed(super().edit_message_text, args, kwargs)
 
     async def edit_message_reply_markup(self, *args, **kwargs):
-        kwargs["reply_markup"] = with_close(kwargs.get("reply_markup"))
-        return await super().edit_message_reply_markup(*args, **kwargs)
+        return await self._dressed(super().edit_message_reply_markup, args, kwargs)
 
     async def send_photo(self, *args, **kwargs):
-        kwargs["reply_markup"] = with_close(kwargs.get("reply_markup"))
-        return await super().send_photo(*args, **kwargs)
+        return await self._dressed(super().send_photo, args, kwargs)
+
+    async def send_document(self, *args, **kwargs):
+        return await self._dressed(super().send_document, args, kwargs, close=False)
+
+    async def send_video(self, *args, **kwargs):
+        return await self._dressed(super().send_video, args, kwargs, close=False)
 
     async def send_message(self, *args, **kwargs):
-        kwargs["reply_markup"] = with_close(kwargs.get("reply_markup"))
-        msg = await super().send_message(*args, **kwargs)
+        msg = await self._dressed(super().send_message, args, kwargs)
         chat = msg.chat_id
         if chat in self._active:
             self._active[chat].append(msg.message_id)
@@ -5101,24 +5303,32 @@ async def user_menu_begin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def build_user_app():
     app = Application.builder().bot(ScreenBot(token=TOKEN)).build()
     # Кнопки меню и команды: выход из переписки по обращению и чистый чат (прошлый экран удаляется).
-    menu = filters.Text([BTN_BUY, BTN_LIST, BTN_HELP, BTN_NEWS, BTN_SUPPORT, BTN_CLEAR, BTN_BALANCE, BTN_GIVEAWAY]) \
-        | filters.Command(["start", "help", "news"])
+    menu = filters.Text(variants(BTN_BUY, BTN_LIST, BTN_HELP, BTN_NEWS, BTN_SUPPORT, BTN_CLEAR, BTN_BALANCE, BTN_GIVEAWAY,
+                                 BTN_CABINET, BTN_HOME)) \
+        | filters.Command(["start", "help", "news", "buy", "cabinet", "configs", "balance", "giveaway", "support"])
     app.add_handler(MessageHandler(menu, user_menu_begin), group=-1)
     app.add_handler(MessageHandler(menu, screen_end), group=1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(MessageHandler(filters.Text([BTN_BUY]), buy))
-    app.add_handler(MessageHandler(filters.Text([BTN_LIST]), list_configs))
-    app.add_handler(MessageHandler(filters.Text([BTN_HELP]), help_cmd))
-    app.add_handler(MessageHandler(filters.Text([BTN_NEWS]), news_cmd))
-    app.add_handler(MessageHandler(filters.Text([BTN_BALANCE]), balance_cmd))
-    app.add_handler(MessageHandler(filters.Text([BTN_GIVEAWAY]), giveaway_cmd))
+    app.add_handler(MessageHandler(filters.Text(variants(BTN_BUY)), buy))
+    app.add_handler(MessageHandler(filters.Text(variants(BTN_LIST)), list_configs))
+    app.add_handler(MessageHandler(filters.Text(variants(BTN_HELP)), help_cmd))
+    app.add_handler(MessageHandler(filters.Text(variants(BTN_NEWS)), news_cmd))
+    app.add_handler(MessageHandler(filters.Text(variants(BTN_BALANCE)), balance_cmd))
+    app.add_handler(MessageHandler(filters.Text(variants(BTN_GIVEAWAY)), giveaway_cmd))
     app.add_handler(CommandHandler("balance", balance_cmd))
+    app.add_handler(MessageHandler(filters.Text(variants(BTN_CABINET)), cabinet_cmd))
+    app.add_handler(MessageHandler(filters.Text(variants(BTN_HOME)), home_cmd))
+    app.add_handler(CommandHandler("cabinet", cabinet_cmd))
+    app.add_handler(CommandHandler("buy", buy))
+    app.add_handler(CommandHandler("configs", list_configs))
+    app.add_handler(CommandHandler("giveaway", giveaway_cmd))
+    app.add_handler(CommandHandler("support", support_start))
     app.add_handler(CommandHandler("news", news_cmd))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_screenshot))
     # Старые кнопки из прошлой версии бота, оставшиеся у клиентов на экране.
-    app.add_handler(MessageHandler(filters.Text([BTN_SUPPORT]), support_start))
-    app.add_handler(MessageHandler(filters.Text([BTN_CLEAR]), clear_and_start))
+    app.add_handler(MessageHandler(filters.Text(variants(BTN_SUPPORT)), support_start))
+    app.add_handler(MessageHandler(filters.Text(variants(BTN_CLEAR)), clear_and_start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, user_text))
     app.add_handler(CallbackQueryHandler(on_user_button))
     app.add_error_handler(on_error)
@@ -5127,8 +5337,8 @@ def build_user_app():
 
 def build_admin_app():
     app = Application.builder().bot(ScreenBot(token=ADMIN_TOKEN)).build()
-    menu = filters.Text([ABTN_PAY, ABTN_USERS, ABTN_GIVE, ABTN_STATS, ABTN_RESEND, ABTN_NEWS, ABTN_TICKETS,
-                         ABTN_POLL, ABTN_SERVERS, ABTN_FORECAST, ABTN_GIVEAWAY, BTN_CLEAR]) | filters.Command(["start", "help"])
+    menu = filters.Text(variants(ABTN_PAY, ABTN_USERS, ABTN_GIVE, ABTN_STATS, ABTN_RESEND, ABTN_NEWS, ABTN_TICKETS,
+                                 ABTN_POLL, ABTN_SERVERS, ABTN_FORECAST, ABTN_GIVEAWAY, BTN_CLEAR)) | filters.Command(["start", "help"])
     admin_menu = filters.User(user_id=ADMINS, allow_empty=True) & menu
     app.add_handler(MessageHandler(admin_menu, screen_begin), group=-1)
     app.add_handler(MessageHandler(admin_menu, screen_end), group=1)
@@ -5141,18 +5351,19 @@ def build_admin_app():
     app.add_handler(MessageHandler(filters.Document.ALL, admin_document))
     app.add_handler(CommandHandler("send", admin_send))
     app.add_handler(CommandHandler("broadcast", admin_broadcast))
-    app.add_handler(MessageHandler(filters.Text([ABTN_PAY]), admin_pending))
-    app.add_handler(MessageHandler(filters.Text([ABTN_USERS]), admin_users))
-    app.add_handler(MessageHandler(filters.Text([ABTN_GIVE]), admin_give_start))
-    app.add_handler(MessageHandler(filters.Text([ABTN_STATS]), admin_stats))
-    app.add_handler(MessageHandler(filters.Text([ABTN_RESEND]), admin_resend_ask))
-    app.add_handler(MessageHandler(filters.Text([ABTN_NEWS]), admin_news_ask))
-    app.add_handler(MessageHandler(filters.Text([ABTN_POLL]), admin_poll))
-    app.add_handler(MessageHandler(filters.Text([ABTN_SERVERS]), admin_servers))
-    app.add_handler(MessageHandler(filters.Text([ABTN_FORECAST]), admin_forecast))
-    app.add_handler(MessageHandler(filters.Text([ABTN_GIVEAWAY]), admin_giveaway))
-    app.add_handler(MessageHandler(filters.Text([ABTN_TICKETS]), admin_tickets))
-    app.add_handler(MessageHandler(filters.Text([BTN_CLEAR]), admin_only(clear_and_start)))
+    app.add_handler(MessageHandler(filters.Text(variants(ABTN_PAY)), admin_pending))
+    app.add_handler(MessageHandler(filters.Text(variants(ABTN_USERS)), admin_users))
+    app.add_handler(MessageHandler(filters.Text(variants(ABTN_GIVE)), admin_give_start))
+    app.add_handler(MessageHandler(filters.Text(variants(ABTN_STATS)), admin_stats))
+    app.add_handler(MessageHandler(filters.Text(variants(ABTN_RESEND)), admin_resend_ask))
+    app.add_handler(MessageHandler(filters.Text(variants(ABTN_NEWS)), admin_news_ask))
+    app.add_handler(MessageHandler(filters.Text(variants(ABTN_POLL)), admin_poll))
+    app.add_handler(MessageHandler(filters.Text(variants(ABTN_SERVERS)), admin_servers))
+    app.add_handler(MessageHandler(filters.Text(variants(ABTN_FORECAST)), admin_forecast))
+    app.add_handler(MessageHandler(filters.Text(variants(ABTN_GIVEAWAY)), admin_giveaway))
+    app.add_handler(MessageHandler(filters.Text(variants(ABTN_TICKETS)), admin_tickets))
+    app.add_handler(MessageHandler(filters.Text(variants(BTN_CLEAR)), admin_only(clear_and_start)))
+    app.add_handler(CommandHandler("icons", admin_icons))
     app.add_handler(CommandHandler("resend", admin_resend_ask))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text))
     app.add_handler(CallbackQueryHandler(on_admin_button))
@@ -5165,6 +5376,16 @@ async def amain():
     user_app, admin_app = build_user_app(), build_admin_app()
     async with user_app, admin_app:
         USER_BOT, ADMIN_BOT = user_app.bot, admin_app.bot
+        ICON_IDS.update(load_state()["settings"].get("icons", {}))
+        try:
+            await USER_BOT.set_my_commands([
+                BotCommand("start", "Главное меню"), BotCommand("buy", "Купить конфиг"),
+                BotCommand("help", "Как подключить"), BotCommand("cabinet", "Личный кабинет"),
+                BotCommand("configs", "Мои конфиги"), BotCommand("balance", "Баланс и друзья"),
+                BotCommand("giveaway", "Розыгрыш"), BotCommand("news", "Что нового"),
+                BotCommand("support", "Нужна помощь")])
+        except Exception:
+            log.exception("не удалось задать команды бота")
         # Сразу применяем сроки к серверу: после простоя бота истёкшие конфиги отключатся.
         async with lock:
             write_server_conf(load_state())
