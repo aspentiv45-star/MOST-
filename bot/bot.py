@@ -81,6 +81,16 @@ TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "3"))
 DAYS = int(os.environ.get("DAYS", "30"))
 PRICE3 = int(os.environ.get("PRICE3", "249"))       # 3 месяца для устройства (скидка)
 TOPUP_MIN = int(os.environ.get("TOPUP_MIN", "150"))  # минимальное пополнение баланса, ₽
+# Ckassa (автоматическое пополнение). Ключи — только в /etc/most/bot.env, не в репозитории.
+CK_TOKEN = os.environ.get("CKASSA_SHOP_TOKEN", "")
+CK_KEY = os.environ.get("CKASSA_SEC_KEY", "")
+CK_SERVICE = os.environ.get("CKASSA_SERVICE", "")       # код услуги, вида 111-11111-1
+CK_PROP = os.environ.get("CKASSA_PROP", "ЛИЦЕВОЙ_СЧЕТ")  # название реквизита услуги (смотрите в ЛК Ckassa)
+CK_URL = os.environ.get("CKASSA_URL", "https://api2.ckassa.ru/api-shop/rs/shop").rstrip("/")
+CK_PAYTYPES = [x for x in os.environ.get("CKASSA_PAYTYPES", "sbp,card").replace(" ", "").split(",") if x]
+CK_PAID = ("payed", "holded", "processed")
+CK_FAILED = ("created_error", "rejected", "refunded")
+CK_TTL = 24 * 3600  # сколько ждём оплату по созданной ссылке
 REF_NEED = int(os.environ.get("REF_NEED", "3"))      # сколько друзей должны оплатить, чтобы получить подарок
 REF_DAYS = int(os.environ.get("REF_DAYS", "30"))     # подарок за каждых REF_NEED друзей, дней
 PAY_FILE = os.environ.get("PAY_FILE", "/etc/most/pay.txt")
@@ -389,6 +399,9 @@ def load_state():
     state.setdefault("next_giveaway", 1)
     state.setdefault("next_poll", 1)
     state.setdefault("settings", {})
+    # Платежи Ckassa: {regPayNum: {"user", "amount", "then", "created", "status": wait|done|failed}}
+    state.setdefault("ckassa", {})
+    state.setdefault("next_ck", 1)
     # VLESS убран: выданные подписки VLESS удаляем, за действующие возвращаем цену на баланс.
     for pub in [k for k, p in state["peers"].items() if p.get("kind") == "vless"]:
         p = state["peers"].pop(pub)
@@ -1624,7 +1637,7 @@ async def balance_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 TOPUP_AMOUNTS = (150, 300, 500, 1000)
 
 
-async def topup_screen(message, ctx, amount, query=None, then=None):
+async def topup_screen(message, ctx, amount, query=None, then=None, manual=False):
     """Реквизиты для пополнения. then — (за что, месяцев): после пополнения бот сам оплатит это с баланса."""
     ctx.user_data["pay_for"] = TOPUP
     ctx.user_data["pay_amount"] = amount
@@ -1633,13 +1646,158 @@ async def topup_screen(message, ctx, amount, query=None, then=None):
         ctx.user_data["pay_then"] = then
     ctx.user_data.pop("await", None)
     after = f"\n\nПосле пополнения бот сам оплатит: {target_label(load_state(), then[0])}." if then else ""
-    text = (f"➕ Пополнение баланса на {amount} ₽.\n\n{pay_text()}\n\n"
-            f"Переведите ровно {amount} ₽ и пришлите сюда скриншот перевода одним фото.{after}")
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Другая сумма", callback_data="top:")]])
+    if ck_on() and not manual:
+        names = {"sbp": "🏦 Оплатить по СБП", "card": "💳 Оплатить картой", "sberPay": "💳 SberPay"}
+        rows = [[InlineKeyboardButton(names.get(t, f"💳 {t}"), callback_data=f"ckp:{t}:{amount}")]
+                for t in CK_PAYTYPES]
+        if os.path.exists(PAY_FILE):
+            rows.append([InlineKeyboardButton("📷 Перевод со скриншотом", callback_data=f"ckm:{amount}")])
+        rows.append([InlineKeyboardButton("⬅️ Другая сумма", callback_data="top:")])
+        text = (f"➕ Пополнение баланса на {amount} ₽.\n\nВыберите способ оплаты — "
+                f"деньги зачислятся автоматически, через минуту после оплаты.{after}")
+        markup = InlineKeyboardMarkup(rows)
+    else:
+        text = (f"➕ Пополнение баланса на {amount} ₽.\n\n{pay_text()}\n\n"
+                f"Переведите ровно {amount} ₽ и пришлите сюда скриншот перевода одним фото.{after}")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Другая сумма", callback_data="top:")]])
     if query:
         await query.edit_message_text(text, reply_markup=markup)
     else:
         await message.reply_text(text, reply_markup=markup)
+
+
+# ---------- Ckassa: автоматическое пополнение ----------
+
+def ck_on():
+    return bool(CK_TOKEN and CK_KEY and CK_SERVICE)
+
+
+async def ck_call(method, body):
+    """POST в Shop API Ckassa (BasicAuth shopToken:secKey). Возвращает JSON; ошибка API — исключение."""
+    import httpx
+    auth = base64.b64encode(f"{CK_TOKEN}:{CK_KEY}".encode()).decode()
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(f"{CK_URL}/{method}", json=body,
+                              headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"})
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    if r.status_code != 200 or not isinstance(data, dict) or data.get("code") and not data.get("state"):
+        raise RuntimeError(f"Ckassa {method}: HTTP {r.status_code} {str(data or r.text)[:300]}")
+    return data
+
+
+async def ck_create(uid, amount, pay_type, then):
+    """Создать платёж на amount ₽ и вернуть ссылку на оплату."""
+    async with lock:
+        state = load_state()
+        order = state["next_ck"]
+        state["next_ck"] = order + 1
+        save_state(state)
+    body = {"serviceCode": CK_SERVICE, "amount": str(amount * 100), "comission": "0",
+            "properties": [{"name": CK_PROP, "value": str(order)}],
+            "orderBestBefore": int(time.time() + CK_TTL)}
+    if pay_type != "card":
+        body["payType"] = pay_type
+    data = await ck_call("do/payment/anonymous", body)
+    num, url = str(data.get("regPayNum") or ""), data.get("payUrl")
+    if not num or not url:
+        raise RuntimeError(f"Ckassa: нет номера платежа или ссылки: {str(data)[:300]}")
+    async with lock:
+        state = load_state()
+        state["ckassa"][num] = {"user": str(uid), "amount": amount, "then": then, "order": order,
+                                "created": time.time(), "status": "wait"}
+        save_state(state)
+    return num, url
+
+
+async def ck_credit(num):
+    """Платёж num оплачен: зачислить на баланс один раз, затем оплатить «then», если было."""
+    async with lock:
+        state = load_state()
+        p = state["ckassa"].get(num)
+        if not p or p["status"] != "wait":
+            return
+        p["status"] = "done"
+        p["paid"] = time.time()
+        u = state["users"].setdefault(p["user"], {"name": p["user"]})
+        u["balance"] = u.get("balance", 0) + p["amount"]
+        save_state(state)
+    uid = int(p["user"])
+    try:
+        await USER_BOT.send_message(uid, f"💰 Оплата получена, баланс пополнен на {p['amount']} ₽. "
+                                         f"Теперь {u['balance']} ₽.", reply_markup=KEYBOARD)
+    except Exception:
+        pass
+    extra = ""
+    if p.get("then"):
+        target, months = p["then"]
+        ok, text = await buy_with_balance(uid, target, int(months))
+        extra = f"\n{text}"
+        try:
+            await USER_BOT.send_message(uid, text)
+        except Exception:
+            pass
+    for admin in ADMINS:
+        try:
+            await ADMIN_BOT.send_message(admin, f"💳 Ckassa: +{p['amount']} ₽ — {u.get('name', uid)} (ID {uid}), "
+                                                f"платёж {num}.{extra}")
+        except Exception:
+            pass
+
+
+async def ck_check(num):
+    """Спросить у Ckassa статус платежа; оплачен — зачислить. Возвращает статус."""
+    data = await ck_call("check/payment/state", {"regPayNum": num})
+    st = str(data.get("state", "")).lower()
+    if st in CK_PAID:
+        await ck_credit(num)
+    elif st in CK_FAILED:
+        async with lock:
+            state = load_state()
+            p = state["ckassa"].get(num)
+            if p and p["status"] == "wait":
+                p["status"] = "failed"
+                save_state(state)
+    return st
+
+
+async def ckassa_loop():
+    """Каждые 30 с проверяем неоплаченные платежи (не нужен свой HTTPS-сервер для уведомлений)."""
+    while True:
+        await asyncio.sleep(30)
+        if not ck_on():
+            continue
+        try:
+            state = load_state()
+            now = time.time()
+            for num, p in list(state["ckassa"].items()):
+                if p["status"] != "wait":
+                    continue
+                age = now - p["created"]
+                if age > CK_TTL + 3600:
+                    async with lock:
+                        st = load_state()
+                        if st["ckassa"].get(num, {}).get("status") == "wait":
+                            st["ckassa"][num]["status"] = "expired"
+                            save_state(st)
+                    continue
+                # первые 2 часа — каждые 30 с, потом раз в 5 минут
+                if age > 7200 and int(now // 30) % 10:
+                    continue
+                try:
+                    await ck_check(num)
+                except Exception as e:
+                    logging.warning("Ckassa %s: %s", num, e)
+            # старые записи чистим через 30 дней
+            if any(now - p["created"] > 30 * 86400 for p in state["ckassa"].values()):
+                async with lock:
+                    st = load_state()
+                    st["ckassa"] = {k: v for k, v in st["ckassa"].items() if now - v["created"] <= 30 * 86400}
+                    save_state(st)
+        except Exception as e:
+            await report_error("Проверка оплат Ckassa", e)
 
 
 async def referral_credit(uid):
@@ -2029,7 +2187,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if until and action not in ("close", "kdone"):
         await query.answer(blocked_text(until), show_alert=True)
         return
-    if action not in ("gwj", "gwr"):  # там ответ — всплывающим окном
+    if action not in ("gwj", "gwr", "ckp", "ckc"):  # там ответ — всплывающим окном
         await query.answer()
 
     if action == "close":
@@ -2320,6 +2478,52 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if action == "topa":
         await topup_screen(query.message, ctx, int(arg), query)
+        return
+    if action == "ckm":
+        await topup_screen(query.message, ctx, int(arg), query, manual=True)
+        return
+    if action == "ckp":
+        pay_type, _, amount = arg.partition(":")
+        amount = int(amount)
+        if not ck_on() or amount < TOPUP_MIN:
+            await query.answer("Оплата сейчас недоступна", show_alert=True)
+            return
+        ctx.user_data.pop("await", None)
+        await query.answer("⏳ Создаю ссылку на оплату…")
+        try:
+            num, url = await ck_create(uid, amount, pay_type, ctx.user_data.get("pay_then"))
+        except Exception as e:
+            await report_error("Ckassa: не создан платёж", e)
+            await query.edit_message_text("Не получилось создать оплату. Попробуйте ещё раз чуть позже "
+                                          "или напишите в поддержку.",
+                                          reply_markup=InlineKeyboardMarkup(
+                                              [[InlineKeyboardButton("⬅️ Назад", callback_data=f"topa:{amount}")]]))
+            return
+        ctx.user_data.pop("pay_then", None)
+        ctx.user_data.pop("pay_for", None)
+        await query.edit_message_text(
+            f"➕ Пополнение на {amount} ₽.\n\nНажмите «Оплатить» и завершите оплату. Баланс пополнится "
+            f"автоматически — бот пришлёт сообщение. Ссылка действует сутки.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"💳 Оплатить {amount} ₽", url=url)],
+                [InlineKeyboardButton("🔄 Я оплатил — проверить", callback_data=f"ckc:{num}")]]))
+        return
+    if action == "ckc":
+        p = load_state()["ckassa"].get(arg)
+        if not p or p["user"] != str(uid):
+            await query.answer("Платёж не найден", show_alert=True)
+            return
+        if p["status"] == "wait":
+            try:
+                await ck_check(arg)
+            except Exception as e:
+                logging.warning("Ckassa %s: %s", arg, e)
+            p = load_state()["ckassa"][arg]
+        msg = {"done": "✅ Оплата получена, баланс пополнен.",
+               "failed": "❌ Оплата не прошла. Создайте новую ссылку: «➕ Пополнить».",
+               "expired": "⌛️ Ссылка устарела. Создайте новую: «➕ Пополнить»."}.get(
+            p["status"], "⏳ Оплата пока не поступила. Если уже оплатили — подождите минуту, бот сам пришлёт сообщение.")
+        await query.answer(msg, show_alert=True)
         return
     if action == "refskip":
         # Вход без приглашения: обычный запрос доступа администратору.
@@ -5401,7 +5605,8 @@ async def amain():
         tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop()),
                  asyncio.create_task(dynamic_loop()), asyncio.create_task(monitor_loop()),
                  asyncio.create_task(tunnel_loop()), asyncio.create_task(giveaway_loop()),
-                 asyncio.create_task(waiting_loop()), asyncio.create_task(backup_loop())]
+                 asyncio.create_task(waiting_loop()), asyncio.create_task(backup_loop()),
+                 asyncio.create_task(ckassa_loop())]
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
