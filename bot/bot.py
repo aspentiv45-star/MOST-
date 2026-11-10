@@ -1501,7 +1501,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Привет! Это aspentivVPN.\n{PRICE} ₽ за {DAYS} дней на устройство, 3 месяца — {PRICE3} ₽. "
         f"Роутер — {ROUTER_PRICE} ₽.\n\n"
-        + (f"Ваших конфигов: {len(mine)}, активных: {active}. Подробнее — «{BTN_LIST}»." if mine
+        + (f"Ваших конфигов: {len(mine)}, активных: {active}. Подробнее — «{BTN_CABINET}»." if mine
            else f"🎁 Попробуйте бесплатно {TRIAL_DAYS} дня: «{BTN_BUY}» → «Попробовать бесплатно»."
            if trial_available(state, update.effective_user.id)
            else f"Чтобы подключиться, нажмите «{BTN_BUY}»."),
