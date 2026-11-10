@@ -351,7 +351,19 @@ HELP_BUTTONS = InlineKeyboardMarkup([
     [InlineKeyboardButton("📡 Роутер (Keenetic, OpenWrt)", callback_data="help:router-awg")],
     [InlineKeyboardButton("🔀 Режимы: что это и как поменять", callback_data="help:mode")],
     [InlineKeyboardButton("🆘 Не работает", callback_data="help:trouble")],
+    [InlineKeyboardButton("↩️ Вернуть средства", callback_data="rfd:")],
 ])
+
+# Причины возврата: код -> (тема обращения, что попросить написать)
+REFUND_REASONS = {
+    "mis": ("↩️ Возврат: пополнил ошибочно",
+            "Напишите одним сообщением: сумму, когда и каким способом пополняли (перевод или звёзды)."),
+    "bad": ("↩️ Возврат: конфиг не работает",
+            "Напишите одним сообщением: какой конфиг, на каком устройстве, через Wi-Fi или мобильный интернет "
+            "и что пробовали. Можно прислать скриншот с подписью. Сначала попробуем починить — "
+            "если не получится, вернём деньги."),
+    "own": ("↩️ Возврат: свой вопрос", "Опишите ваш вопрос одним сообщением."),
+}
 
 log = logging.getLogger("most")
 lock = asyncio.Lock()
@@ -2581,6 +2593,28 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Видео-инструкция пока не загружена — напишите в «🆘 Нужна помощь».")
         return
 
+    if action == "rfd":
+        banned = support_ban_text(load_state(), uid)
+        if banned:
+            await query.edit_message_text(banned)
+            return
+        if arg in REFUND_REASONS:
+            topic, ask = REFUND_REASONS[arg]
+            ctx.user_data.pop("pay_for", None)
+            ctx.user_data.pop("album", None)
+            ctx.user_data["await"] = "ticket"
+            ctx.user_data["ticket_topic"] = topic
+            await query.edit_message_text(f"{topic.partition(' ')[2]}\n\n{ask}\n\nАдминистратор ответит здесь. "
+                                          "Если передумали — напишите «отмена».")
+            return
+        await query.edit_message_text(
+            "↩️ Возврат средств. Что случилось?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💸 Пополнил ошибочно", callback_data="rfd:mis")],
+                [InlineKeyboardButton("🔧 Конфиг не работает", callback_data="rfd:bad")],
+                [InlineKeyboardButton("✍️ Свой вопрос", callback_data="rfd:own")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="help:")]]))
+        return
     if action == "help":
         # Инструкция открывается в том же сообщении, а не новым — чат не засоряется.
         try:
@@ -4726,6 +4760,7 @@ def leave_ticket(ctx):
     if (ctx.user_data.get("await") or "").startswith(("ticket", "rename")):
         ctx.user_data.pop("await")
     ctx.user_data.pop("album", None)
+    ctx.user_data.pop("ticket_topic", None)
 
 
 def open_ticket_buttons(tid):
@@ -4806,6 +4841,9 @@ async def create_ticket(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text=Non
         await update.message.reply_text(banned, reply_markup=KEYBOARD)
         return
     text = (text if text is not None else update.message.text).strip()
+    topic = ctx.user_data.pop("ticket_topic", None)
+    if topic:
+        text = f"{topic}\n{text}"
     async with lock:
         state = load_state()
         get_user(state, update.effective_user)
@@ -5018,6 +5056,7 @@ async def user_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if ctx.user_data.pop("await", None) == "ticket":
         if update.message.text.strip().lower() in ("отмена", "отменить", "cancel"):
+            ctx.user_data.pop("ticket_topic", None)
             await update.message.reply_text("Хорошо, обращение не отправлено.", reply_markup=KEYBOARD)
             return
         await create_ticket(update, ctx)
