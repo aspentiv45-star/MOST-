@@ -82,6 +82,9 @@ ROUTER_PRICE = int(os.environ.get("ROUTER_PRICE", "500"))
 TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "3"))
 DAYS = int(os.environ.get("DAYS", "30"))
 PRICE3 = int(os.environ.get("PRICE3", "249"))       # 3 месяца для устройства (скидка)
+YEAR_DISCOUNT = 20                                   # скидка за год, %
+PRICE12 = int(os.environ.get("PRICE12", str(round(12 * PRICE * (100 - YEAR_DISCOUNT) / 100))))  # год для устройства
+YEAR_DAYS = 365
 TOPUP_MIN = int(os.environ.get("TOPUP_MIN", "150"))  # минимальное пополнение баланса, ₽
 # Ckassa (автоматическое пополнение). Ключи — только в /etc/most/bot.env, не в репозитории.
 CK_TOKEN = os.environ.get("CKASSA_SHOP_TOKEN", "")
@@ -96,6 +99,9 @@ CK_TTL = 24 * 3600  # сколько ждём оплату по созданно
 # Telegram Stars: STAR_RUB — сколько рублей баланса даёт одна звезда (STARS=0 — выключить).
 STARS_ON = os.environ.get("STARS", "1") != "0"
 STAR_RUB = float(os.environ.get("STAR_RUB", "1.2"))
+STARS_1M = int(os.environ.get("STARS_1M", "99"))    # цена 1 месяца звёздами
+STARS_3M = int(os.environ.get("STARS_3M", "149"))   # цена 3 месяцев звёздами
+STARS_12M = int(os.environ.get("STARS_12M", str(round(12 * STARS_1M * 0.8))))  # год звёздами (−20%)
 STARS_SHOP = os.environ.get("STARS_SHOP", "yoostars_bot").lstrip("@")  # где купить звёзды, если их нет ("" — не показывать)
 REF_NEED = int(os.environ.get("REF_NEED", "3"))      # сколько друзей должны оплатить, чтобы получить подарок
 REF_DAYS = int(os.environ.get("REF_DAYS", "30"))     # подарок за каждых REF_NEED друзей, дней
@@ -596,7 +602,7 @@ def plans(state, target):
     """Варианты оплаты: (месяцев, дней, цена). Для устройства — ещё 3 месяца со скидкой."""
     if is_router(state, target):
         return [(1, DAYS, ROUTER_PRICE)]
-    return [(1, DAYS, PRICE), (3, 3 * DAYS, PRICE3)]
+    return [(1, DAYS, PRICE), (3, 3 * DAYS, PRICE3), (12, YEAR_DAYS, PRICE12)]
 
 
 def plan(state, target, months):
@@ -608,7 +614,7 @@ def balance(state, uid):
 
 
 def months_text(m):
-    return {1: "1 месяц", 3: "3 месяца"}.get(m, f"{m} мес.")
+    return {1: "1 месяц", 3: "3 месяца", 12: "1 год"}.get(m, f"{m} мес.")
 
 
 def create_peer(state, uid, until, kind="device"):
@@ -1520,7 +1526,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mine = user_peers(state, update.effective_user.id)
     active = sum(1 for p in mine.values() if peer_active(p))
     await update.message.reply_text(
-        f"Привет! Это aspentivVPN.\n{PRICE} ₽ за {DAYS} дней на устройство, 3 месяца — {PRICE3} ₽. "
+        f"Привет! Это aspentivVPN.\n{PRICE} ₽ за {DAYS} дней на устройство, 3 месяца — {PRICE3} ₽, "
+        f"год — {PRICE12} ₽ (−{YEAR_DISCOUNT}%). "
         f"Роутер — {ROUTER_PRICE} ₽.\n\n"
         + (f"Ваших конфигов: {len(mine)}, активных: {active}. Подробнее — «{BTN_CABINET}»." if mine
            else f"🎁 Попробуйте бесплатно {TRIAL_DAYS} дня: «{BTN_BUY}» → «Попробовать бесплатно»."
@@ -1568,6 +1575,9 @@ async def pay_screen(message, ctx, target, months, state, query=None):
         text += (f"\nНа балансе недостаточно средств. Чтобы пополнить, нажмите «Пополнить» — "
                  "после пополнения конфиг оплатится сам.")
         rows.append([InlineKeyboardButton("➕ Пополнить", callback_data=f"topb:{months}:{target}")])
+    if STARS_ON:
+        rows.append([InlineKeyboardButton(f"⭐️ Оплатить звёздами — {plan_stars(state, target, months)} ⭐️",
+                                          callback_data=f"stb:{months}:{target}")])
     if len(plans(state, target)) > 1:
         rows.append([InlineKeyboardButton("⬅️ Другой срок", callback_data=f"pln:{target}")])
     elif target not in KIND_BY_TARGET:
@@ -1700,6 +1710,29 @@ async def stars_invoice(bot, uid, amount, then):
         description="Сервис aspentiv VPN: пополнение баланса для покупки и продления подписки.",
         payload=f"t:{amount}:{months}:{target}", currency="XTR",
         prices=[LabeledPrice(f"Пополнение на {amount} ₽", stars_for(amount))])
+    await stars_shop_hint(bot, uid)
+
+
+def plan_stars(state, target, months):
+    """Цена срока в звёздах: для устройства — STARS_1M / STARS_3M, для роутера — по курсу от рублёвой цены."""
+    months, days, price = plan(state, target, months)
+    if is_router(state, target):
+        return stars_for(price)
+    return {3: STARS_3M, 12: STARS_12M}.get(months, STARS_1M)
+
+
+async def stars_plan_invoice(bot, uid, target, months):
+    state = load_state()
+    months, days, price = plan(state, target, months)
+    await bot.send_invoice(
+        chat_id=uid, title=f"aspentiv VPN — {months_text(months)}",
+        description=f"Доступ к сервису aspentiv VPN на {days} дней: {target_label(state, target)}.",
+        payload=f"p:{price}:{months}:{target}", currency="XTR",
+        prices=[LabeledPrice(f"Подписка на {months_text(months)}", plan_stars(state, target, months))])
+    await stars_shop_hint(bot, uid)
+
+
+async def stars_shop_hint(bot, uid):
     if STARS_SHOP:
         await bot.send_message(
             uid, f"Нет звёзд? Их можно купить в @{STARS_SHOP} за рубли, затем вернуться и нажать «Заплатить» в счёте выше.",
@@ -1708,18 +1741,27 @@ async def stars_invoice(bot, uid, amount, then):
 
 
 def parse_stars_payload(payload):
+    """t:сумма:мес:за что — пополнение; p:цена:мес:за что — сразу покупка срока. -> (рублей на баланс, then, звёзд)"""
     kind, _, rest = (payload or "").partition(":")
     amount, _, rest = rest.partition(":")
     months, _, target = rest.partition(":")
-    if kind != "t" or not amount.isdigit() or not months.isdigit() or int(amount) < TOPUP_MIN:
+    if kind not in ("t", "p") or not amount.isdigit() or not months.isdigit():
         return None
-    return int(amount), ((target, int(months)) if target else None)
+    then = (target, int(months)) if target else None
+    if kind == "t":
+        return (int(amount), then, stars_for(int(amount))) if int(amount) >= TOPUP_MIN else None
+    if not then:
+        return None
+    state = load_state()
+    if then[0] not in KIND_BY_TARGET and then[0] not in state["peers"]:
+        return None
+    return int(amount), then, plan_stars(state, then[0], then[1])
 
 
 async def on_precheckout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.pre_checkout_query
     parsed = parse_stars_payload(q.invoice_payload)
-    ok = bool(parsed) and q.currency == "XTR" and q.total_amount == stars_for(parsed[0]) \
+    ok = bool(parsed) and q.currency == "XTR" and q.total_amount == parsed[2] \
         and not blocked_until(load_state(), q.from_user.id)
     await q.answer(ok=ok, error_message=None if ok else "Оплата сейчас недоступна, напишите в поддержку.")
 
@@ -1730,7 +1772,7 @@ async def on_stars_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     parsed = parse_stars_payload(pay.invoice_payload)
     if not parsed:
         return
-    amount, then = parsed
+    amount, then, _ = parsed
     async with lock:
         state = load_state()
         if pay.telegram_payment_charge_id in state["stars"]:
@@ -1740,8 +1782,9 @@ async def on_stars_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         u = state["users"].setdefault(str(uid), {"name": update.effective_user.full_name or str(uid)})
         u["balance"] = u.get("balance", 0) + amount
         save_state(state)
-    await update.message.reply_text(f"💰 Оплата получена, баланс пополнен на {amount} ₽. Теперь {u['balance']} ₽.",
-                                    reply_markup=KEYBOARD)
+    if not pay.invoice_payload.startswith("p:"):
+        await update.message.reply_text(f"💰 Оплата получена, баланс пополнен на {amount} ₽. Теперь {u['balance']} ₽.",
+                                        reply_markup=KEYBOARD)
     extra = ""
     if then:
         ok, text = await buy_with_balance(uid, then[0], int(then[1]))
@@ -2052,7 +2095,7 @@ def _buy_screen(guide, target, price, back):
     """Экран «инструкция + купить»: подробные шаги для выбранного устройства и кнопка оплаты."""
     return (GUIDES[guide], InlineKeyboardMarkup([
         [InlineKeyboardButton(f"💳 Купить — {price} ₽ за {DAYS} дней" if target != NEW else
-                              f"💳 Купить — {PRICE} ₽/мес или {PRICE3} ₽ за 3 мес",
+                              f"💳 Купить — от {PRICE} ₽/мес, год {PRICE12} ₽",
                               callback_data=f"buy:{target}:{guide}" if guide in OS_NAMES else f"buy:{target}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data=f"menu:{back}")],
     ]))
@@ -2593,6 +2636,11 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if action == "topa":
         await topup_screen(query.message, ctx, int(arg), query)
+        return
+    if action == "stb":
+        m, _, target = arg.partition(":")
+        if STARS_ON and m.isdigit():
+            await stars_plan_invoice(ctx.bot, uid, target, int(m))
         return
     if action == "stp":
         amount = int(arg)
