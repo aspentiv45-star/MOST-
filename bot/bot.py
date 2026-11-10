@@ -364,6 +364,19 @@ REFUND_REASONS = {
             "если не получится, вернём деньги."),
     "own": ("↩️ Возврат: свой вопрос", "Опишите ваш вопрос одним сообщением."),
 }
+SUPPORT_TEXT = ("🆘 Выберите тему или сразу опишите проблему одним сообщением: что не работает, на каком устройстве, "
+                "через Wi-Fi или мобильный интернет. Можно прислать скриншот ошибки с подписью. "
+                "Администратор ответит здесь.\n\nЕсли передумали — напишите «отмена».")
+SUPPORT_BUTTONS = InlineKeyboardMarkup([
+    [InlineKeyboardButton("↩️ Вернуть средства", callback_data="rfd:")],
+    [InlineKeyboardButton("🔧 Конфиг не работает", callback_data="tpc:bad")],
+    [InlineKeyboardButton("✍️ Свой вопрос", callback_data="tpc:own")]])
+SUPPORT_TOPICS = {
+    "bad": ("🔧 Конфиг не работает",
+            "Напишите одним сообщением: какой конфиг, на каком устройстве, через Wi-Fi или мобильный интернет "
+            "и что пробовали. Можно прислать скриншот с подписью."),
+    "own": ("✍️ Свой вопрос", "Опишите ваш вопрос одним сообщением."),
+}
 
 log = logging.getLogger("most")
 lock = asyncio.Lock()
@@ -2593,13 +2606,14 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Видео-инструкция пока не загружена — напишите в «🆘 Нужна помощь».")
         return
 
-    if action == "rfd":
+    if action in ("rfd", "tpc"):
         banned = support_ban_text(load_state(), uid)
         if banned:
             await query.edit_message_text(banned)
             return
-        if arg in REFUND_REASONS:
-            topic, ask = REFUND_REASONS[arg]
+        reasons = REFUND_REASONS if action == "rfd" else SUPPORT_TOPICS
+        if arg in reasons:
+            topic, ask = reasons[arg]
             ctx.user_data.pop("pay_for", None)
             ctx.user_data.pop("album", None)
             ctx.user_data["await"] = "ticket"
@@ -2607,13 +2621,18 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"{topic.partition(' ')[2]}\n\n{ask}\n\nАдминистратор ответит здесь. "
                                           "Если передумали — напишите «отмена».")
             return
+        if action == "tpc":
+            ctx.user_data["await"] = "ticket"
+            ctx.user_data.pop("ticket_topic", None)
+            await query.edit_message_text(SUPPORT_TEXT, reply_markup=SUPPORT_BUTTONS)
+            return
         await query.edit_message_text(
             "↩️ Возврат средств. Что случилось?",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("💸 Пополнил ошибочно", callback_data="rfd:mis")],
                 [InlineKeyboardButton("🔧 Конфиг не работает", callback_data="rfd:bad")],
                 [InlineKeyboardButton("✍️ Свой вопрос", callback_data="rfd:own")],
-                [InlineKeyboardButton("⬅️ Назад", callback_data="help:")]]))
+                [InlineKeyboardButton("⬅️ Назад", callback_data="tpc:")]]))
         return
     if action == "help":
         # Инструкция открывается в том же сообщении, а не новым — чат не засоряется.
@@ -4828,11 +4847,8 @@ async def support_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.pop("pay_for", None)
     ctx.user_data.pop("album", None)
     ctx.user_data["await"] = "ticket"
-    await update.message.reply_text(
-        "🆘 Опишите проблему одним сообщением: что не работает, на каком устройстве, "
-        "через Wi-Fi или мобильный интернет. Можно прислать скриншот ошибки с подписью. "
-        "Администратор ответит здесь.\n\n"
-        "Если передумали — напишите «отмена».")
+    ctx.user_data.pop("ticket_topic", None)
+    await update.message.reply_text(SUPPORT_TEXT, reply_markup=SUPPORT_BUTTONS)
 
 
 async def create_ticket(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text=None, photo=None):
