@@ -27,17 +27,24 @@ if [[ ! -f "$ENV" ]]; then
 # Данные для сайта. Заполните все строки и снова запустите: sudo bash site-setup.sh
 DOMAIN=most-vpn.ru
 BRAND=aspentiv VPN
-# Как в документах: «ИП Иванов Иван Иванович»
-NAME=ИП Фамилия Имя Отчество
+# ФИО как в паспорте (самозанятый) или «ИП Иванов Иван Иванович»
+NAME=Фамилия Имя Отчество
 INN=000000000000
-OGRNIP=000000000000000
+# Только для ИП; самозанятым оставьте пустым — на сайте будет «плательщик НПД (самозанятый)»
+OGRNIP=
 # Адрес для корреспонденции (не «до востребования»)
 ADDRESS=000000, г. Город, ул. Улица, д. 1, кв. 1
 PHONE=+7 900 000-00-00
 EMAIL=support@most-vpn.ru
 BOT=aspentivVPNbot
 PRICE=100
+PRICE3=249
+PRICE12=960
 ROUTER_PRICE=500
+TOPUP_MIN=150
+STARS_1M=99
+STARS_3M=229
+STARS_12M=899
 DAYS=30
 TRIAL_DAYS=3
 # Дата редакции оферты; пусто — сегодняшняя
@@ -61,6 +68,13 @@ for line in open(env_path, encoding="utf-8"):
     if line and not line.startswith("#") and "=" in line:
         k, v = line.split("=", 1)
         values[k.strip()] = v.strip()
+ogrnip = values.get("OGRNIP", "").strip()
+values["LEGAL"] = (f"ОГРНИП {ogrnip}" if ogrnip
+                   else "плательщик налога на профессиональный доход (самозанятый)")
+# Для старых site.env без новых строк — значения как в боте по умолчанию
+for k, v in {"PRICE3": "249", "PRICE12": "960", "TOPUP_MIN": "150",
+             "STARS_1M": "99", "STARS_3M": "229", "STARS_12M": "899"}.items():
+    values.setdefault(k, v)
 if not values.get("OFFER_DATE"):
     values["OFFER_DATE"] = datetime.date.today().strftime("%d.%m.%Y")
 src = pathlib.Path(src)
@@ -73,8 +87,8 @@ for page in src.glob("*.html"):
     text = page.read_text(encoding="utf-8")
     text = re.sub(r"\{\{HEADER\|([^}]*)\}\}", lambda m: header.replace("{{TITLE}}", m.group(1)), text)
     text = text.replace("{{FOOTER}}", footer)
-    text = re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: esc.get(m.group(1), m.group(0)), text)
-    left = re.findall(r"\{\{[A-Z_|]+\}\}", text)
+    text = re.sub(r"\{\{([A-Z0-9_]+)\}\}", lambda m: esc.get(m.group(1), m.group(0)), text)
+    left = re.findall(r"\{\{[A-Z0-9_|]+\}\}", text)
     if left:
         sys.exit(f"в {page.name} не заполнено: {', '.join(sorted(set(left)))}")
     (pathlib.Path(dst) / page.name).write_text(text, encoding="utf-8")
