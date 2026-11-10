@@ -28,6 +28,7 @@ import subprocess
 import tempfile
 import time
 import traceback
+import zipfile
 import zlib
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -2661,7 +2662,8 @@ async def admin_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{ABTN_RESEND} — отправить всем клиентам актуальные файлы их конфигов\n"
         f"{ABTN_NEWS} — написать всем клиентам, что нового (попадёт в «{BTN_NEWS}»)\n"
         f"{ABTN_TICKETS} — обращения клиентов: ответить, дать конфиг, вернуть деньги, отклонить\n\n"
-        "Команды: /send ID текст — написать клиенту, /broadcast текст — написать всем."
+        "Команды: /send ID текст — написать клиенту, /broadcast текст — написать всем, "
+        "/backup — бэкап сейчас (и так приходит каждую ночь), /restore — восстановить из бэкапа."
         + waiting_line(load_state()),
         reply_markup=ADMIN_KEYBOARD)
 
@@ -3160,6 +3162,20 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text, reply_markup=buttons)
         except Exception:
             pass  # ничего не изменилось
+        return
+
+    if action == "rst":
+        await query.answer()
+        data = ctx.user_data.pop("restore_data", None)
+        if arg != "yes" or not data:
+            await query.edit_message_text("Восстановление отменено." if arg != "yes" else "Файл потерялся — /restore заново.")
+            return
+        try:
+            state = await restore_backup(data)
+            await query.edit_message_text(f"✅ База восстановлена: клиентов {len(state['users'])}, "
+                                          f"конфигов {len(state['peers'])}. Сервер VPN обновлён.")
+        except Exception as e:
+            await query.edit_message_text(f"Не получилось: {e}")
         return
 
     if action == "tun":
@@ -4770,32 +4786,48 @@ async def check_expiry():
         for uid in unblocked:
             state["users"][uid].pop("blocked_until")
             expired = True  # конфиги снова попадут на сервер
-            notify.append((uid, "✅ Блокировка снята — VPN снова работает."))
+            notify.append((uid, "✅ Блокировка снята — VPN снова работает.", None))
         for pub, p in state["peers"].items():
             p.setdefault("made", int(now))  # конфигам из старых версий — отсчёт для автоудаления с сегодня
             if is_admin(p["user"]) or not p["until"]:
                 continue
             left = p["until"] - now
-            renew = f"Продлить: «{BTN_LIST}» → «🔄 Продлить»."
+            renew = "Продлить — кнопкой ниже 👇"
             if left <= 0 and p["warned"] < 3:
                 p["warned"] = 3
                 expired = True
-                notify.append((p["user"], f"Срок конфига {title(p)} закончился, он отключён. {renew}"))
+                notify.append((p["user"], f"Срок конфига {title(p)} закончился, он отключён. {renew}", pub))
             elif 0 < left <= DAY and p["warned"] < 2:
                 p["warned"] = 2
                 notify.append((p["user"], f"Конфиг {title(p)} отключится {fmt_date(p['until'])} — "
-                                          f"меньше чем через сутки. {renew}"))
+                                          f"меньше чем через сутки. {renew}", pub))
             elif DAY < left <= 3 * DAY and p["warned"] < 1:
                 p["warned"] = 1
-                notify.append((p["user"], f"Конфиг {title(p)} работает до {fmt_date(p['until'])}. {renew}"))
+                notify.append((p["user"], f"Конфиг {title(p)} работает до {fmt_date(p['until'])}. {renew}", pub))
         if expired:
             apply_or_rollback(state, old_state)
         save_state(state)
-    for uid, text in notify:
+    state = load_state()
+    for uid, text, pub in notify:
+        markup = renew_buttons(state, pub) if pub and pub in state["peers"] else KEYBOARD
+        if pub and balance(state, uid) >= plan(state, pub, 1)[2]:
+            text += f"\n💰 На балансе {balance(state, uid)} ₽ — хватит на продление."
         try:
-            await USER_BOT.send_message(int(uid), text, reply_markup=KEYBOARD)
+            await USER_BOT.send_message(int(uid), text, reply_markup=markup)
         except Exception:
             log.warning("не удалось уведомить %s", uid)
+
+
+def renew_buttons(state, pub):
+    """Кнопки в напоминании о сроке: хватает баланса — продлить сразу; иначе — выбор срока и пополнение."""
+    uid = state["peers"][pub]["user"]
+    rows = []
+    for months, days, price in plans(state, pub):
+        if balance(state, uid) >= price:
+            rows.append([InlineKeyboardButton(f"✅ Продлить на {months_text(months)} — {price} ₽ с баланса",
+                                              callback_data=f"bal:{months}:{pub}")])
+    rows.append([InlineKeyboardButton("🔄 Продлить / пополнить баланс", callback_data=f"pln:{pub}")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def delete_stale(days):
@@ -4818,6 +4850,112 @@ async def delete_stale(days):
             pass
     log.info("удалено неоплаченных конфигов: %d", len(gone))
     return len(gone)
+
+
+# ---------- бэкап ----------
+
+BACKUP_HOUR = int(os.environ.get("BACKUP_HOUR", "4"))  # во сколько по местному времени присылать бэкап
+
+
+def make_backup():
+    """Архив: база бота (клиенты, сроки, балансы, оплаты), реквизиты и конфиги VPN-сервера (его ключи —
+    без них при переезде на новый сервер у всех клиентов пришлось бы менять конфиги). Токенов ботов нет."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(STATE_FILE, "state.json")
+        for path in (PAY_FILE, CONF, ROUTER_CONF, os.path.join(os.path.dirname(CONF), "awg1.conf")):
+            if path and os.path.exists(path):
+                z.write(path, os.path.basename(path))
+    buf.seek(0)
+    return buf
+
+
+async def send_backup(chat_ids=None):
+    state = load_state()
+    name = f"aspentiv-backup-{datetime.now(TZ).strftime('%Y-%m-%d_%H-%M')}.zip"
+    caption = (f"💾 Бэкап: клиентов {len(state['users'])}, конфигов {len(state['peers'])}, "
+               f"оплат {len(state['payments'])}.\n🔐 Внутри ключи сервера — никому не пересылайте.\n"
+               "Восстановить: /restore и пришлите этот файл.")
+    for admin in chat_ids or ADMINS:
+        try:
+            await ADMIN_BOT.send_document(admin, document=make_backup(), filename=name, caption=caption)
+        except Exception:
+            log.exception("бэкап не отправился админу %s", admin)
+    async with lock:
+        state = load_state()
+        state["settings"]["backup_at"] = int(time.time())
+        save_state(state)
+
+
+async def backup_loop():
+    """Раз в сутки (в BACKUP_HOUR по местному времени) — бэкап админам; пропустили час — при первой возможности."""
+    while True:
+        await asyncio.sleep(600)
+        try:
+            last = load_state()["settings"].get("backup_at", 0)
+            hour = datetime.now(TZ).hour
+            if time.time() - last > 26 * 3600 or (hour == BACKUP_HOUR and time.time() - last > 20 * 3600):
+                await send_backup()
+        except Exception as e:
+            await report_error("Бэкап не удался", e)
+
+
+@admin_only
+async def admin_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await send_backup([update.effective_user.id])
+
+
+@admin_only
+async def admin_restore_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["await"] = "restore"
+    await update.message.reply_text("♻️ Пришлите файл бэкапа (aspentiv-backup-….zip) одним сообщением.\n"
+                                    "Перед заменой бот покажет, что внутри, и спросит подтверждение.")
+
+
+@admin_only
+async def admin_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Файл бэкапа после /restore: проверяем и спрашиваем подтверждение."""
+    if ctx.user_data.get("await") != "restore":
+        await update.message.reply_text("Чтобы восстановить бэкап, сначала отправьте /restore.")
+        return
+    doc = update.message.document
+    if not doc.file_name.endswith(".zip") or doc.file_size > 20 * 2**20:
+        await update.message.reply_text("Нужен .zip-файл бэкапа из этого бота.")
+        return
+    data = bytes(await (await doc.get_file()).download_as_bytearray())
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            new = json.loads(z.read("state.json"))
+        assert isinstance(new.get("peers"), dict) and isinstance(new.get("users"), dict)
+    except Exception:
+        await update.message.reply_text("Это не похоже на бэкап бота: внутри нет правильного state.json.")
+        return
+    ctx.user_data.pop("await", None)
+    ctx.user_data["restore_data"] = data
+    cur = load_state()
+    await update.message.reply_text(
+        f"♻️ В бэкапе: клиентов {len(new['users'])}, конфигов {len(new['peers'])}, оплат {len(new.get('payments', {}))}.\n"
+        f"Сейчас в боте: клиентов {len(cur['users'])}, конфигов {len(cur['peers'])}.\n\n"
+        "Заменить базу бота этим бэкапом? Текущая база сохранится рядом копией.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Восстановить", callback_data="rst:yes"),
+                                            InlineKeyboardButton("❌ Отмена", callback_data="rst:no")]]))
+
+
+async def restore_backup(data):
+    """Заменяет базу бота базой из бэкапа (прежняя — копией state.json.before-restore-…) и применяет к серверу."""
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        new = z.read("state.json")
+    async with lock:
+        old_state = load_state()
+        if os.path.exists(STATE_FILE):
+            shutil.copy2(STATE_FILE, f"{STATE_FILE}.before-restore-{int(time.time())}")
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(STATE_FILE))
+        with os.fdopen(fd, "wb") as f:
+            f.write(new)
+        os.replace(tmp, STATE_FILE)
+        state = load_state()
+        apply_or_rollback(state, old_state)
+    return state
 
 
 async def expiry_loop():
@@ -4998,6 +5136,9 @@ def build_admin_app():
     app.add_handler(CommandHandler("users", admin_users))
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CommandHandler("pending", admin_pending))
+    app.add_handler(CommandHandler("backup", admin_backup))
+    app.add_handler(CommandHandler("restore", admin_restore_ask))
+    app.add_handler(MessageHandler(filters.Document.ALL, admin_document))
     app.add_handler(CommandHandler("send", admin_send))
     app.add_handler(CommandHandler("broadcast", admin_broadcast))
     app.add_handler(MessageHandler(filters.Text([ABTN_PAY]), admin_pending))
@@ -5033,7 +5174,7 @@ async def amain():
         tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop()),
                  asyncio.create_task(dynamic_loop()), asyncio.create_task(monitor_loop()),
                  asyncio.create_task(tunnel_loop()), asyncio.create_task(giveaway_loop()),
-                 asyncio.create_task(waiting_loop())]
+                 asyncio.create_task(waiting_loop()), asyncio.create_task(backup_loop())]
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
