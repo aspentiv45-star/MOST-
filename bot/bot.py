@@ -96,6 +96,7 @@ CK_TTL = 24 * 3600  # сколько ждём оплату по созданно
 # Telegram Stars: STAR_RUB — сколько рублей баланса даёт одна звезда (STARS=0 — выключить).
 STARS_ON = os.environ.get("STARS", "1") != "0"
 STAR_RUB = float(os.environ.get("STAR_RUB", "1.2"))
+STARS_SHOP = os.environ.get("STARS_SHOP", "yoostars_bot").lstrip("@")  # где купить звёзды, если их нет ("" — не показывать)
 REF_NEED = int(os.environ.get("REF_NEED", "3"))      # сколько друзей должны оплатить, чтобы получить подарок
 REF_DAYS = int(os.environ.get("REF_DAYS", "30"))     # подарок за каждых REF_NEED друзей, дней
 PAY_FILE = os.environ.get("PAY_FILE", "/etc/most/pay.txt")
@@ -1699,6 +1700,11 @@ async def stars_invoice(bot, uid, amount, then):
         description="Сервис aspentiv VPN: пополнение баланса для покупки и продления подписки.",
         payload=f"t:{amount}:{months}:{target}", currency="XTR",
         prices=[LabeledPrice(f"Пополнение на {amount} ₽", stars_for(amount))])
+    if STARS_SHOP:
+        await bot.send_message(
+            uid, f"Нет звёзд? Их можно купить в @{STARS_SHOP} за рубли, затем вернуться и нажать «Заплатить» в счёте выше.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⭐️ Купить звёзды",
+                                                                     url=f"https://t.me/{STARS_SHOP}")]]))
 
 
 def parse_stars_payload(payload):
