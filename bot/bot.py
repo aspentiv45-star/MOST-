@@ -76,14 +76,14 @@ CLIENT_DNS = os.environ.get("CLIENT_DNS", "1.1.1.1, 1.0.0.1")
 # DNS на VPN-сервере с блокировкой рекламы (ставит adblock.sh); пусто — блокировки нет.
 ADBLOCK_DNS = os.environ.get("ADBLOCK_DNS", "")
 MAX_PEERS = int(os.environ.get("MAX_PEERS", "5"))
-PRICE = int(os.environ.get("PRICE", "100"))
+PRICE = int(os.environ.get("PRICE", "150"))
 ROUTER_PRICE = int(os.environ.get("ROUTER_PRICE", "500"))
 # Бесплатный пробный период для нового клиента (один раз на аккаунт); 0 — выключить.
 TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "3"))
 DAYS = int(os.environ.get("DAYS", "30"))
-PRICE3 = int(os.environ.get("PRICE3", "249"))       # 3 месяца для устройства (скидка)
-YEAR_DISCOUNT = 20                                   # скидка за год, %
-PRICE12 = int(os.environ.get("PRICE12", str(round(12 * PRICE * (100 - YEAR_DISCOUNT) / 100))))  # год для устройства
+DISCOUNT3, YEAR_DISCOUNT = 20, 35                    # скидки за 3 месяца и за год, %
+PRICE3 = int(os.environ.get("PRICE3", str(round(3 * PRICE * (100 - DISCOUNT3) / 100))))       # 3 месяца (360 ₽)
+PRICE12 = int(os.environ.get("PRICE12", str(round(12 * PRICE * (100 - YEAR_DISCOUNT) / 100))))  # год (1170 ₽)
 YEAR_DAYS = 365
 TOPUP_MIN = int(os.environ.get("TOPUP_MIN", "150"))  # минимальное пополнение баланса, ₽
 # Ckassa (автоматическое пополнение). Ключи — только в /etc/most/bot.env, не в репозитории.
@@ -96,13 +96,11 @@ CK_PAYTYPES = [x for x in os.environ.get("CKASSA_PAYTYPES", "sbp,card").replace(
 CK_PAID = ("payed", "holded", "processed")
 CK_FAILED = ("created_error", "rejected", "refunded")
 CK_TTL = 24 * 3600  # сколько ждём оплату по созданной ссылке
-# Telegram Stars (STARS=0 — выключить). Пополнение звёздами — по той же цене, что и тариф:
-# STARS_1M звёзд = PRICE ₽ (99 ⭐️ = 100 ₽). STAR_RUB — задать рубли за звезду вручную.
+# Telegram Stars (STARS=0 — выключить): звёздами пополняют баланс, покупка — только с баланса.
+# Курс: STARS_1M звёзд = PRICE ₽ (99 ⭐️ = 150 ₽). STAR_RUB — задать рубли за звезду вручную.
 STARS_ON = os.environ.get("STARS", "1") != "0"
 STAR_RUB = float(os.environ.get("STAR_RUB", "0"))
-STARS_1M = int(os.environ.get("STARS_1M", "99"))    # цена 1 месяца звёздами
-STARS_3M = int(os.environ.get("STARS_3M", "229"))   # цена 3 месяцев звёздами
-STARS_12M = int(os.environ.get("STARS_12M", "899"))  # год звёздами
+STARS_1M = int(os.environ.get("STARS_1M", "99"))    # столько звёзд = месяц (PRICE ₽)
 STARS_SHOP = os.environ.get("STARS_SHOP", "").lstrip("@")  # где купить звёзды, если их нет ("" — не показывать)
 REF_NEED = int(os.environ.get("REF_NEED", "3"))      # сколько друзей должны оплатить, чтобы получить подарок
 REF_DAYS = int(os.environ.get("REF_DAYS", "30"))     # подарок за каждых REF_NEED друзей, дней
@@ -293,7 +291,7 @@ GUIDES = {
     "what": (
         "🛒 Что купить?\n\n"
         f"📱 Для себя — {PRICE} ₽: одно устройство (телефон или компьютер).\n"
-        f"📡 Роутер — {ROUTER_PRICE} ₽: весь дом. Только Keenetic (KeeneticOS 4.2+) и OpenWrt.\n\n"
+        f"📡 Роутер — {ROUTER_PRICE} ₽: весь дом, до 5 устройств. Только Keenetic (KeeneticOS 4.2+) и OpenWrt.\n\n"
         "Другие роутеры (TP-Link, Asus и др.) не подойдут. Не уверены — берите «Для себя»."
     ),
     "ios": (
@@ -1555,7 +1553,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mine = user_peers(state, update.effective_user.id)
     active = sum(1 for p in mine.values() if peer_active(p))
     await update.message.reply_text(
-        f"Привет! Это aspentivVPN.\n{PRICE} ₽ за {DAYS} дней на устройство, 3 месяца — {PRICE3} ₽, "
+        f"Привет! Это aspentivVPN.\n{PRICE} ₽ за {DAYS} дней на устройство, 3 месяца — {PRICE3} ₽ (−{DISCOUNT3}%), "
         f"год — {PRICE12} ₽ (−{YEAR_DISCOUNT}%). "
         f"Роутер — {ROUTER_PRICE} ₽.\n\n"
         + (f"Ваших конфигов: {len(mine)}, активных: {active}. Подробнее — «{BTN_CABINET}»." if mine
@@ -1604,9 +1602,6 @@ async def pay_screen(message, ctx, target, months, state, query=None):
         text += (f"\nНа балансе недостаточно средств. Чтобы пополнить, нажмите «Пополнить» — "
                  "после пополнения конфиг оплатится сам.")
         rows.append([InlineKeyboardButton("➕ Пополнить", callback_data=f"topb:{months}:{target}")])
-    if STARS_ON:
-        rows.append([InlineKeyboardButton(f"⭐️ Оплатить звёздами — {plan_stars(state, target, months)} ⭐️",
-                                          callback_data=f"stb:{months}:{target}")])
     if len(plans(state, target)) > 1:
         rows.append([InlineKeyboardButton("⬅️ Другой срок", callback_data=f"pln:{target}")])
     elif target not in KIND_BY_TARGET:
@@ -1751,25 +1746,6 @@ async def stars_invoice(bot, uid, amount, then):
     await stars_shop_hint(bot, uid)
 
 
-def plan_stars(state, target, months):
-    """Цена срока в звёздах: для устройства — STARS_1M / STARS_3M, для роутера — по курсу от рублёвой цены."""
-    months, days, price = plan(state, target, months)
-    if is_router(state, target):
-        return stars_for(price)
-    return {3: STARS_3M, 12: STARS_12M}.get(months, STARS_1M)
-
-
-async def stars_plan_invoice(bot, uid, target, months):
-    state = load_state()
-    months, days, price = plan(state, target, months)
-    await bot.send_invoice(
-        chat_id=uid, title=f"aspentiv VPN — {months_text(months)}",
-        description=f"Доступ к сервису aspentiv VPN на {days} дней: {target_label(state, target)}.",
-        payload=f"p:{price}:{months}:{target}", currency="XTR",
-        prices=[LabeledPrice(f"Подписка на {months_text(months)}", plan_stars(state, target, months))])
-    await stars_shop_hint(bot, uid)
-
-
 async def stars_shop_hint(bot, uid):
     if STARS_SHOP:
         await bot.send_message(
@@ -1779,26 +1755,18 @@ async def stars_shop_hint(bot, uid):
 
 
 def parse_stars_payload(payload):
-    """t:сумма:звёзд:мес:за что — пополнение; p:цена:мес:за что — покупка срока. -> (рублей на баланс, then, звёзд)"""
+    """t:сумма:звёзд:мес:за что — пополнение баланса. -> (рублей на баланс, then, звёзд)"""
     kind, _, rest = (payload or "").partition(":")
     amount, _, rest = rest.partition(":")
     months, _, target = rest.partition(":")
-    if kind not in ("t", "p") or not amount.isdigit() or not months.isdigit():
+    if kind != "t" or not amount.isdigit() or not months.isdigit():
         return None
-    then = (target, int(months)) if target else None
-    if kind == "t":
-        # t:сумма:звёзд:мес:за что (звёзд — сколько выставили в счёте)
-        stars = months
-        months, _, target = target.partition(":")
-        if not months.isdigit() or int(amount) < TOPUP_MIN:
-            return None
-        return int(amount), ((target, int(months)) if target else None), int(stars)
-    if not then:
+    # t:сумма:звёзд:мес:за что (звёзд — сколько выставили в счёте)
+    stars = months
+    months, _, target = target.partition(":")
+    if not months.isdigit() or int(amount) < TOPUP_MIN:
         return None
-    state = load_state()
-    if then[0] not in KIND_BY_TARGET and then[0] not in state["peers"]:
-        return None
-    return int(amount), then, plan_stars(state, then[0], then[1])
+    return int(amount), ((target, int(months)) if target else None), int(stars)
 
 
 async def on_precheckout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1825,9 +1793,8 @@ async def on_stars_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         u = state["users"].setdefault(str(uid), {"name": update.effective_user.full_name or str(uid)})
         u["balance"] = u.get("balance", 0) + amount
         save_state(state)
-    if not pay.invoice_payload.startswith("p:"):
-        await update.message.reply_text(f"💰 Оплата получена, баланс пополнен на {amount} ₽. Теперь {u['balance']} ₽.",
-                                        reply_markup=KEYBOARD)
+    await update.message.reply_text(f"💰 Оплата получена, баланс пополнен на {amount} ₽. Теперь {u['balance']} ₽.",
+                                    reply_markup=KEYBOARD)
     extra = ""
     if then:
         ok, text = await buy_with_balance(uid, then[0], int(then[1]))
@@ -2148,7 +2115,7 @@ def _buy_screen(guide, target, price, back):
 BUY_MENU = {
     "root": (f"Что подключаем? Срок — {DAYS} дней.", InlineKeyboardMarkup([
         [InlineKeyboardButton(f"📱 Для устройства — {PRICE} ₽", callback_data="menu:device")],
-        [InlineKeyboardButton(f"📡 Для роутера (весь дом) — {ROUTER_PRICE} ₽", callback_data="menu:router")],
+        [InlineKeyboardButton(f"📡 Для роутера (до 5 устройств) — {ROUTER_PRICE} ₽", callback_data="menu:router")],
         [InlineKeyboardButton("🛒 Что выбрать?", callback_data="menu:what")],
     ])),
     "device": ("📱 Какое устройство? Один конфиг — одно устройство.", InlineKeyboardMarkup([
@@ -2713,6 +2680,9 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ctx.user_data.pop("pay_then", None)
         ctx.user_data["await"] = "topup"
         amounts = [a for a in TOPUP_AMOUNTS if a >= TOPUP_MIN]
+        if need > TOPUP_MIN:
+            # ровно столько, сколько не хватает на покупку, и суммы больше — меньшие не помогут
+            amounts = [need] + [a for a in amounts if a > need]
         rows = [[InlineKeyboardButton(f"{a} ₽", callback_data=f"topa:{a}") for a in amounts[i:i + 2]]
                 for i in range(0, len(amounts), 2)]
         if action == "topb":
@@ -2757,11 +2727,6 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
         await query.edit_message_text(f"⏳ Запрос на пополнение {amount} ₽ отправлен. Как только администратор "
                                       "подтвердит, бот пришлёт реквизиты для перевода.")
-        return
-    if action == "stb":
-        m, _, target = arg.partition(":")
-        if STARS_ON and m.isdigit():
-            await stars_plan_invoice(ctx.bot, uid, target, int(m))
         return
     if action == "stp":
         amount = int(arg)
@@ -3575,6 +3540,14 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await USER_BOT.send_message(
                 int(uid), f"Доступ открыт! Нажмите «{BTN_BUY}»." if verdict == "yes"
                 else "Администратор отклонил запрос доступа.", reply_markup=KEYBOARD if verdict == "yes" else None)
+            if verdict == "yes":
+                await USER_BOT.send_message(
+                    int(uid), f"💰 Конфиги покупаются с баланса. Пополните его — от {TOPUP_MIN} ₽ "
+                              f"(месяц VPN — {PRICE} ₽, 3 месяца — {PRICE3} ₽, год — {PRICE12} ₽). "
+                              f"Можно переводом или звёздами Telegram.\n\n"
+                              f"🎁 Или сначала попробуйте бесплатно {TRIAL_DAYS} дня: «{BTN_BUY}» → «Попробовать бесплатно».",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ Пополнить баланс",
+                                                                             callback_data="top:")]]))
         except Exception:
             pass
         await query.edit_message_text(f"{query.message.text}\n\n{'✅ Пущен' if verdict == 'yes' else '❌ Отказано'}")
