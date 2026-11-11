@@ -38,7 +38,7 @@ PHONE=+7 900 000-00-00
 EMAIL=support@most-vpn.ru
 BOT=aspentivVPNbot
 PRICE=100
-PRICE3=249
+PRICE3=250
 PRICE12=960
 ROUTER_PRICE=500
 TOPUP_MIN=150
@@ -72,7 +72,7 @@ ogrnip = values.get("OGRNIP", "").strip()
 values["LEGAL"] = (f"ОГРНИП {ogrnip}" if ogrnip
                    else "плательщик налога на профессиональный доход (самозанятый)")
 # Для старых site.env без новых строк — значения как в боте по умолчанию
-for k, v in {"PRICE3": "249", "PRICE12": "960", "TOPUP_MIN": "150",
+for k, v in {"PRICE3": "250", "PRICE12": "960", "TOPUP_MIN": "150",
              "STARS_1M": "99", "STARS_3M": "229", "STARS_12M": "899"}.items():
     values.setdefault(k, v)
 if not values.get("OFFER_DATE"):
