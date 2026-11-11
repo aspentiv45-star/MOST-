@@ -97,10 +97,12 @@ CK_PAID = ("payed", "holded", "processed")
 CK_FAILED = ("created_error", "rejected", "refunded")
 CK_TTL = 24 * 3600  # сколько ждём оплату по созданной ссылке
 # Telegram Stars (STARS=0 — выключить): звёздами пополняют баланс, покупка — только с баланса.
-# Курс: STARS_1M звёзд = PRICE ₽ (99 ⭐️ = 150 ₽). STAR_RUB — задать рубли за звезду вручную.
+# Курс: звезда стоит STAR_PRICE ₽ (100 ⭐️ ≈ 150 ₽), а звёздами на STARS_DISCOUNT % дешевле, чем переводом:
+# 150 ₽ баланса = 150 × 0,9 / 1,5 = 90 ⭐️. STAR_RUB — задать рубли баланса за звезду вручную.
 STARS_ON = os.environ.get("STARS", "1") != "0"
 STAR_RUB = float(os.environ.get("STAR_RUB", "0"))
-STARS_1M = int(os.environ.get("STARS_1M", "99"))    # столько звёзд = месяц (PRICE ₽)
+STAR_PRICE = float(os.environ.get("STAR_PRICE", "1.5"))     # сколько рублей стоит звезда у продавцов
+STARS_DISCOUNT = float(os.environ.get("STARS_DISCOUNT", "10"))  # скидка при пополнении звёздами, %
 STARS_SHOP = os.environ.get("STARS_SHOP", "").lstrip("@")  # где купить звёзды, если их нет ("" — не показывать)
 REF_NEED = int(os.environ.get("REF_NEED", "3"))      # сколько друзей должны оплатить, чтобы получить подарок
 REF_DAYS = int(os.environ.get("REF_DAYS", "30"))     # подарок за каждых REF_NEED друзей, дней
@@ -1693,7 +1695,7 @@ async def topup_screen(message, ctx, amount, query=None, then=None, manual=False
         rows = [[InlineKeyboardButton(names.get(t, f"💳 {t}"), callback_data=f"ckp:{t}:{amount}")]
                 for t in CK_PAYTYPES]
         if STARS_ON:
-            rows.append([InlineKeyboardButton(f"⭐️ Звёздами Telegram — {stars_for(amount)} ⭐️",
+            rows.append([InlineKeyboardButton(f"⭐️ Звёздами — {stars_for(amount)} ⭐️ (−{STARS_DISCOUNT:g}%)",
                                               callback_data=f"stp:{amount}")])
         if os.path.exists(PAY_FILE):
             rows.append([InlineKeyboardButton("📷 Перевод со скриншотом", callback_data=f"ckm:{amount}")])
@@ -1712,8 +1714,9 @@ async def topup_screen(message, ctx, amount, query=None, then=None, manual=False
             text = (f"➕ Пополнение баланса на {amount} ₽.\n\nОплатите звёздами Telegram — "
                     f"{stars_for(amount)} ⭐️, баланс пополнится сразу.{after}")
         elif STARS_ON and not manual:
-            text += f"\n\nИли оплатите звёздами Telegram — {stars_for(amount)} ⭐️, баланс пополнится сразу."
-            rows.insert(0, [InlineKeyboardButton(f"⭐️ Оплатить звёздами — {stars_for(amount)} ⭐️",
+            text += (f"\n\nИли оплатите звёздами Telegram — {stars_for(amount)} ⭐️, на {STARS_DISCOUNT:g}% дешевле, "
+                     "баланс пополнится сразу.")
+            rows.insert(0, [InlineKeyboardButton(f"⭐️ Звёздами — {stars_for(amount)} ⭐️ (−{STARS_DISCOUNT:g}%)",
                                                  callback_data=f"stp:{amount}")])
         markup = InlineKeyboardMarkup(rows)
     if query:
@@ -1726,7 +1729,7 @@ async def topup_screen(message, ctx, amount, query=None, then=None, manual=False
 
 def star_rub():
     """Сколько рублей баланса даёт одна звезда: как в тарифе на месяц."""
-    return STAR_RUB if STAR_RUB > 0 else PRICE / STARS_1M
+    return STAR_RUB if STAR_RUB > 0 else STAR_PRICE / (1 - STARS_DISCOUNT / 100)
 
 
 def stars_for(amount):

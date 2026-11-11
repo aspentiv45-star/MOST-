@@ -42,7 +42,6 @@ PRICE3=360
 PRICE12=1170
 ROUTER_PRICE=500
 TOPUP_MIN=150
-STARS_1M=99
 DAYS=30
 TRIAL_DAYS=3
 # Дата редакции оферты; пусто — сегодняшняя
@@ -70,8 +69,10 @@ ogrnip = values.get("OGRNIP", "").strip()
 values["LEGAL"] = (f"ОГРНИП {ogrnip}" if ogrnip
                    else "плательщик налога на профессиональный доход (самозанятый)")
 # Для старых site.env без новых строк — значения как в боте по умолчанию
-for k, v in {"PRICE3": "360", "PRICE12": "1170", "TOPUP_MIN": "150", "STARS_1M": "99"}.items():
+for k, v in {"PRICE3": "360", "PRICE12": "1170", "TOPUP_MIN": "150"}.items():
     values.setdefault(k, v)
+# звёзд за минимальное пополнение: как в боте — звезда 1,5 ₽, звёздами на 10% дешевле
+values["TOPUP_STARS"] = str(-int(-round(int(values["TOPUP_MIN"]) * 0.9 / 1.5, 4) // 1))
 if not values.get("OFFER_DATE"):
     values["OFFER_DATE"] = datetime.date.today().strftime("%d.%m.%Y")
 src = pathlib.Path(src)
