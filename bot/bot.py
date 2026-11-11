@@ -81,23 +81,11 @@ ROUTER_PRICE = int(os.environ.get("ROUTER_PRICE", "500"))
 # Бесплатный пробный период для нового клиента (один раз на аккаунт); 0 — выключить.
 TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "3"))
 DAYS = int(os.environ.get("DAYS", "30"))
-PRICE3 = int(os.environ.get("PRICE3", "250"))       # 3 месяца для устройства (скидка)
+PRICE3 = int(os.environ.get("PRICE3", "249"))       # 3 месяца для устройства (скидка)
 YEAR_DISCOUNT = 20                                   # скидка за год, %
 PRICE12 = int(os.environ.get("PRICE12", str(round(12 * PRICE * (100 - YEAR_DISCOUNT) / 100))))  # год для устройства
 YEAR_DAYS = 365
 TOPUP_MIN = int(os.environ.get("TOPUP_MIN", "150"))  # минимальное пополнение баланса, ₽
-# Внутренняя валюта: клиенту баланс и цены показываются в ASP. Внутри всё хранится в рублях.
-ASP_RUB = 2  # 1 ASP = 2 ₽
-
-
-def asp(rub):
-    """Рубли -> «75 ASP» (половинки — «124,5 ASP»)."""
-    return f"{rub / ASP_RUB:g}".replace(".", ",") + " ASP"
-
-
-def money(rub):
-    """Цена для клиента: «50 ASP (100 ₽)»."""
-    return f"{asp(rub)} ({rub} ₽)"
 # Ckassa (автоматическое пополнение). Ключи — только в /etc/most/bot.env, не в репозитории.
 CK_TOKEN = os.environ.get("CKASSA_SHOP_TOKEN", "")
 CK_KEY = os.environ.get("CKASSA_SEC_KEY", "")
@@ -304,8 +292,8 @@ SMART_LIST = (
 GUIDES = {
     "what": (
         "🛒 Что купить?\n\n"
-        f"📱 Для себя — {money(PRICE)}: одно устройство (телефон или компьютер).\n"
-        f"📡 Роутер — {money(ROUTER_PRICE)}: весь дом. Только Keenetic (KeeneticOS 4.2+) и OpenWrt.\n\n"
+        f"📱 Для себя — {PRICE} ₽: одно устройство (телефон или компьютер).\n"
+        f"📡 Роутер — {ROUTER_PRICE} ₽: весь дом. Только Keenetic (KeeneticOS 4.2+) и OpenWrt.\n\n"
         "Другие роутеры (TP-Link, Asus и др.) не подойдут. Не уверены — берите «Для себя»."
     ),
     "ios": (
@@ -1567,9 +1555,9 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mine = user_peers(state, update.effective_user.id)
     active = sum(1 for p in mine.values() if peer_active(p))
     await update.message.reply_text(
-        f"Привет! Это aspentivVPN.\n{asp(PRICE)} за {DAYS} дней на устройство, 3 месяца — {asp(PRICE3)}, "
-        f"год — {asp(PRICE12)} (−{YEAR_DISCOUNT}%). "
-        f"Роутер — {asp(ROUTER_PRICE)}. 1 ASP = {ASP_RUB} ₽.\n\n"
+        f"Привет! Это aspentivVPN.\n{PRICE} ₽ за {DAYS} дней на устройство, 3 месяца — {PRICE3} ₽, "
+        f"год — {PRICE12} ₽ (−{YEAR_DISCOUNT}%). "
+        f"Роутер — {ROUTER_PRICE} ₽.\n\n"
         + (f"Ваших конфигов: {len(mine)}, активных: {active}. Подробнее — «{BTN_CABINET}»." if mine
            else f"🎁 Попробуйте бесплатно {TRIAL_DAYS} дня: «{BTN_BUY}» → «Попробовать бесплатно»."
            if trial_available(state, update.effective_user.id)
@@ -1588,14 +1576,14 @@ async def ask_payment(message, ctx, target, state, query=None):
     rows = []
     for m, days, price in options:
         save = m * PRICE - price
-        rows.append([InlineKeyboardButton(f"💳 {months_text(m)} — {money(price)}" + (f", выгода {asp(save)}" if save > 0 else ""),
+        rows.append([InlineKeyboardButton(f"💳 {months_text(m)} — {price} ₽" + (f" (выгода {save} ₽)" if save > 0 else ""),
                                           callback_data=f"per:{m}:{target}")])
     if target not in KIND_BY_TARGET:
         rows.append([back_button(target)])
     text = f"Оплата: {target_label(state, target)}.\nНа какой срок?"
     bal = balance(state, message.chat_id)
     if bal:
-        text += f"\n\n💰 На балансе {asp(bal)} — можно оплатить с него."
+        text += f"\n\n💰 На балансе {bal} ₽ — можно оплатить с него."
     if query:
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
     else:
@@ -1608,10 +1596,10 @@ async def pay_screen(message, ctx, target, months, state, query=None):
     months, days, price = plan(state, target, months)
     warning = f"{router_requirements(target)}\n\n" if target in (NEW_ROUTER, NEW_ROUTER_AWG) else ""
     bal = balance(state, message.chat_id)
-    text = f"Оплата: {target_label(state, target)} — {money(price)} за {days} дней.\n\n{warning}💰 На балансе: {asp(bal)}."
+    text = f"Оплата: {target_label(state, target)} — {price} ₽ за {days} дней.\n\n{warning}💰 На балансе: {bal} ₽."
     rows = []
     if bal >= price:
-        rows.append([InlineKeyboardButton(f"✅ Оплатить {asp(price)} с баланса", callback_data=f"bal:{months}:{target}")])
+        rows.append([InlineKeyboardButton(f"✅ Оплатить {price} ₽ с баланса", callback_data=f"bal:{months}:{target}")])
     else:
         text += (f"\nНа балансе недостаточно средств. Чтобы пополнить, нажмите «Пополнить» — "
                  "после пополнения конфиг оплатится сам.")
@@ -1638,7 +1626,7 @@ async def buy_with_balance(uid, target, months):
         if target not in KIND_BY_TARGET and target not in state["peers"]:
             return False, "Конфиг не найден."
         if u.get("balance", 0) < price:
-            return False, f"На балансе {asp(u.get('balance', 0))} — не хватает на {asp(price)}."
+            return False, f"На балансе {u.get('balance', 0)} ₽ — не хватает на {price} ₽."
         u["balance"] -= price
         pid = str(state["next_payment"])
         state["next_payment"] += 1
@@ -1652,7 +1640,7 @@ async def buy_with_balance(uid, target, months):
                                                 f"За: {target_label(state, target)} на {days} дней\n{result}")
         except Exception:
             pass
-    return True, f"💰 Оплачено с баланса: {asp(price)}. Осталось {asp(u['balance'])}."
+    return True, f"💰 Оплачено с баланса: {price} ₽. Осталось {u['balance']} ₽."
 
 
 async def pay_from_balance(query, ctx, target, months):
@@ -1672,9 +1660,8 @@ def balance_screen(state, uid):
         link = f"https://t.me/{USER_BOT.username}?start=ref_{uid}"
     except Exception:  # бот ещё не знает своё имя
         link = ""
-    text = (f"💰 Баланс: {asp(u.get('balance', 0))}\n"
-            f"1 ASP = {ASP_RUB} ₽. Пополнение — от {TOPUP_MIN} ₽ ({asp(TOPUP_MIN)}), баланс тратится на покупку "
-            f"и продление конфигов.\n\n"
+    text = (f"💰 Баланс: {u.get('balance', 0)} ₽\n"
+            f"Пополнение — от {TOPUP_MIN} ₽, баланс тратится на покупку и продление конфигов.\n\n"
             f"👥 Пригласите {REF_NEED} друзей — получите {REF_DAYS} дней бесплатно. Друг считается, "
             f"когда оплатит VPN.\nОплатили: {n % REF_NEED}/{REF_NEED} (всего друзей: {n}).\n\n"
             f"Ваш ID: <code>{uid}</code>" + (f"\nСсылка для друга: {link}" if link else ""))
@@ -1716,18 +1703,18 @@ async def topup_screen(message, ctx, amount, query=None, then=None, manual=False
         if os.path.exists(PAY_FILE):
             rows.append([InlineKeyboardButton("📷 Перевод со скриншотом", callback_data=f"ckm:{amount}")])
         rows.append([InlineKeyboardButton("⬅️ Другая сумма", callback_data="top:")])
-        text = (f"➕ Пополнение баланса на {amount} ₽ → {asp(amount)}.\n\nВыберите способ оплаты — "
+        text = (f"➕ Пополнение баланса на {amount} ₽.\n\nВыберите способ оплаты — "
                 f"деньги зачислятся автоматически, через минуту после оплаты.{after}")
         markup = InlineKeyboardMarkup(rows)
     else:
         # Номер для перевода не показываем сразу: клиент запрашивает, админ одобряет — тогда бот присылает реквизиты.
         ctx.user_data.pop("pay_for", None)
-        text = (f"➕ Пополнение баланса на {amount} ₽ → {asp(amount)} переводом по СБП.\n\nНажмите «Запросить реквизиты» — "
+        text = (f"➕ Пополнение баланса на {amount} ₽ переводом по СБП.\n\nНажмите «Запросить реквизиты» — "
                 f"администратор подтвердит запрос, и бот пришлёт номер для перевода.{after}")
         rows = [[InlineKeyboardButton("📲 Запросить реквизиты", callback_data=f"rqp:{amount}")],
                 [InlineKeyboardButton("⬅️ Другая сумма", callback_data="top:")]]
         if STARS_ON and not manual and not os.path.exists(PAY_FILE):
-            text = (f"➕ Пополнение баланса на {asp(amount)}.\n\nОплатите звёздами Telegram — "
+            text = (f"➕ Пополнение баланса на {amount} ₽.\n\nОплатите звёздами Telegram — "
                     f"{stars_for(amount)} ⭐️, баланс пополнится сразу.{after}")
         elif STARS_ON and not manual:
             text += f"\n\nИли оплатите звёздами Telegram — {stars_for(amount)} ⭐️, баланс пополнится сразу."
@@ -1757,10 +1744,10 @@ async def stars_invoice(bot, uid, amount, then):
     months, target = (then[1], then[0]) if then else (0, "")
     stars = stars_for(amount)  # число звёзд фиксируем в счёте: курс может поменяться до оплаты
     await bot.send_invoice(
-        chat_id=uid, title=f"Пополнение баланса на {asp(amount)}",
+        chat_id=uid, title=f"Пополнение баланса на {amount} ₽",
         description="Сервис aspentiv VPN: пополнение баланса для покупки и продления подписки.",
         payload=f"t:{amount}:{stars}:{months}:{target}", currency="XTR",
-        prices=[LabeledPrice(f"Пополнение на {asp(amount)}", stars)])
+        prices=[LabeledPrice(f"Пополнение на {amount} ₽", stars)])
     await stars_shop_hint(bot, uid)
 
 
@@ -1839,7 +1826,7 @@ async def on_stars_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         u["balance"] = u.get("balance", 0) + amount
         save_state(state)
     if not pay.invoice_payload.startswith("p:"):
-        await update.message.reply_text(f"💰 Оплата получена, баланс пополнен на {asp(amount)}. Теперь {asp(u['balance'])}.",
+        await update.message.reply_text(f"💰 Оплата получена, баланс пополнен на {amount} ₽. Теперь {u['balance']} ₽.",
                                         reply_markup=KEYBOARD)
     extra = ""
     if then:
@@ -1940,8 +1927,8 @@ async def ck_credit(num):
         save_state(state)
     uid = int(p["user"])
     try:
-        await USER_BOT.send_message(uid, f"💰 Оплата получена, баланс пополнен на {asp(p['amount'])}. "
-                                         f"Теперь {asp(u['balance'])}.", reply_markup=KEYBOARD)
+        await USER_BOT.send_message(uid, f"💰 Оплата получена, баланс пополнен на {p['amount']} ₽. "
+                                         f"Теперь {u['balance']} ₽.", reply_markup=KEYBOARD)
     except Exception:
         pass
     extra = ""
@@ -2039,7 +2026,7 @@ async def referral_credit(uid):
                 gift = f"🎁 Подарок: {title(peer)} продлён на {REF_DAYS} дней, до {fmt_date(peer['until'])}."
             else:
                 r["balance"] = r.get("balance", 0) + PRICE
-                gift = f"🎁 Подарок: {asp(PRICE)} на баланс — это месяц VPN."
+                gift = f"🎁 Подарок: {PRICE} ₽ на баланс — это месяц VPN."
         save_state(state)
     left = REF_NEED - n % REF_NEED
     text = (f"👥 Ваш друг {u.get('name', uid)} оплатил VPN — засчитан ({n % REF_NEED or REF_NEED}/{REF_NEED}).\n"
@@ -2150,8 +2137,8 @@ async def remember_op(user, op):
 def _buy_screen(guide, target, price, back):
     """Экран «инструкция + купить»: подробные шаги для выбранного устройства и кнопка оплаты."""
     return (GUIDES[guide], InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💳 Купить — {asp(price)} за {DAYS} дней" if target != NEW else
-                              f"💳 Купить — от {asp(PRICE)}/мес, год {asp(PRICE12)}",
+        [InlineKeyboardButton(f"💳 Купить — {price} ₽ за {DAYS} дней" if target != NEW else
+                              f"💳 Купить — от {PRICE} ₽/мес, год {PRICE12} ₽",
                               callback_data=f"buy:{target}:{guide}" if guide in OS_NAMES else f"buy:{target}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data=f"menu:{back}")],
     ]))
@@ -2160,8 +2147,8 @@ def _buy_screen(guide, target, price, back):
 # Меню покупки по шагам: устройство или роутер → конкретный вариант → инструкция и «Купить».
 BUY_MENU = {
     "root": (f"Что подключаем? Срок — {DAYS} дней.", InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📱 Для устройства — {asp(PRICE)}", callback_data="menu:device")],
-        [InlineKeyboardButton(f"📡 Для роутера (весь дом) — {asp(ROUTER_PRICE)}", callback_data="menu:router")],
+        [InlineKeyboardButton(f"📱 Для устройства — {PRICE} ₽", callback_data="menu:device")],
+        [InlineKeyboardButton(f"📡 Для роутера (весь дом) — {ROUTER_PRICE} ₽", callback_data="menu:router")],
         [InlineKeyboardButton("🛒 Что выбрать?", callback_data="menu:what")],
     ])),
     "device": ("📱 Какое устройство? Один конфиг — одно устройство.", InlineKeyboardMarkup([
@@ -2293,7 +2280,7 @@ def config_card(state, pub, p, back=True):
     """Экран одного конфига: что он такое и все действия с ним."""
     row = [InlineKeyboardButton("⬇️ Скачать", callback_data=f"get:{pub}")]
     if not is_admin(p["user"]):
-        row.append(InlineKeyboardButton(f"🔄 Продлить — {asp(price_for(state, pub))}", callback_data=f"renew:{pub}"))
+        row.append(InlineKeyboardButton(f"🔄 Продлить — {price_for(state, pub)} ₽", callback_data=f"renew:{pub}"))
     rows = [row, [InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}"),
                   InlineKeyboardButton("✏️ Название", callback_data=f"ren:{pub}")]]
     if p.get("kind") not in ROUTER_KINDS and os.environ.get("OP_PROFILES", "0") == "1":
@@ -2726,13 +2713,13 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ctx.user_data.pop("pay_then", None)
         ctx.user_data["await"] = "topup"
         amounts = [a for a in TOPUP_AMOUNTS if a >= TOPUP_MIN]
-        rows = [[InlineKeyboardButton(f"{a} ₽ → {asp(a)}", callback_data=f"topa:{a}") for a in amounts[i:i + 2]]
+        rows = [[InlineKeyboardButton(f"{a} ₽", callback_data=f"topa:{a}") for a in amounts[i:i + 2]]
                 for i in range(0, len(amounts), 2)]
         if action == "topb":
             rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"per:{arg}")])
-        hint = f"\nДля этой оплаты нужно не меньше {need} ₽ ({asp(need)})." if need > TOPUP_MIN else ""
-        await query.edit_message_text(f"➕ На сколько пополнить?{hint}\n1 ASP = {ASP_RUB} ₽. Нажмите сумму или напишите "
-                                      f"свою числом в рублях (от {TOPUP_MIN} ₽).", reply_markup=InlineKeyboardMarkup(rows))
+        hint = f"\nДля этой оплаты нужно не меньше {need} ₽." if need > TOPUP_MIN else ""
+        await query.edit_message_text(f"➕ На сколько пополнить?{hint}\nНажмите сумму или напишите свою числом "
+                                      f"(от {TOPUP_MIN} ₽).", reply_markup=InlineKeyboardMarkup(rows))
         return
     if action == "topa":
         await topup_screen(query.message, ctx, int(arg), query)
@@ -2768,7 +2755,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         InlineKeyboardButton("❌ Отказать", callback_data=f"prq:no:{rid}")]]))
             except Exception:
                 pass
-        await query.edit_message_text(f"⏳ Запрос на пополнение {amount} ₽ ({asp(amount)}) отправлен. Как только администратор "
+        await query.edit_message_text(f"⏳ Запрос на пополнение {amount} ₽ отправлен. Как только администратор "
                                       "подтвердит, бот пришлёт реквизиты для перевода.")
         return
     if action == "stb":
@@ -3039,7 +3026,7 @@ def user_card(state, uid, hs=None):
     if u.get("support_ban_until", 0) > time.time():
         lines.append(f"🔇 Обращения запрещены за спам до {fmt_date(u['support_ban_until'])}")
     if u.get("balance"):
-        extra.append(f"💰 {u['balance']} ₽ ({asp(u['balance'])})")
+        extra.append(f"💰 {u['balance']} ₽")
     if u.get("ref_count"):
         extra.append(f"👥 привёл {u['ref_count']}")
     if u.get("ref"):
@@ -3421,8 +3408,8 @@ async def give_money(uid, amount):
             u.setdefault("approved", True)  # начислили деньги — значит, пускаем
         save_state(state)
     diff = u["balance"] - old
-    text = (f"🎁 Администратор начислил {asp(diff)} на баланс." if diff > 0 else
-            f"Администратор списал {asp(-diff)} с баланса.") + f" Теперь {asp(u['balance'])}."
+    text = (f"🎁 Администратор начислил {diff} ₽ на баланс." if diff > 0 else
+            f"Администратор списал {-diff} ₽ с баланса.") + f" Теперь {u['balance']} ₽."
     sent = ""
     if diff:
         try:
@@ -3566,7 +3553,7 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             if verdict == "ok":
                 await USER_BOT.send_message(
-                    uid, f"💳 Реквизиты для пополнения на {r['amount']} ₽ ({asp(r['amount'])}):\n\n{pay_text()}\n\n"
+                    uid, f"💳 Реквизиты для пополнения на {r['amount']} ₽:\n\n{pay_text()}\n\n"
                          f"Переведите ровно {r['amount']} ₽ и пришлите сюда скриншот перевода одним фото. "
                          "Реквизиты действуют 24 часа.")
             else:
@@ -3983,7 +3970,7 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             save_state(state)
         result = f"✅ Баланс пополнен на {payment['price']} ₽, теперь {u['balance']} ₽."
         try:
-            await USER_BOT.send_message(uid, f"💰 Баланс пополнен на {asp(payment['price'])}. Теперь {asp(u['balance'])}.",
+            await USER_BOT.send_message(uid, f"💰 Баланс пополнен на {payment['price']} ₽. Теперь {u['balance']} ₽.",
                                         reply_markup=KEYBOARD)
         except Exception:
             pass
@@ -4120,7 +4107,7 @@ async def cabinet_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = [f"👤 Личный кабинет", "", f"📄 Конфигов: {len(mine)}, активных: {active}"]
     if soon:
         lines.append(f"⏳ Ближайший срок: {fmt_date(soon)}")
-    lines.append(f"💰 Баланс: {asp(balance(state, uid))}")
+    lines.append(f"💰 Баланс: {balance(state, uid)} ₽")
     await update.message.reply_text("\n".join(lines), reply_markup=CABINET_KEYBOARD)
 
 
@@ -5375,7 +5362,7 @@ async def check_expiry():
     for uid, text, pub in notify:
         markup = renew_buttons(state, pub) if pub and pub in state["peers"] else KEYBOARD
         if pub and balance(state, uid) >= plan(state, pub, 1)[2]:
-            text += f"\n💰 На балансе {asp(balance(state, uid))} — хватит на продление."
+            text += f"\n💰 На балансе {balance(state, uid)} ₽ — хватит на продление."
         try:
             await USER_BOT.send_message(int(uid), text, reply_markup=markup)
         except Exception:
@@ -5388,7 +5375,7 @@ def renew_buttons(state, pub):
     rows = []
     for months, days, price in plans(state, pub):
         if balance(state, uid) >= price:
-            rows.append([InlineKeyboardButton(f"✅ Продлить на {months_text(months)} — {asp(price)} с баланса",
+            rows.append([InlineKeyboardButton(f"✅ Продлить на {months_text(months)} — {price} ₽ с баланса",
                                               callback_data=f"bal:{months}:{pub}")])
     rows.append([InlineKeyboardButton("🔄 Продлить / пополнить баланс", callback_data=f"pln:{pub}")])
     return InlineKeyboardMarkup(rows)
