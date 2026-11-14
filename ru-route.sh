@@ -110,55 +110,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get install -y -qq ipset curl >/dev/null
 
 echo "==> Скрипт маршрутизации"
-cat >"$RULES" <<'EOF'
-#!/bin/bash
-# MOST: клиенты awg0/wgr0 -> российские IP (ipset most-ru) -> туннель awg1.
-SET=most-ru
-LIST=/var/lib/most/ru.zone
-FORCE=/var/lib/most/force.zone
-MARK=0x65
-TABLE=101
-IFACES="awg0 wgr0"  # телефоны (AmneziaWG) и обычные роутеры (WireGuard)
-
-load_set() {
-  [[ -s $LIST ]] || return 1
-  ipset create $SET hash:net -exist
-  ipset create $SET-new hash:net -exist
-  ipset flush $SET-new
-  sed 's/^/add most-ru-new /' "$LIST" | ipset restore -exist
-  # Telegram, Meta, Google, X: исключения внутри российских сетей — идут из Нидерландов.
-  [[ -s $FORCE ]] && sed 's/^/add most-ru-new /; s/$/ nomatch/' "$FORCE" | ipset restore -exist
-  ipset swap $SET-new $SET
-  ipset destroy $SET-new
-}
-
-case "$1" in
-  up)
-    load_set
-    ip route replace default dev awg1 table $TABLE
-    ip rule show | grep -q "fwmark $MARK" || ip rule add fwmark $MARK table $TABLE
-    sysctl -q -w net.ipv4.conf.all.rp_filter=2 net.ipv4.conf.awg1.rp_filter=2
-    for i in $IFACES; do iptables -t mangle -A PREROUTING -i $i -m set --match-set $SET dst -j MARK --set-mark $MARK; done
-    iptables -t mangle -A FORWARD -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-    iptables -t nat -A POSTROUTING -o awg1 -j MASQUERADE ;;
-  down)
-    for i in $IFACES; do iptables -t mangle -D PREROUTING -i $i -m set --match-set $SET dst -j MARK --set-mark $MARK; done
-    iptables -t mangle -D FORWARD -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-    iptables -t nat -D POSTROUTING -o awg1 -j MASQUERADE
-    ip rule del fwmark $MARK table $TABLE
-    ip route flush table $TABLE ;;
-  update)
-    # Список российских сетей; проверяем, что он не пустой и похож на правду.
-    tmp=$(mktemp)
-    if python3 /opt/most/split.py --ru >"$tmp" && [[ $(wc -l <"$tmp") -gt 1000 ]]; then
-      install -m 644 "$tmp" "$LIST"
-    fi
-    python3 /opt/most/split.py --force >"$tmp" && install -m 644 "$tmp" "$FORCE"
-    rm -f "$tmp"
-    if ip link show awg1 >/dev/null 2>&1; then load_set; fi ;;
-esac
-EOF
-chmod 755 "$RULES"
+# Сами правила — в ru-rules.sh (общий с ru-domains.sh, режим доменов).
+install -m 755 "$(dirname "$0")/ru-rules.sh" "$RULES"
 
 echo "==> Загружаю список российских сетей"
 mkdir -p /var/lib/most
