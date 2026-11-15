@@ -4362,7 +4362,8 @@ async def ping_host(host, count=3):
 # поэтому порт можно менять только здесь — у основного сервера, без доступа к российскому.
 TUN_CONF = os.path.join(os.path.dirname(CONF), "awg1.conf")
 TUN_PORT_RANGE = os.environ.get("TUN_PORT_RANGE", "")      # например 1024-9999 (после ru-ports.sh)
-TUN_ALERT_LOSS = float(os.environ.get("TUN_ALERT_LOSS", "5"))  # % потерь, при которых писать админу
+TUN_ALERT_LOSS = float(os.environ.get("TUN_ALERT_LOSS", "25"))  # % потерь, при которых писать админу
+TUN_OK_LOSS = float(os.environ.get("TUN_OK_LOSS", "5"))  # «снова без потерь» — только когда потери ниже этого
 TUN_STATE = {"bad": 0, "alerted": False, "snooze": 0}
 
 
@@ -4464,10 +4465,12 @@ async def tunnel_loop():
                 await notify_admins(f"🟠 Туннель для российских сайтов теряет пакеты: {loss:.0f}% "
                                     f"(пинг {avg or '—'} мс, порт {port}). Российские сайты могут грузиться плохо — "
                                     f"скорее всего, порт начали резать.{hint}", tunnel_buttons())
-        else:
+        elif loss < TUN_OK_LOSS:
             if TUN_STATE["alerted"]:
                 await notify_admins(f"🟢 Туннель для российских сайтов снова без потерь ({loss:.0f}%).")
             TUN_STATE.update(bad=0, alerted=False)
+        else:
+            TUN_STATE["bad"] = 0  # потери есть, но небольшие: не тревога и не «восстановился»
 
 
 def _cpu_times():
