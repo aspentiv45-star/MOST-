@@ -107,6 +107,11 @@ sudo bash install.sh \
 sudo bash miniapp-setup.sh app.aspentiv.ru   # nginx, сертификат Let's Encrypt, MINIAPP_URL в bot.env
 sudo bash miniapp-setup.sh off               # выключить
 ```
+**Вход через российский сервер.** Это нужно, если приложение открывается только в режиме «Обход». С мобильного интернета с «белыми списками» нидерландский IP закрыт, а в «⚡️ Основном» телефон шлёт запросы на IP своего VPN-сервера мимо туннеля. Сделайте второй домен (DuckDNS) на IP московского сервера, затем:
+```
+sudo bash miniapp-ru-proxy.sh ru-домен основной-домен     # на московском: nginx пересылает на основной
+sudo bash miniapp-setup.sh url https://ru-домен           # на основном: клиенты открывают приложение по ru-домену
+```
 Код: `bot/miniapp.py` (веб-сервер на 127.0.0.1:`MINIAPP_PORT`, 8090) и `bot/miniapp.html`. Страница собирается из `bot/miniapp.src.html` и логотипов `icons/operators/*.png` командой `python3 miniapp-build.py`. `MINIAPP_MENU=0` в bot.env оставляет у кнопки «Меню» список команд. Кнопка «📱 Открыть приложение» также есть под приветствием (/start), в «Личном кабинете», в «Баланс и друзья» и в сообщении «Доступ открыт».
 
 ## Админ-бот

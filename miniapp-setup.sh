@@ -3,6 +3,8 @@
 #
 #   sudo bash miniapp-setup.sh app.aspentiv.ru     — домен (A-запись должна указывать на IP этого сервера)
 #   sudo bash miniapp-setup.sh off                 — убрать приложение (кнопка «Меню» снова со списком команд)
+#   sudo bash miniapp-setup.sh url https://ru.example.duckdns.org — открывать приложение по другому адресу
+#        (вход через российский сервер, miniapp-ru-proxy.sh: работает без VPN и в любом режиме)
 #
 # Ставит nginx и бесплатный сертификат Let's Encrypt, nginx пересылает запросы боту (127.0.0.1:8090),
 # бот получает MINIAPP_URL и делает кнопку «Меню» кнопкой открытия приложения.
@@ -10,7 +12,8 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
 die() { echo "Ошибка: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "запустите через sudo"
-[[ $# -eq 1 ]] || die "использование: sudo bash miniapp-setup.sh ДОМЕН   (или off)"
+[[ $# -ge 1 ]] || die "использование: sudo bash miniapp-setup.sh ДОМЕН   (или off, или url https://АДРЕС)"
+[[ $1 == url && $# -eq 2 ]] && set -- "$2"
 ENV=/etc/most/bot.env
 [[ -f $ENV ]] || die "это не основной сервер (нет $ENV)"
 cd "$(dirname "$0")"
@@ -23,6 +26,21 @@ if [[ $1 == off ]]; then
   sed -i '/^MINIAPP_URL=/d' "$ENV"
   systemctl restart most-bot
   echo "Приложение выключено."
+  exit 0
+fi
+
+if [[ $1 == url ]]; then
+  # Адрес, по которому клиенты открывают приложение (например, вход через российский сервер: miniapp-ru-proxy.sh).
+  die "использование: sudo bash miniapp-setup.sh url https://ДОМЕН"
+fi
+if [[ $1 == https://* ]]; then
+  URL=${1%/}
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$URL/" || true)
+  [[ $CODE == 200 ]] || die "$URL/ не открывается (код «$CODE»)"
+  sed -i '/^MINIAPP_URL=/d' "$ENV"
+  echo "MINIAPP_URL=$URL" >>"$ENV"
+  systemctl restart most-bot
+  echo "Готово: приложение открывается по адресу $URL. Закройте и снова откройте чат с ботом."
   exit 0
 fi
 

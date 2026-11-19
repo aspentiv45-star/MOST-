@@ -6,7 +6,8 @@
 <title>aspentiv</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;800&family=Manrope:wght@400;500;600;700&display=swap">
+<!-- шрифты грузятся в фоне: если Google медленный или закрыт, страница сразу показывается со системным шрифтом -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;800&family=Manrope:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
 <style>
 /* aspentiv Mini App: чёрное стекло, золото, белый. Сверху бренд и баланс, в центре кнопка подключения,
    ниже конфиги, внизу режим и оператор; разделы — нижнее меню. */
