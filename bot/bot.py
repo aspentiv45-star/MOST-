@@ -90,6 +90,18 @@ TOPUP_MIN = int(os.environ.get("TOPUP_MIN", "150"))  # минимальное п
 # Telegram Mini App (miniapp.py): адрес с HTTPS ставит miniapp-setup.sh. Пусто — приложения нет.
 MINIAPP_URL = os.environ.get("MINIAPP_URL", "").rstrip("/")
 MINIAPP_MENU = os.environ.get("MINIAPP_MENU", "1") == "1"  # кнопка «Меню» бота открывает приложение
+BTN_APP = "📱 Открыть приложение"
+
+
+def app_button():
+    return InlineKeyboardButton(BTN_APP, web_app=WebAppInfo(url=MINIAPP_URL + "/"))
+
+
+async def send_app_button(message):
+    """Под главным экраном и кабинетом — кнопка открытия приложения (если приложение настроено)."""
+    if MINIAPP_URL:
+        await message.reply_text("📱 Конфиги, баланс и подключение — в приложении aspentiv:",
+                                 reply_markup=InlineKeyboardMarkup([[app_button()]]))
 # Ckassa (автоматическое пополнение). Ключи — только в /etc/most/bot.env, не в репозитории.
 CK_TOKEN = os.environ.get("CKASSA_SHOP_TOKEN", "")
 CK_KEY = os.environ.get("CKASSA_SEC_KEY", "")
@@ -1568,6 +1580,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
            if trial_available(state, update.effective_user.id)
            else f"Чтобы подключиться, нажмите «{BTN_BUY}»."),
         reply_markup=KEYBOARD)
+    await send_app_button(update.message)
 
 
 async def ask_payment(message, ctx, target, state, query=None):
@@ -1668,6 +1681,8 @@ def balance_screen(state, uid):
             f"когда оплатит VPN.\nОплатили: {n % REF_NEED}/{REF_NEED} (всего друзей: {n}).\n\n"
             f"Ваш ID: <code>{uid}</code>" + (f"\nСсылка для друга: {link}" if link else ""))
     rows = [[InlineKeyboardButton("➕ Пополнить баланс", callback_data="top:")]]
+    if MINIAPP_URL:
+        rows.append([app_button()])
     if not u.get("ref") and not any(p["user"] == str(uid) and p["status"] == "approved"
                                     for p in state["payments"].values()):
         rows.append([InlineKeyboardButton("✏️ Меня пригласил друг", callback_data="refset:")])
@@ -3554,8 +3569,8 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                               f"(месяц VPN — {PRICE} ₽, 3 месяца — {PRICE3} ₽, год — {PRICE12} ₽). "
                               f"Можно переводом или звёздами Telegram.\n\n"
                               f"🎁 Или сначала попробуйте бесплатно {TRIAL_DAYS} дня: «{BTN_BUY}» → «Попробовать бесплатно».",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ Пополнить баланс",
-                                                                             callback_data="top:")]]))
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ Пополнить баланс", callback_data="top:")]]
+                                                      + ([[app_button()]] if MINIAPP_URL else [])))
         except Exception:
             pass
         await query.edit_message_text(f"{query.message.text}\n\n{'✅ Пущен' if verdict == 'yes' else '❌ Отказано'}")
@@ -4090,6 +4105,7 @@ async def cabinet_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(f"⏳ Ближайший срок: {fmt_date(soon)}")
     lines.append(f"💰 Баланс: {balance(state, uid)} ₽")
     await update.message.reply_text("\n".join(lines), reply_markup=CABINET_KEYBOARD)
+    await send_app_button(update.message)
 
 
 async def home_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -5708,7 +5724,7 @@ def strip_icons(markup):
         return InlineKeyboardMarkup([[InlineKeyboardButton(
             (next((e for e, k in ICON_BY_EMOJI.items() if ICON_IDS.get(k) == b.icon_custom_emoji_id), "") + " " + b.text).strip()
             if b.icon_custom_emoji_id else b.text,
-            **{k: getattr(b, k) for k in ("callback_data", "url", "copy_text") if getattr(b, k, None) is not None},
+            **{k: getattr(b, k) for k in BUTTON_FIELDS if getattr(b, k, None) is not None},
             **({"style": b.style} if b.style else {})) for b in row] for row in markup.inline_keyboard])
     if isinstance(markup, ReplyKeyboardMarkup):
         def back(b):

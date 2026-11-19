@@ -107,7 +107,7 @@ sudo bash install.sh \
 sudo bash miniapp-setup.sh app.aspentiv.ru   # nginx, сертификат Let's Encrypt, MINIAPP_URL в bot.env
 sudo bash miniapp-setup.sh off               # выключить
 ```
-Код: `bot/miniapp.py` (веб-сервер на 127.0.0.1:`MINIAPP_PORT`, 8090) и `bot/miniapp.html`. Страница собирается из `bot/miniapp.src.html` и логотипов `icons/operators/*.png` командой `python3 miniapp-build.py`. `MINIAPP_MENU=0` в bot.env оставляет у кнопки «Меню» список команд.
+Код: `bot/miniapp.py` (веб-сервер на 127.0.0.1:`MINIAPP_PORT`, 8090) и `bot/miniapp.html`. Страница собирается из `bot/miniapp.src.html` и логотипов `icons/operators/*.png` командой `python3 miniapp-build.py`. `MINIAPP_MENU=0` в bot.env оставляет у кнопки «Меню» список команд. Кнопка «📱 Открыть приложение» также есть под приветствием (/start), в «Личном кабинете», в «Баланс и друзья» и в сообщении «Доступ открыт».
 
 ## Админ-бот
 
