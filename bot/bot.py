@@ -35,11 +35,12 @@ from zoneinfo import ZoneInfo
 
 import qrcode
 import split
+import sys
 from telegram.error import NetworkError, TimedOut
 from telegram import (BotCommand, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, InputSticker, KeyboardButton,
                       LabeledPrice,
-                      LinkPreviewOptions,
-                      ReplyKeyboardMarkup, Update)
+                      LinkPreviewOptions, MenuButtonCommands, MenuButtonWebApp,
+                      ReplyKeyboardMarkup, Update, WebAppInfo)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -86,6 +87,9 @@ PRICE3 = int(os.environ.get("PRICE3", str(round(3 * PRICE * (100 - DISCOUNT3) / 
 PRICE12 = int(os.environ.get("PRICE12", str(round(12 * PRICE * (100 - YEAR_DISCOUNT) / 100))))  # год (1170 ₽)
 YEAR_DAYS = 365
 TOPUP_MIN = int(os.environ.get("TOPUP_MIN", "150"))  # минимальное пополнение баланса, ₽
+# Telegram Mini App (miniapp.py): адрес с HTTPS ставит miniapp-setup.sh. Пусто — приложения нет.
+MINIAPP_URL = os.environ.get("MINIAPP_URL", "").rstrip("/")
+MINIAPP_MENU = os.environ.get("MINIAPP_MENU", "1") == "1"  # кнопка «Меню» бота открывает приложение
 # Ckassa (автоматическое пополнение). Ключи — только в /etc/most/bot.env, не в репозитории.
 CK_TOKEN = os.environ.get("CKASSA_SHOP_TOKEN", "")
 CK_KEY = os.environ.get("CKASSA_SEC_KEY", "")
@@ -383,6 +387,7 @@ log = logging.getLogger("most")
 lock = asyncio.Lock()
 USER_BOT = None
 ADMIN_BOT = None
+USER_APP = None  # приложение клиентского бота (Mini App пишет в user_data, например «ждём обращение»)
 
 
 def run(cmd, data=None):
@@ -1971,6 +1976,33 @@ async def ckassa_loop():
             await report_error("Проверка оплат Ckassa", e)
 
 
+async def request_requisites(uid, amount, then=None):
+    """Клиент просит реквизиты для перевода: админу — запрос с кнопками. -> (отправлен ли, текст для клиента)."""
+    async with lock:
+        state = load_state()
+        if any(r["user"] == str(uid) and r["status"] == "pending" and time.time() - r["created"] < 6 * 3600
+               for r in state["pay_req"].values()):
+            return False, "⏳ Запрос реквизитов уже отправлен — дождитесь ответа администратора."
+        rid = str(state["next_pay_req"])
+        state["next_pay_req"] += 1
+        state["pay_req"][rid] = {"user": str(uid), "amount": amount, "then": list(then) if then else None,
+                                 "status": "pending", "created": time.time()}
+        save_state(state)
+        name = user_name(state, uid)
+    for admin in ADMINS:
+        try:
+            await ADMIN_BOT.send_message(
+                admin, f"📲 Запрос реквизитов №{rid}\n{name} · ID {uid}\nПополнение на {amount} ₽"
+                       + (f"\nЗатем: {target_label(state, then[0])}" if then else ""),
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Показать реквизиты", callback_data=f"prq:ok:{rid}"),
+                    InlineKeyboardButton("❌ Отказать", callback_data=f"prq:no:{rid}")]]))
+        except Exception:
+            pass
+    return True, (f"⏳ Запрос на пополнение {amount} ₽ отправлен. Как только администратор "
+                  "подтвердит, бот пришлёт реквизиты для перевода.")
+
+
 async def referral_credit(uid):
     """Друг (uid) впервые оплатил VPN: засчитываем пригласившему; за каждых REF_NEED — подарок."""
     async with lock:
@@ -2701,35 +2733,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         amount = int(arg)
         if amount < TOPUP_MIN:
             return
-        then = ctx.user_data.pop("pay_then", None)
-        async with lock:
-            state = load_state()
-            if any(r["user"] == str(uid) and r["status"] == "pending" and time.time() - r["created"] < 6 * 3600
-                   for r in state["pay_req"].values()):
-                busy = True
-            else:
-                busy = False
-                rid = str(state["next_pay_req"])
-                state["next_pay_req"] += 1
-                state["pay_req"][rid] = {"user": str(uid), "amount": amount, "then": list(then) if then else None,
-                                         "status": "pending", "created": time.time()}
-                save_state(state)
-            name = user_name(state, uid)
-        if busy:
-            await query.edit_message_text("⏳ Запрос реквизитов уже отправлен — дождитесь ответа администратора.")
-            return
-        for admin in ADMINS:
-            try:
-                await ADMIN_BOT.send_message(
-                    admin, f"📲 Запрос реквизитов №{rid}\n{name} · ID {uid}\nПополнение на {amount} ₽"
-                           + (f"\nЗатем: {target_label(state, then[0])}" if then else ""),
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("✅ Показать реквизиты", callback_data=f"prq:ok:{rid}"),
-                        InlineKeyboardButton("❌ Отказать", callback_data=f"prq:no:{rid}")]]))
-            except Exception:
-                pass
-        await query.edit_message_text(f"⏳ Запрос на пополнение {amount} ₽ отправлен. Как только администратор "
-                                      "подтвердит, бот пришлёт реквизиты для перевода.")
+        ok, text = await request_requisites(uid, amount, ctx.user_data.pop("pay_then", None))
+        await query.edit_message_text(text)
         return
     if action == "stp":
         amount = int(arg)
@@ -5885,10 +5890,10 @@ def build_admin_app():
 
 
 async def amain():
-    global USER_BOT, ADMIN_BOT
+    global USER_BOT, ADMIN_BOT, USER_APP
     user_app, admin_app = build_user_app(), build_admin_app()
     async with user_app, admin_app:
-        USER_BOT, ADMIN_BOT = user_app.bot, admin_app.bot
+        USER_BOT, ADMIN_BOT, USER_APP = user_app.bot, admin_app.bot, user_app
         ICON_IDS.update(load_state()["settings"].get("icons", {}))
         try:
             await USER_BOT.set_my_commands([
@@ -5905,6 +5910,20 @@ async def amain():
         for app in (user_app, admin_app):
             await app.start()
             await app.updater.start_polling()
+        web_runner = None
+        try:
+            import miniapp
+            web_runner = await miniapp.start(sys.modules[__name__])
+        except Exception:
+            log.exception("Mini App не запустился (нужен пакет aiohttp: pip install -r requirements.txt)")
+        try:
+            if MINIAPP_URL and MINIAPP_MENU:
+                await USER_BOT.set_chat_menu_button(
+                    menu_button=MenuButtonWebApp(text="aspentiv", web_app=WebAppInfo(url=MINIAPP_URL + "/")))
+            else:
+                await USER_BOT.set_chat_menu_button(menu_button=MenuButtonCommands())
+        except Exception:
+            log.exception("не удалось задать кнопку меню")
         tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop()),
                  asyncio.create_task(dynamic_loop()), asyncio.create_task(monitor_loop()),
                  asyncio.create_task(tunnel_loop()), asyncio.create_task(giveaway_loop()),
@@ -5919,6 +5938,8 @@ async def amain():
 
         for task in tasks:
             task.cancel()
+        if web_runner:
+            await web_runner.cleanup()
         for app in (user_app, admin_app):
             await app.updater.stop()
             await app.stop()

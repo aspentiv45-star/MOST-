@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>aspentiv</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;800&family=Manrope:wght@400;500;600;700&display=swap">
+<style>
+/* aspentiv Mini App: чёрное стекло, золото, белый. Сверху бренд и баланс, в центре кнопка подключения,
+   ниже конфиги, внизу режим и оператор; разделы — нижнее меню. */
+:root {
+  color-scheme: dark;
+  --ink: #07070a;
+  --glass: rgba(255, 255, 255, .06);
+  --glass-hi: rgba(255, 255, 255, .11);
+  --edge: rgba(255, 255, 255, .14);
+  --gold: #d9b15f;
+  --gold-hi: #f3d999;
+  --gold-lo: #8a6a2c;
+  --white: #f6f3ec;
+  --mute: rgba(246, 243, 236, .58);
+  --ok: #7fd6a2;
+  --bad: #ff8a7a;
+  --display: "Unbounded", "Manrope", system-ui, sans-serif;
+  --body: "Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --r: 22px;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  background: radial-gradient(120% 60% at 50% 0%, #17140e 0%, var(--ink) 60%) fixed, var(--ink);
+  color: var(--white); font: 15px/1.4 var(--body); overflow-x: hidden;
+}
+body::before, body::after { content: ""; position: fixed; z-index: -1; border-radius: 50%; filter: blur(70px); opacity: .5; pointer-events: none; }
+body::before { width: 280px; height: 280px; left: -90px; top: 180px; background: #a17a2e; }
+body::after { width: 240px; height: 240px; right: -100px; bottom: 140px; background: #5a4a2a; }
+.wrap { max-width: 460px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px;
+  padding: calc(16px + env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) calc(104px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
+.glass {
+  background: linear-gradient(160deg, var(--glass-hi), var(--glass));
+  border: 1px solid var(--edge); border-radius: var(--r);
+  backdrop-filter: blur(22px) saturate(140%); -webkit-backdrop-filter: blur(22px) saturate(140%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12);
+}
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--gold-hi); outline-offset: 3px; }
+button:disabled { opacity: .5; cursor: default; }
+
+.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.brand { font-family: var(--display); font-weight: 800; font-size: 22px; letter-spacing: .14em; }
+.brand b { color: var(--gold); font-weight: 800; }
+.bal { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 14px; border-radius: 99px; }
+.bal .sum { font-family: var(--display); font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; text-align: right; }
+.bal .sum small { color: var(--mute); font-family: var(--body); font-weight: 600; font-size: 10px; display: block; letter-spacing: .08em; text-transform: uppercase; }
+.plus { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
+  background: linear-gradient(145deg, var(--gold-hi), var(--gold)); color: #1b1408; font-weight: 800; font-size: 20px; }
+
+.hero { display: flex; flex-direction: column; align-items: center; gap: 12px; padding-top: 6px; }
+.power { position: relative; width: 196px; height: 196px; border-radius: 50%; display: grid; place-items: center; }
+.power .ring { position: absolute; inset: 0; border-radius: 50%; padding: 3px;
+  background: conic-gradient(from 210deg, var(--gold-lo), var(--gold-hi), var(--gold), var(--gold-lo));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude;
+  opacity: .5; transition: opacity .4s; }
+.power .core { width: 158px; height: 158px; border-radius: 50%; display: grid; place-items: center; align-content: center; gap: 6px; }
+.power svg { width: 54px; height: 54px; stroke: var(--white); transition: stroke .4s; }
+.power .cap { font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--mute); }
+.power.on .ring { opacity: 1; animation: spin 6s linear infinite; }
+.power.on .core { box-shadow: 0 0 60px rgba(217, 177, 95, .42), inset 0 1px 0 rgba(255,255,255,.2); }
+.power.on svg { stroke: var(--gold-hi); }
+.power.busy .ring { opacity: 1; animation: spin 1.2s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.status { text-align: center; display: grid; gap: 4px; }
+.status .state { font-family: var(--display); font-weight: 700; font-size: 18px; }
+.status .sub { color: var(--mute); font-size: 13px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--mute); margin-right: 6px; vertical-align: 1px; }
+.on-dot { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+.off-dot { background: var(--bad); }
+.pill { padding: 8px 14px; border-radius: 99px; font-size: 13px; font-weight: 700; color: var(--gold-hi); }
+
+.label { font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--mute); padding-left: 4px; }
+.section { display: grid; gap: 8px; min-width: 0; }
+.configs { display: flex; gap: 10px; overflow-x: auto; scrollbar-width: none; padding: 2px; }
+.configs::-webkit-scrollbar { display: none; }
+.cfg { flex: 0 0 auto; min-width: 132px; max-width: 200px; padding: 12px 14px; text-align: left; display: grid; gap: 4px; }
+.cfg .dev { font-weight: 700; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cfg .till { color: var(--mute); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cfg .till.end { color: var(--bad); }
+.cfg[aria-pressed="true"] { border-color: var(--gold); box-shadow: inset 0 0 0 1px var(--gold), 0 0 24px rgba(217,177,95,.18); }
+.cfg.add { display: grid; place-items: center; min-width: 64px; color: var(--gold); font-size: 22px; font-weight: 700; }
+
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.pick { padding: 14px; text-align: left; display: grid; gap: 10px; min-width: 0; }
+.pick .val { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 14px; min-width: 0; }
+.pick .val span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ico { flex: 0 0 auto; width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; font-weight: 800; font-size: 15px; }
+.mode-ico { background: linear-gradient(145deg, rgba(243,217,153,.25), rgba(217,177,95,.08)); border: 1px solid rgba(217,177,95,.4); color: var(--gold-hi); }
+.ico.logo { overflow: hidden; box-shadow: 0 0 0 1px rgba(255,255,255,.18), 0 4px 14px rgba(0,0,0,.35); }
+.ico.logo img { width: 100%; height: 100%; display: block; }
+.op-none { background: var(--glass-hi); color: var(--mute); font-size: 13px; }
+
+/* разделы */
+.view[hidden] { display: none !important; }
+.view { display: flex; flex-direction: column; gap: 18px; }
+h1 { margin: 0; font-family: var(--display); font-size: 20px; font-weight: 700; }
+.card { padding: 18px; display: grid; gap: 12px; }
+.big { font-family: var(--display); font-size: 34px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.big small { font-size: 18px; color: var(--gold); }
+.muted { color: var(--mute); font-size: 13px; }
+.amounts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.amt { padding: 12px 6px; border-radius: 16px; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; }
+.amt[aria-pressed="true"] { border-color: var(--gold); box-shadow: inset 0 0 0 1px var(--gold); color: var(--gold-hi); }
+.amt input { width: 100%; background: none; border: 0; color: inherit; font: inherit; text-align: center; padding: 0; }
+.amt input::placeholder { color: var(--mute); font-weight: 600; }
+.btn { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 15px; border-radius: 18px; font-weight: 800; font-size: 15px; width: 100%; }
+.btn.gold { background: linear-gradient(145deg, var(--gold-hi), var(--gold)); color: #1b1408; box-shadow: 0 8px 24px rgba(217,177,95,.25); }
+.btn.line { border: 1px solid var(--edge); background: var(--glass); }
+.row { display: flex; align-items: center; gap: 12px; padding: 14px; text-align: left; width: 100%; }
+.row .t { font-weight: 700; font-size: 14px; }
+.row .d { color: var(--mute); font-size: 12px; margin-top: 2px; }
+.list { display: grid; gap: 8px; }
+.progress { height: 8px; border-radius: 99px; background: var(--glass-hi); overflow: hidden; }
+.progress i { display: block; height: 100%; background: linear-gradient(90deg, var(--gold-lo), var(--gold-hi)); border-radius: inherit; }
+.link { font-size: 13px; word-break: break-all; color: var(--gold-hi); }
+
+.tabs { position: fixed; z-index: 4; left: 50%; transform: translateX(-50%); width: min(calc(100% - 28px), 432px);
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px)); display: grid; grid-template-columns: repeat(4, 1fr); padding: 8px; border-radius: 26px; }
+.tab { display: grid; justify-items: center; gap: 3px; padding: 6px 0; font-size: 11px; font-weight: 600; color: var(--mute); border-radius: 18px; }
+.tab svg { width: 22px; height: 22px; stroke: currentColor; }
+.tab[aria-current="page"] { color: var(--gold-hi); background: rgba(217,177,95,.10); }
+
+.sheet-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); opacity: 0; pointer-events: none; transition: opacity .25s; z-index: 8; }
+.sheet { position: fixed; z-index: 9; left: 50%; width: min(calc(100% - 16px), 452px); bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  padding: 18px; display: grid; gap: 10px; max-height: 80vh; overflow-y: auto;
+  transform: translate(-50%, 115%); transition: transform .3s cubic-bezier(.2,.8,.2,1); border-radius: 28px;
+  background: linear-gradient(160deg, rgba(40,36,28,.94), rgba(14,13,11,.96)); }
+.open .sheet-bg { opacity: 1; pointer-events: auto; }
+.open .sheet { transform: translate(-50%, 0); }
+.sheet h2 { margin: 0 0 2px; font-family: var(--display); font-size: 16px; font-weight: 700; }
+.opt { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 16px; text-align: left; border: 1px solid transparent; width: 100%; }
+.opt[aria-checked="true"] { border-color: rgba(217,177,95,.6); background: rgba(217,177,95,.08); }
+.opt .t { font-weight: 700; font-size: 14px; }
+.opt .d { color: var(--mute); font-size: 12px; margin-top: 2px; }
+.opt .price { margin-left: auto; font-weight: 800; color: var(--gold-hi); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.steps { margin: 0; padding-left: 20px; display: grid; gap: 6px; color: var(--white); font-size: 14px; }
+.note { color: var(--mute); font-size: 12px; text-align: center; }
+
+.toast { position: fixed; z-index: 10; left: 50%; top: calc(14px + env(safe-area-inset-top, 0px)); transform: translate(-50%, -150%);
+  width: min(calc(100% - 28px), 432px); padding: 12px 16px; border-radius: 18px; font-size: 14px; font-weight: 600;
+  transition: transform .3s cubic-bezier(.2,.8,.2,1); background: linear-gradient(160deg, rgba(48,42,30,.96), rgba(20,18,14,.96)); }
+.toast.show { transform: translate(-50%, 0); }
+.toast.err { border-color: rgba(255,138,122,.5); }
+.skeleton { text-align: center; color: var(--mute); padding: 40px 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .power.on .ring, .power.busy .ring { animation: none; }
+  .sheet, .sheet-bg, .toast { transition: none; }
+}
+</style>
+</head>
+<body>
+<div class="wrap" id="app">
+  <header class="top">
+    <div class="brand">ASPEN<b>TIV</b></div>
+    <div class="bal glass">
+      <div class="sum"><small>баланс</small><span id="bal">—</span> ₽</div>
+      <button class="plus" id="topup" aria-label="Пополнить баланс">+</button>
+    </div>
+  </header>
+
+  <!-- VPN -->
+  <main class="view" id="v-vpn">
+    <section class="hero">
+      <button class="power" id="power" aria-label="Подключение VPN">
+        <span class="ring"></span>
+        <span class="core glass">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg>
+          <span class="cap" id="powerCap">Подключить</span>
+        </span>
+      </button>
+      <div class="status">
+        <div class="state"><span class="dot" id="dot"></span><span id="stateText">Загрузка…</span></div>
+        <div class="sub" id="subText"></div>
+      </div>
+      <button class="pill glass" id="renewBtn" hidden>🔄 Продлить</button>
+    </section>
+
+    <section class="section">
+      <div class="label">Конфиг</div>
+      <div class="configs" id="configs" role="group" aria-label="Выбор конфига"></div>
+    </section>
+
+    <section class="pair">
+      <div class="section">
+        <div class="label">Режим</div>
+        <button class="pick glass" id="modeBtn"><span class="val"><span class="ico mode-ico" id="modeIco">⚡</span><span id="modeName">—</span></span></button>
+      </div>
+      <div class="section">
+        <div class="label">Оператор</div>
+        <button class="pick glass" id="opBtn"><span class="val"><span class="ico op-none" id="opIco">?</span><span id="opName">Выбрать</span></span></button>
+      </div>
+    </section>
+  </main>
+
+  <!-- Баланс -->
+  <main class="view" id="v-bal" hidden>
+    <h1>Баланс</h1>
+    <div class="card glass">
+      <div class="muted">На балансе</div>
+      <div class="big"><span id="bal2">0</span> <small>₽</small></div>
+      <div class="muted" id="balHint"></div>
+    </div>
+    <div class="section">
+      <div class="label">Сумма пополнения</div>
+      <div class="amounts" id="amounts"></div>
+    </div>
+    <button class="btn gold" id="payStars">⭐️ Звёздами</button>
+    <button class="btn line" id="payTransfer">📲 Переводом по СБП</button>
+    <div class="note" id="payNote">Перевод: бот пришлёт реквизиты после подтверждения администратором, затем пришлите скриншот в чат.</div>
+  </main>
+
+  <!-- Друзья -->
+  <main class="view" id="v-ref" hidden>
+    <h1>Друзья</h1>
+    <div class="card glass">
+      <div class="t" id="refTitle"></div>
+      <div class="progress"><i id="refBar" style="width:0%"></i></div>
+      <div class="muted" id="refText"></div>
+    </div>
+    <div class="card glass">
+      <div class="muted">Ваша ссылка для друга</div>
+      <div class="link" id="refLink"></div>
+      <button class="btn gold" id="refShare">Отправить другу</button>
+      <button class="btn line" id="refCopy">Скопировать ссылку</button>
+    </div>
+  </main>
+
+  <!-- Помощь -->
+  <main class="view" id="v-help" hidden>
+    <h1>Помощь</h1>
+    <div class="list">
+      <button class="row glass" data-help="ios"><span class="ico mode-ico">▶</span><span><div class="t">Видео: iPhone</div><div class="d">Как подключить за минуту</div></span></button>
+      <button class="row glass" data-help="android"><span class="ico mode-ico">▶</span><span><div class="t">Видео: Android</div><div class="d">Как подключить за минуту</div></span></button>
+      <button class="row glass" id="getApp"><span class="ico mode-ico">⬇</span><span><div class="t">Установить AmneziaWG</div><div class="d">Приложение для подключения</div></span></button>
+      <button class="row glass" data-help="support"><span class="ico mode-ico">?</span><span><div class="t">Нужна помощь</div><div class="d">Напишите — администратор ответит в боте</div></span></button>
+      <button class="row glass" data-help="refund"><span class="ico mode-ico">↩</span><span><div class="t">Вернуть средства</div><div class="d">Пополнил ошибочно, конфиг не работает</div></span></button>
+    </div>
+  </main>
+</div>
+
+<nav class="tabs glass" aria-label="Разделы">
+  <button class="tab" data-view="vpn" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M12 3v7M6.5 6.5a7.5 7.5 0 1 0 11 0"/></svg>VPN</button>
+  <button class="tab" data-view="bal"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="4" y="5" width="16" height="14" rx="3"/><path d="M4 10h16"/></svg>Баланс</button>
+  <button class="tab" data-view="ref"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><circle cx="9" cy="9" r="3"/><circle cx="17" cy="10" r="2.5"/><path d="M3 19c1-3.5 3.5-5 6-5s5 1.5 6 5M15 15c2.5 0 4.5 1.3 5.5 4"/></svg>Друзья</button>
+  <button class="tab" data-view="help"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.7M12 17h.01"/></svg>Помощь</button>
+</nav>
+
+<div class="sheet-bg" id="sheetBg"></div>
+<div class="sheet glass" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+  <h2 id="sheetTitle"></h2>
+  <div id="sheetBody" class="list"></div>
+  <div class="note" id="sheetNote"></div>
+</div>
+<div class="toast glass" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+const tg = window.Telegram && Telegram.WebApp;
+const $ = id => document.getElementById(id);
+const LOGOS = __LOGOS__;
+const OP_LOGO = { mts: "mts", beeline: "beeline", megafon: "megafon", t2: "t2", yota: "yota", tmob: "tmobile" };
+const MODE_INFO = {
+  smart: { ico: "⚡", name: "Основной", d: "Весь трафик через Нидерланды, российские сайты — через Россию" },
+  full: { ico: "🛡", name: "Обход белых списков", d: "Вход через Москву — когда мобильный интернет урезан" },
+  game: { ico: "🎮", name: "Игровой: телефон", d: "Низкий пинг в играх, остальное напрямую" },
+  pcgame: { ico: "🖥", name: "Игровой: ПК", d: "Весь трафик напрямую на основной сервер — меньше пинг" },
+};
+// Где взять AmneziaWG: официальный сайт (там ссылки на App Store, Google Play и версии для ПК).
+const STORE = { ios: "https://amnezia.org/", android: "https://amnezia.org/" };
+let ME = null, sel = null, amount = null, then = null;
+
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+const MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+function dShort(ts) { const d = new Date(ts * 1000); return String(d.getDate()).padStart(2, "0") + "." + String(d.getMonth() + 1).padStart(2, "0"); }
+function dLong(ts) { const d = new Date(ts * 1000); return d.getDate() + " " + MONTHS[d.getMonth()]; }
+function rub(n) { return Number(n).toLocaleString("ru-RU"); }
+function platform() { const p = tg?.platform || ""; return /ios|macos/.test(p) ? "ios" : /android/.test(p) ? "android" : "pc"; }
+function haptic(kind) { try { tg?.HapticFeedback?.notificationOccurred(kind); } catch (e) {} }
+
+let toastTimer;
+function toast(text, err) {
+  const t = $("toast"); t.textContent = text; t.classList.toggle("err", !!err); t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 3800);
+}
+
+async function api(action, body = {}) {
+  const r = await fetch("api/" + action, {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Init-Data": tg?.initData || "" },
+    body: JSON.stringify(body),
+  });
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  if (!r.ok || !data.ok) throw new Error(data.error || "Нет связи с сервером. Попробуйте ещё раз.");
+  if (data.me) { ME = data.me; render(); }
+  return data;
+}
+
+// ---------- отрисовка ----------
+function current() { return ME?.configs.find(c => c.id === sel) || null; }
+
+function render() {
+  if (!ME) return;
+  $("bal").textContent = rub(ME.balance);
+  $("bal2").textContent = rub(ME.balance);
+  if (!ME.configs.some(c => c.id === sel)) sel = (ME.configs.find(c => c.active) || ME.configs[0] || {}).id || null;
+  const c = current();
+
+  // конфиги
+  $("configs").innerHTML = ME.configs.map(x => `
+    <button class="cfg glass" aria-pressed="${x.id === sel}" data-id="${esc(x.id)}">
+      <span class="dev">${x.os === "pc" ? "💻" : "📱"} ${esc(x.label || x.name)}</span>
+      <span class="till ${x.active ? "" : "end"}">${x.admin ? "без срока" : x.active ? "до " + dShort(x.until) : x.until ? "закончился" : "не оплачен"}</span>
+    </button>`).join("") + `<button class="cfg glass add" id="addCfg" aria-label="Купить новый конфиг">+</button>`;
+
+  // кнопка и статус
+  const power = $("power");
+  power.classList.toggle("on", !!(c && c.online));
+  if (!c) {
+    $("dot").className = "dot"; $("stateText").textContent = "Нет конфига";
+    $("subText").textContent = ME.trial_days ? `Купите конфиг или попробуйте ${ME.trial_days} дня бесплатно в боте` : "Купите конфиг, чтобы подключиться";
+    $("powerCap").textContent = "Купить";
+  } else if (!c.active) {
+    $("dot").className = "dot off-dot"; $("stateText").textContent = "Срок закончился";
+    $("subText").textContent = "Продлите конфиг, и он снова заработает";
+    $("powerCap").textContent = "Продлить";
+  } else {
+    $("dot").className = "dot " + (c.online ? "on-dot" : "");
+    $("stateText").textContent = c.online ? "Подключено" : "Не подключено";
+    const till = c.admin ? "без срока" : "до " + dLong(c.until);
+    $("subText").textContent = c.online ? `Нидерланды · ${till}` : `Включите туннель в AmneziaWG · ${till}`;
+    $("powerCap").textContent = c.online ? "Файл" : "Подключить";
+  }
+  $("renewBtn").hidden = !c || c.admin;
+  $("renewBtn").textContent = c && !c.active ? "🔄 Продлить сейчас" : "🔄 Продлить";
+
+  // режим и оператор
+  const m = MODE_INFO[c?.mode] || MODE_INFO.full;
+  $("modeIco").textContent = m.ico; $("modeName").textContent = c ? m.name : "—";
+  setOpIcon($("opIco"), c?.op); $("opName").textContent = c?.op ? (ME.operators[c.op] || "—") : "Выбрать";
+  $("modeBtn").disabled = $("opBtn").disabled = !c;
+
+  // баланс
+  if (amount === null) amount = ME.amounts[0] || ME.topup_min;
+  renderAmounts();
+  $("payTransfer").hidden = !ME.transfer;
+  $("payNote").hidden = !ME.transfer;
+  $("payStars").hidden = !ME.stars.on;
+  const p1 = ME.plans["1"]?.price;
+  $("balHint").textContent = p1 ? `Месяц VPN — ${rub(p1)} ₽. С баланса покупаются и продлеваются конфиги.` : "";
+
+  // друзья
+  const r = ME.ref, part = r.count % r.need;
+  $("refTitle").textContent = `Пригласите ${r.need} друзей — получите ${r.days} дней бесплатно`;
+  $("refBar").style.width = `${Math.round(part / r.need * 100)}%`;
+  $("refText").textContent = `Оплатили: ${part} из ${r.need}. Всего друзей: ${r.count}. Друг считается, когда оплатит VPN.`;
+  $("refLink").textContent = r.link || "—";
+}
+
+function setOpIcon(el, op) {
+  if (op && OP_LOGO[op]) { el.className = "ico logo"; el.innerHTML = `<img alt="" src="${LOGOS[OP_LOGO[op]]}">`; }
+  else { el.className = "ico op-none"; el.textContent = op ? "📶" : "?"; }
+}
+
+function renderAmounts() {
+  const list = [...new Set([...(ME.amounts || []), ...(then && amount && !ME.amounts.includes(amount) ? [amount] : [])])].sort((a, b) => a - b);
+  const custom = !list.includes(amount);
+  $("amounts").innerHTML = list.map(a => `<button class="amt glass" aria-pressed="${a === amount}" data-a="${a}">${rub(a)} ₽</button>`).join("") +
+    `<label class="amt glass" aria-pressed="${custom}"><input id="amtInput" inputmode="numeric" placeholder="Своя" value="${custom && amount ? amount : ""}" aria-label="Своя сумма"></label>`;
+  updatePayButtons();
+}
+function updatePayButtons() {
+  const ok = amount >= ME.topup_min;
+  const stars = ok ? Math.ceil(Math.round(amount * ME.stars.per_rub * 1e4) / 1e4) : 0;
+  $("payStars").textContent = ok ? `⭐️ Звёздами — ${stars} ⭐ (−${ME.stars.discount}%)` : `Сумма — от ${ME.topup_min} ₽`;
+  $("payTransfer").textContent = ok ? `📲 Переводом — ${rub(amount)} ₽` : "📲 Переводом по СБП";
+  $("payStars").disabled = $("payTransfer").disabled = !ok;
+}
+
+// ---------- разделы ----------
+function show(view) {
+  for (const v of ["vpn", "bal", "ref", "help"]) $("v-" + v).hidden = v !== view;
+  document.querySelectorAll(".tab").forEach(t => t.setAttribute("aria-current", t.dataset.view === view ? "page" : "false"));
+  if (tg?.BackButton) view === "vpn" ? tg.BackButton.hide() : tg.BackButton.show();
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => show(t.dataset.view));
+tg?.BackButton?.onClick(() => { if (document.getElementById("app").parentElement.classList.contains("open")) closeSheet(); else show("vpn"); });
+$("topup").onclick = () => { then = null; show("bal"); };
+
+// ---------- шторка ----------
+function openSheet(title, html, note = "") {
+  $("sheetTitle").textContent = title; $("sheetBody").innerHTML = html; $("sheetNote").textContent = note;
+  document.body.classList.add("open");
+}
+function closeSheet() { document.body.classList.remove("open"); }
+$("sheetBg").onclick = closeSheet;
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeSheet(); });
+
+function plansSheet(target, title) {
+  const rows = Object.entries(ME.plans).map(([m, p]) => {
+    const full = ME.plans["1"].price * Number(m), save = full - p.price;
+    const name = { 1: "1 месяц", 3: "3 месяца", 12: "1 год" }[m] || m + " мес.";
+    return `<button class="opt glass" data-m="${m}"><span><div class="t">${name}</div><div class="d">${p.days} дней${save > 0 ? ` · выгода ${rub(save)} ₽` : ""}</div></span><span class="price">${rub(p.price)} ₽</span></button>`;
+  }).join("");
+  openSheet(title, rows, `На балансе ${rub(ME.balance)} ₽. Не хватит — предложим пополнить ровно на недостающую сумму.`);
+  $("sheetBody").onclick = async e => {
+    const b = e.target.closest(".opt"); if (!b) return;
+    const m = Number(b.dataset.m), price = ME.plans[b.dataset.m].price;
+    if (ME.balance < price) {
+      closeSheet();
+      then = [target, m];
+      amount = Math.max(ME.topup_min, price - ME.balance);
+      show("bal"); renderAmounts();
+      toast(`Не хватает ${rub(price - ME.balance)} ₽ — пополните, и бот сам оплатит покупку.`);
+      return;
+    }
+    b.disabled = true;
+    try {
+      const r = await api("renew", { id: target === "new" ? null : target, months: m });
+      closeSheet(); haptic(r.done ? "success" : "error"); toast(r.note, !r.done);
+      if (r.done && target === "new") setTimeout(() => toast("Новый конфиг пришёл в чат с ботом — выберите устройство."), 3900);
+    } catch (err) { toast(err.message, true); b.disabled = false; }
+  };
+}
+
+$("renewBtn").onclick = () => { const c = current(); if (c) plansSheet(c.id, `Продлить «${c.label || c.name}»`); };
+$("configs").onclick = e => {
+  if (e.target.closest("#addCfg")) { plansSheet("new", "Новый конфиг для устройства"); return; }
+  const b = e.target.closest(".cfg"); if (!b) return;
+  sel = b.dataset.id; render();
+};
+
+$("modeBtn").onclick = () => {
+  const c = current(); if (!c) return;
+  openSheet("Режим", Object.entries(MODE_INFO).map(([k, m]) => `
+    <button class="opt" role="radio" aria-checked="${k === c.mode}" data-k="${k}"><span class="ico mode-ico">${m.ico}</span>
+    <span><div class="t">${m.name}</div><div class="d">${m.d}</div></span></button>`).join(""), "После смены режима скачайте новый файл кнопкой подключения");
+  $("sheetBody").onclick = async e => {
+    const b = e.target.closest(".opt"); if (!b || b.dataset.k === c.mode) { closeSheet(); return; }
+    try { const r = await api("mode", { id: c.id, mode: b.dataset.k }); closeSheet(); haptic("success"); toast(r.note); }
+    catch (err) { toast(err.message, true); }
+  };
+};
+
+$("opBtn").onclick = () => {
+  const c = current(); if (!c) return;
+  openSheet("Оператор", Object.entries(ME.operators).map(([k, name]) => `
+    <button class="opt" role="radio" aria-checked="${k === c.op}" data-k="${k}"><span class="ico" data-op="${k}"></span>
+    <span><div class="t">${esc(name)}</div></span></button>`).join(""), "Под оператора подбираются настройки маскировки");
+  $("sheetBody").querySelectorAll("[data-op]").forEach(el => setOpIcon(el, el.dataset.op));
+  $("sheetBody").onclick = async e => {
+    const b = e.target.closest(".opt"); if (!b) return;
+    try { const r = await api("op", { id: c.id, op: b.dataset.k }); closeSheet(); haptic("success"); toast(r.note); }
+    catch (err) { toast(err.message, true); }
+  };
+};
+
+// ---------- подключение ----------
+$("power").onclick = async () => {
+  const c = current();
+  if (!c) { plansSheet("new", "Новый конфиг для устройства"); return; }
+  if (!c.active) { plansSheet(c.id, `Продлить «${c.label || c.name}»`); return; }
+  const store = STORE[platform()];
+  openSheet(c.online ? "VPN подключён" : "Подключение", `
+    <ol class="steps">
+      <li>Установите AmneziaWG, если его ещё нет (amnezia.org).</li>
+      <li>Скачайте файл конфига и откройте его в AmneziaWG — туннель добавится.</li>
+      <li>Включите туннель в AmneziaWG. Статус здесь обновится сам.</li>
+    </ol>
+    <button class="btn gold" id="dlFile">⬇️ Скачать файл конфига</button>
+    <button class="btn line" id="dlChat">📩 Прислать в чат с ботом</button>
+    ${store ? `<button class="btn line" id="dlStore">Установить AmneziaWG</button>` : ""}`,
+    "Включается VPN в приложении AmneziaWG — Telegram сам включить его не может");
+  $("dlFile").onclick = () => connect(c, false);
+  $("dlChat").onclick = () => connect(c, true);
+  if (store) $("dlStore").onclick = () => tg ? tg.openLink(store) : window.open(store);
+};
+
+async function connect(c, chat) {
+  const power = $("power"); power.classList.add("busy");
+  try {
+    const r = await api("connect", { id: c.id, chat });
+    if (chat) { toast("Конфиг отправлен в чат с ботом."); closeSheet(); return; }
+    if (r.url && tg?.downloadFile && tg.isVersionAtLeast?.("8.0")) {
+      tg.downloadFile({ url: r.url, file_name: r.filename }, ok => { if (ok) toast("Файл скачан — откройте его в AmneziaWG."); });
+    } else if (r.url) {
+      tg ? tg.openLink(r.url) : window.open(r.url);
+    } else {
+      await api("connect", { id: c.id, chat: true });
+      toast("Конфиг отправлен в чат с ботом.");
+    }
+    closeSheet();
+  } catch (err) { toast(err.message, true); }
+  finally { power.classList.remove("busy"); }
+}
+
+// ---------- пополнение ----------
+$("amounts").addEventListener("click", e => {
+  const b = e.target.closest(".amt[data-a]"); if (!b) return;
+  amount = Number(b.dataset.a); renderAmounts();
+});
+$("amounts").addEventListener("input", e => {
+  if (e.target.id !== "amtInput") return;
+  const v = parseInt(e.target.value.replace(/\D/g, ""), 10);
+  amount = isNaN(v) ? 0 : v;
+  document.querySelectorAll(".amt").forEach(x => x.setAttribute("aria-pressed", x.contains(e.target)));
+  updatePayButtons();
+});
+$("payStars").onclick = async () => {
+  $("payStars").disabled = true;
+  try {
+    const r = await api("stars", { amount, then });
+    tg.openInvoice(r.link, status => {
+      if (status === "paid") { haptic("success"); toast("Оплата получена — баланс пополнен."); then = null; setTimeout(refresh, 1500); }
+      else if (status === "failed") toast("Оплата не прошла. Попробуйте ещё раз.", true);
+    });
+  } catch (err) { toast(err.message, true); }
+  finally { updatePayButtons(); }
+};
+$("payTransfer").onclick = async () => {
+  $("payTransfer").disabled = true;
+  try { const r = await api("transfer", { amount, then }); haptic(r.sent ? "success" : "warning"); toast(r.note); if (r.sent) then = null; }
+  catch (err) { toast(err.message, true); }
+  finally { updatePayButtons(); }
+};
+
+// ---------- друзья и помощь ----------
+$("refShare").onclick = () => {
+  const link = ME?.ref.link; if (!link) return;
+  const url = "https://t.me/share/url?url=" + encodeURIComponent(link) + "&text=" + encodeURIComponent("Быстрый VPN aspentiv — попробуй:");
+  tg ? tg.openTelegramLink(url) : window.open(url);
+};
+$("refCopy").onclick = async () => {
+  try { await navigator.clipboard.writeText(ME.ref.link); toast("Ссылка скопирована."); }
+  catch (e) { const r = document.createRange(); r.selectNodeContents($("refLink")); getSelection().removeAllRanges(); getSelection().addRange(r); toast("Выделил ссылку — скопируйте её."); }
+};
+document.querySelectorAll("[data-help]").forEach(b => b.onclick = async () => {
+  try { const r = await api("help", { what: b.dataset.help }); toast(r.note); }
+  catch (err) { toast(err.message, true); }
+});
+$("getApp").onclick = () => {
+  const url = STORE[platform()] || "https://amnezia.org/";
+  tg ? tg.openLink(url) : window.open(url);
+};
+
+// ---------- запуск ----------
+async function refresh() {
+  try { await api("me"); }
+  catch (err) { $("stateText").textContent = "Нет доступа"; $("subText").textContent = err.message; }
+}
+if (tg) {
+  tg.ready(); tg.expand();
+  try { tg.setHeaderColor("#07070a"); tg.setBackgroundColor("#07070a"); tg.setBottomBarColor?.("#07070a"); } catch (e) {}
+}
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 15000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+</script>
+</body>
+</html>
