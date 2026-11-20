@@ -2917,8 +2917,10 @@ ABTN_POLL = "🗳 Опрос"
 ABTN_SERVERS = "🖥 Серверы"
 ABTN_FORECAST = "💸 Прогноз"
 ABTN_GIVEAWAY = "🎉 Розыгрыш"
+ABTN_WARN = "⚠️ Предупреждение"
 ADMIN_KEYBOARD = ReplyKeyboardMarkup([[ABTN_PAY, ABTN_TICKETS], [ABTN_USERS, ABTN_GIVE], [ABTN_STATS, ABTN_FORECAST],
-                                      [ABTN_RESEND, ABTN_NEWS], [ABTN_POLL, ABTN_GIVEAWAY], [ABTN_SERVERS, BTN_CLEAR]],
+                                      [ABTN_RESEND, ABTN_NEWS], [ABTN_POLL, ABTN_GIVEAWAY], [ABTN_SERVERS, ABTN_WARN],
+                                      [BTN_CLEAR]],
                                      resize_keyboard=True)
 
 
@@ -3428,6 +3430,9 @@ async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗳 Да, разослать", callback_data="poll:yes"),
                                                 InlineKeyboardButton("Отмена", callback_data="poll:no")]]))
         return
+    if waiting == "warn":
+        await warn_preview(update.message, ctx, update.message.text.strip())
+        return
     if waiting == "news":
         ctx.user_data["news_text"] = update.message.text.strip()
         users = len(load_state()["users"])
@@ -3717,6 +3722,36 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "poll":
         await on_admin_poll(query, ctx, arg)
+        return
+
+    if action == "wrn":
+        await query.answer()
+        kind, _, key = arg.partition(":")
+        if kind == "t" and key in WARN_TEMPLATES:
+            await warn_preview(query.message, ctx, WARN_TEMPLATES[key][1], edit=True)
+            return
+        if kind == "own":
+            ctx.user_data["await"] = "warn"
+            await query.edit_message_text("✏️ Напишите текст предупреждения одним сообщением.")
+            return
+        text = ctx.user_data.pop("warn_text", None)
+        if kind != "yes":
+            await query.edit_message_text("Предупреждение отменено.")
+            return
+        if not text:
+            await query.edit_message_text(f"Текст потерялся — нажмите «{ABTN_WARN}» ещё раз.")
+            return
+        users = warn_recipients(load_state())
+        await query.edit_message_text(f"⚠️ Рассылаю {len(users)} клиентам…")
+        sent = 0
+        for uid in users:
+            try:
+                await USER_BOT.send_message(int(uid), text, reply_markup=InlineKeyboardMarkup([[CLOSE_BUTTON]]))
+                sent += 1
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)
+        await query.edit_message_text(f"⚠️ Предупреждение отправлено: {sent} из {len(users)}.\n\n{text}")
         return
 
     if action == "news":
@@ -4665,6 +4700,43 @@ async def admin_news_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Напишите, что нового — это получат все клиенты, с сегодняшней датой ({fmt_day(time.time())}).\n"
         "Например: «Добавили подключение роутеров Keenetic».")
+
+
+# Предупреждение всем клиентам с действующими конфигами: о работах, сбое, что всё починили.
+WARN_TEMPLATES = {
+    "work": ("🔧 Работы", "🔧 Ведём технические работы на сервере. VPN может ненадолго отключаться — "
+                         "это скоро закончится, ничего делать не нужно."),
+    "fail": ("🔴 Сбой", "🔴 Сейчас сбой: VPN может не подключаться. Мы уже чиним — напишем, когда всё заработает."),
+    "slow": ("🐢 Медленно", "🐢 Сейчас VPN может работать медленнее обычного — разбираемся."),
+    "ok": ("✅ Починили", "✅ Всё починили, VPN снова работает. Если не подключается — выключите и снова "
+                         "включите туннель в AmneziaWG."),
+}
+
+
+def warn_recipients(state):
+    """Кому слать предупреждение: клиенты, у которых есть действующий конфиг."""
+    return sorted({p["user"] for p in state["peers"].values() if peer_active(p)})
+
+
+async def warn_preview(message, ctx, text, edit=False):
+    ctx.user_data["warn_text"] = text
+    n = len(warn_recipients(load_state()))
+    body = f"Клиенты получат:\n\n{text}\n\nРазослать {n} клиентам с действующими конфигами?"
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"⚠️ Разослать ({n})", callback_data="wrn:yes"),
+                                    InlineKeyboardButton("Отмена", callback_data="wrn:no")]])
+    if edit:
+        await message.edit_text(body, reply_markup=markup)
+    else:
+        await message.reply_text(body, reply_markup=markup)
+
+
+@admin_only
+async def admin_warn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.pop("await", None)
+    rows = [[InlineKeyboardButton(label, callback_data=f"wrn:t:{k}")] for k, (label, _) in WARN_TEMPLATES.items()]
+    rows.append([InlineKeyboardButton("✏️ Свой текст", callback_data="wrn:own")])
+    await update.message.reply_text("⚠️ Предупреждение всем клиентам. Выберите готовый текст или напишите свой:",
+                                    reply_markup=InlineKeyboardMarkup(rows))
 
 
 @admin_only
@@ -5850,7 +5922,7 @@ def build_user_app():
 def build_admin_app():
     app = Application.builder().bot(ScreenBot(token=ADMIN_TOKEN)).build()
     menu = filters.Text(variants(ABTN_PAY, ABTN_USERS, ABTN_GIVE, ABTN_STATS, ABTN_RESEND, ABTN_NEWS, ABTN_TICKETS,
-                                 ABTN_POLL, ABTN_SERVERS, ABTN_FORECAST, ABTN_GIVEAWAY, BTN_CLEAR)) | filters.Command(["start", "help"])
+                                 ABTN_POLL, ABTN_SERVERS, ABTN_FORECAST, ABTN_GIVEAWAY, ABTN_WARN, BTN_CLEAR)) | filters.Command(["start", "help"])
     admin_menu = filters.User(user_id=ADMINS, allow_empty=True) & menu
     app.add_handler(MessageHandler(admin_menu, screen_begin), group=-1)
     app.add_handler(MessageHandler(admin_menu, screen_end), group=1)
@@ -5869,6 +5941,7 @@ def build_admin_app():
     app.add_handler(MessageHandler(filters.Text(variants(ABTN_STATS)), admin_stats))
     app.add_handler(MessageHandler(filters.Text(variants(ABTN_RESEND)), admin_resend_ask))
     app.add_handler(MessageHandler(filters.Text(variants(ABTN_NEWS)), admin_news_ask))
+    app.add_handler(MessageHandler(filters.Text(variants(ABTN_WARN)), admin_warn))
     app.add_handler(MessageHandler(filters.Text(variants(ABTN_POLL)), admin_poll))
     app.add_handler(MessageHandler(filters.Text(variants(ABTN_SERVERS)), admin_servers))
     app.add_handler(MessageHandler(filters.Text(variants(ABTN_FORECAST)), admin_forecast))
