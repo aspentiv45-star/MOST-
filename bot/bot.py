@@ -35,12 +35,11 @@ from zoneinfo import ZoneInfo
 
 import qrcode
 import split
-import sys
 from telegram.error import NetworkError, TimedOut
 from telegram import (BotCommand, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, InputSticker, KeyboardButton,
                       LabeledPrice,
-                      LinkPreviewOptions, MenuButtonCommands, MenuButtonWebApp,
-                      ReplyKeyboardMarkup, Update, WebAppInfo)
+                      LinkPreviewOptions, MenuButtonCommands,
+                      ReplyKeyboardMarkup, Update)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -87,21 +86,6 @@ PRICE3 = int(os.environ.get("PRICE3", str(round(3 * PRICE * (100 - DISCOUNT3) / 
 PRICE12 = int(os.environ.get("PRICE12", str(round(12 * PRICE * (100 - YEAR_DISCOUNT) / 100))))  # год (1170 ₽)
 YEAR_DAYS = 365
 TOPUP_MIN = int(os.environ.get("TOPUP_MIN", "150"))  # минимальное пополнение баланса, ₽
-# Telegram Mini App (miniapp.py): адрес с HTTPS ставит miniapp-setup.sh. Пусто — приложения нет.
-MINIAPP_URL = os.environ.get("MINIAPP_URL", "").rstrip("/")
-MINIAPP_MENU = os.environ.get("MINIAPP_MENU", "1") == "1"  # кнопка «Меню» бота открывает приложение
-BTN_APP = "📱 Открыть приложение"
-
-
-def app_button():
-    return InlineKeyboardButton(BTN_APP, web_app=WebAppInfo(url=MINIAPP_URL + "/"))
-
-
-async def send_app_button(message):
-    """Под главным экраном и кабинетом — кнопка открытия приложения (если приложение настроено)."""
-    if MINIAPP_URL:
-        await message.reply_text("📱 Конфиги, баланс и подключение — в приложении aspentiv:",
-                                 reply_markup=InlineKeyboardMarkup([[app_button()]]))
 # Ckassa (автоматическое пополнение). Ключи — только в /etc/most/bot.env, не в репозитории.
 CK_TOKEN = os.environ.get("CKASSA_SHOP_TOKEN", "")
 CK_KEY = os.environ.get("CKASSA_SEC_KEY", "")
@@ -399,7 +383,6 @@ log = logging.getLogger("most")
 lock = asyncio.Lock()
 USER_BOT = None
 ADMIN_BOT = None
-USER_APP = None  # приложение клиентского бота (Mini App пишет в user_data, например «ждём обращение»)
 
 
 def run(cmd, data=None):
@@ -1580,7 +1563,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
            if trial_available(state, update.effective_user.id)
            else f"Чтобы подключиться, нажмите «{BTN_BUY}»."),
         reply_markup=KEYBOARD)
-    await send_app_button(update.message)
 
 
 async def ask_payment(message, ctx, target, state, query=None):
@@ -1681,8 +1663,6 @@ def balance_screen(state, uid):
             f"когда оплатит VPN.\nОплатили: {n % REF_NEED}/{REF_NEED} (всего друзей: {n}).\n\n"
             f"Ваш ID: <code>{uid}</code>" + (f"\nСсылка для друга: {link}" if link else ""))
     rows = [[InlineKeyboardButton("➕ Пополнить баланс", callback_data="top:")]]
-    if MINIAPP_URL:
-        rows.append([app_button()])
     if not u.get("ref") and not any(p["user"] == str(uid) and p["status"] == "approved"
                                     for p in state["payments"].values()):
         rows.append([InlineKeyboardButton("✏️ Меня пригласил друг", callback_data="refset:")])
@@ -3569,8 +3549,8 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                               f"(месяц VPN — {PRICE} ₽, 3 месяца — {PRICE3} ₽, год — {PRICE12} ₽). "
                               f"Можно переводом или звёздами Telegram.\n\n"
                               f"🎁 Или сначала попробуйте бесплатно {TRIAL_DAYS} дня: «{BTN_BUY}» → «Попробовать бесплатно».",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ Пополнить баланс", callback_data="top:")]]
-                                                      + ([[app_button()]] if MINIAPP_URL else [])))
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ Пополнить баланс",
+                                                                             callback_data="top:")]]))
         except Exception:
             pass
         await query.edit_message_text(f"{query.message.text}\n\n{'✅ Пущен' if verdict == 'yes' else '❌ Отказано'}")
@@ -4105,7 +4085,6 @@ async def cabinet_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(f"⏳ Ближайший срок: {fmt_date(soon)}")
     lines.append(f"💰 Баланс: {balance(state, uid)} ₽")
     await update.message.reply_text("\n".join(lines), reply_markup=CABINET_KEYBOARD)
-    await send_app_button(update.message)
 
 
 async def home_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -5906,10 +5885,10 @@ def build_admin_app():
 
 
 async def amain():
-    global USER_BOT, ADMIN_BOT, USER_APP
+    global USER_BOT, ADMIN_BOT
     user_app, admin_app = build_user_app(), build_admin_app()
     async with user_app, admin_app:
-        USER_BOT, ADMIN_BOT, USER_APP = user_app.bot, admin_app.bot, user_app
+        USER_BOT, ADMIN_BOT = user_app.bot, admin_app.bot
         ICON_IDS.update(load_state()["settings"].get("icons", {}))
         try:
             await USER_BOT.set_my_commands([
@@ -5926,18 +5905,9 @@ async def amain():
         for app in (user_app, admin_app):
             await app.start()
             await app.updater.start_polling()
-        web_runner = None
         try:
-            import miniapp
-            web_runner = await miniapp.start(sys.modules[__name__])
-        except Exception:
-            log.exception("Mini App не запустился (нужен пакет aiohttp: pip install -r requirements.txt)")
-        try:
-            if MINIAPP_URL and MINIAPP_MENU:
-                await USER_BOT.set_chat_menu_button(
-                    menu_button=MenuButtonWebApp(text="aspentiv", web_app=WebAppInfo(url=MINIAPP_URL + "/")))
-            else:
-                await USER_BOT.set_chat_menu_button(menu_button=MenuButtonCommands())
+            # Кнопка «Меню» — список команд (приложение убрано; сбрасываем кнопку, если оставалась от него).
+            await USER_BOT.set_chat_menu_button(menu_button=MenuButtonCommands())
         except Exception:
             log.exception("не удалось задать кнопку меню")
         tasks = [asyncio.create_task(expiry_loop()), asyncio.create_task(split_loop()),
@@ -5954,8 +5924,6 @@ async def amain():
 
         for task in tasks:
             task.cancel()
-        if web_runner:
-            await web_runner.cleanup()
         for app in (user_app, admin_app):
             await app.updater.stop()
             await app.stop()
