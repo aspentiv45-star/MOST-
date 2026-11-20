@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import re
 import shutil
 import signal
@@ -2401,7 +2402,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if until and action not in ("close", "kdone"):
         await query.answer(blocked_text(until), show_alert=True)
         return
-    if action not in ("gwj", "gwr", "ckp", "ckc"):  # там ответ — всплывающим окном
+    if action not in ("gwj", "gwr", "gws", "ckp", "ckc"):  # там ответ — всплывающим окном
         await query.answer()
 
     if action == "close":
@@ -2459,6 +2460,47 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"🎉 Готово: {got}." if got else "Приз уже получен.")
         if got:
             await notify_admins(f"🎉 Розыгрыш №{gid}, приз {user_name(state, uid)}: {got}.")
+        return
+
+    if action == "gws":
+        # Рулетка: одна прокрутка; результат — кубик-слот Telegram (решает сервер Telegram, не бот).
+        async with lock:
+            state = load_state()
+            g = state["giveaways"].get(arg)
+            ok = bool(g and g.get("kind") == "roulette" and g["status"] == "running" and str(uid) not in g["users"])
+            if ok:
+                get_user(state, query.from_user)
+                g["users"].append(str(uid))
+                save_state(state)
+        if not ok:
+            await query.answer("Рулетка закончилась." if not g or g["status"] != "running" else "Вы уже крутили 👍",
+                               show_alert=True)
+            return
+        await query.answer()
+        try:
+            await query.edit_message_reply_markup(None)
+        except Exception:
+            pass
+        dice = await ctx.bot.send_dice(uid, emoji="🎰")
+        await asyncio.sleep(2.5)  # дождаться, пока барабаны остановятся
+        value = dice.dice.value
+        days = g["days"] if value == ROULETTE_JACKPOT else ROULETTE_SMALL_DAYS if value in ROULETTE_TRIPLES else 0
+        if not days:
+            await ctx.bot.send_message(uid, "🎰 В этот раз не повезло. Следите за новыми розыгрышами!")
+            return
+        async with lock:
+            state = load_state()
+            state["giveaways"][arg].setdefault("prizes", {})[str(uid)] = days
+            save_state(state)
+        got, buttons = await gw_prize(arg, str(uid), days)
+        head = "🏆 ДЖЕКПОТ 777!" if value == ROULETTE_JACKPOT else "🎉 Три одинаковых!"
+        word = "день" if days % 10 == 1 and days % 100 != 11 else \
+            "дня" if days % 10 in (2, 3, 4) and days % 100 not in (12, 13, 14) else "дней"
+        await ctx.bot.send_message(uid, f"{head} Приз: +{days} {word} VPN. "
+                                        f"{'Подарок: ' + got + '.' if not buttons else got[0].upper() + got[1:]}",
+                                   reply_markup=buttons or KEYBOARD)
+        await notify_admins(f"🎰 Рулетка №{arg}: {user_name(load_state(), uid)} (ID {uid}) выиграл +{days} дн. "
+                            f"({'777' if value == ROULETTE_JACKPOT else 'три одинаковых'}).")
         return
 
     if action in ("gwj", "gwr"):
@@ -3577,6 +3619,21 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("Сначала завершите текущий розыгрыш.\n\n" + text, reply_markup=buttons)
                 return
             ctx.user_data["gw_draft"] = {}
+            await query.edit_message_text("🎉 Что запускаем?", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎉 Розыгрыш — участвовать", callback_data="gwa:kind:draw")],
+                [InlineKeyboardButton("🎰 Рулетка — прокрутить", callback_data="gwa:kind:roulette")], back]))
+        elif what == "kind":
+            ctx.user_data["gw_draft"] = {"kind": rest}
+            if rest == "roulette":
+                draft = ctx.user_data["gw_draft"]
+                draft["winners"] = 0
+                await query.edit_message_text(
+                    "🎰 Рулетка: каждый клиент крутит один раз, результат определяет Telegram.\n"
+                    f"Три одинаковых (шанс 3 из 64) — +{ROULETTE_SMALL_DAYS} дня.\n\n"
+                    "Сколько дней за джекпот 777 (шанс 1 из 64)?", reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton(f"+{d} дн.", callback_data=f"gwa:d:{d}") for d in GW_DAYS],
+                         [InlineKeyboardButton("✏️ Своё число", callback_data="gwa:dc")], back]))
+                return
             await query.edit_message_text("🎉 Новый розыгрыш. Сколько будет победителей?", reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton(str(n), callback_data=f"gwa:w:{n}") for n in GW_WINNERS],
                  [InlineKeyboardButton("✏️ Своё число", callback_data="gwa:wc")], back]))
@@ -3605,8 +3662,11 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     [[InlineKeyboardButton("➕ Новый розыгрыш", callback_data="gwa:new")]]))
                 return
             n = len(gw_clients(load_state()))
+            head = (f"Проверьте:\n🎰 рулетка, джекпот 777: +{draft['days']} дней, три одинаковых: "
+                    f"+{ROULETTE_SMALL_DAYS} дня\n" if draft.get("kind") == "roulette" else
+                    f"Проверьте:\n🏆 победителей: {draft['winners']}\n🎁 приз: +{draft['days']} дней\n")
             await query.edit_message_text(
-                f"Проверьте:\n🏆 победителей: {draft['winners']}\n🎁 приз: +{draft['days']} дней\n"
+                head +
                 f"▶️ начало: {GW_START[str(draft['start_in'])]}\n⏱ идёт: {GW_LENGTH[rest]}\n\n"
                 f"Объявление получат {n} клиентов." + ("\nДо начала у них будет кнопка «🔔 Напомнить»."
                                                        if draft["start_in"] else ""),
@@ -3627,7 +3687,8 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     "winners": draft["winners"], "days": draft["days"], "length": draft["length"],
                     "start": start, "end": start + draft["length"] * 3600,
                     "status": "running" if not draft["start_in"] else "soon",
-                    "users": [], "remind": [], "msgs": {}, "won": [], "created": now}
+                    "users": [], "remind": [], "msgs": {}, "won": [], "created": now,
+                    "kind": draft.get("kind", "draw")}
                 save_state(state)
             ctx.user_data.pop("gw_draft", None)
             await query.edit_message_text("📤 Рассылаю объявление…")
@@ -4011,6 +4072,11 @@ async def on_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ---------- розыгрыши ----------
 
 GW_WINNERS = (1, 2, 3, 5, 10)
+# Рулетка: каждый клиент крутит 🎰 один раз. Результат определяет сам Telegram (значения 1–64):
+# 64 — «777» (джекпот, шанс 1/64), 1, 22, 43 — три одинаковых (BAR, виноград, лимоны: 3/64).
+ROULETTE_JACKPOT = 64
+ROULETTE_TRIPLES = (1, 22, 43)
+ROULETTE_SMALL_DAYS = int(os.environ.get("ROULETTE_SMALL_DAYS", "3"))
 GW_DAYS = (3, 7, 14, 30)
 GW_START = {"0": "сейчас", "1": "через 1 час", "3": "через 3 часа", "24": "через сутки"}
 GW_LENGTH = {"1": "1 час", "6": "6 часов", "24": "1 сутки", "72": "3 дня"}
@@ -4042,7 +4108,22 @@ def gw_clients(state):
     return [uid for uid, u in state["users"].items() if not is_admin(uid) and u.get("approved") is not False]
 
 
+def roulette_text(g):
+    prize = (f"🏆 777 — +{g['days']} дней VPN\n🍋 три одинаковых — +{ROULETTE_SMALL_DAYS} дня\n"
+             "Крутит сам Telegram — результат честный.")
+    if g["status"] == "soon":
+        return (f"🎰 Скоро рулетка!\n{prize}\n\nНачало: {fmt_date(g['start'])}. "
+                "Нажмите «🔔 Напомнить» — бот напишет, когда можно будет крутить.")
+    if g["status"] == "running":
+        return f"🎰 Рулетка! Одна прокрутка каждому.\n{prize}\n\nДо {fmt_date(g['end'])}. Крутили: {len(g['users'])}."
+    if g["status"] == "done":
+        return f"🎰 Рулетка завершена. Крутили: {len(g['users'])}."
+    return "Рулетка отменена."
+
+
 def gw_text(g):
+    if g.get("kind") == "roulette":
+        return roulette_text(g)
     prize = f"🎁 Приз: +{g['days']} дней VPN · победителей: {g['winners']}"
     if g["status"] == "soon":
         return (f"🎉 Скоро розыгрыш!\n{prize}\n\nНачало: {fmt_date(g['start'])}. "
@@ -4059,6 +4140,8 @@ def gw_client_buttons(gid, g):
     if g["status"] == "soon":
         return InlineKeyboardMarkup([[InlineKeyboardButton("🔔 Напомнить", callback_data=f"gwr:{gid}")]])
     if g["status"] == "running":
+        if g.get("kind") == "roulette":
+            return InlineKeyboardMarkup([[InlineKeyboardButton("🎰 Крутить", callback_data=f"gws:{gid}")]])
         return InlineKeyboardMarkup([[InlineKeyboardButton("🎉 Участвовать", callback_data=f"gwj:{gid}")]])
     return None
 
@@ -4069,6 +4152,19 @@ def gw_admin_screen(state):
         return "🎉 Розыгрышей сейчас нет.", InlineKeyboardMarkup([[InlineKeyboardButton("➕ Новый розыгрыш",
                                                                                      callback_data="gwa:new")]])
     when = f"начнётся {fmt_date(g['start'])}" if g["status"] == "soon" else f"итоги {fmt_date(g['end'])}"
+    if g.get("kind") == "roulette":
+        prizes = g.get("prizes", {})
+        text = (f"🎰 Рулетка №{gid}: 777 — +{g['days']} дн., три одинаковых — +{ROULETTE_SMALL_DAYS} дн.\n"
+                f"{'⏳ объявлена' if g['status'] == 'soon' else '🟢 идёт'} · "
+                f"{'начнётся ' + fmt_date(g['start']) if g['status'] == 'soon' else 'до ' + fmt_date(g['end'])}\n"
+                f"Крутили: {len(g['users'])} · выиграли: {len(prizes)}")
+        rows = [[InlineKeyboardButton("🔄 Обновить", callback_data="gwa:show")]]
+        if g["status"] == "soon":
+            rows.append([InlineKeyboardButton("▶️ Начать сейчас", callback_data=f"gwa:start:{gid}")])
+        else:
+            rows.append([InlineKeyboardButton("⏹ Завершить рулетку", callback_data=f"gwa:end:{gid}")])
+        rows.append([InlineKeyboardButton("❌ Отменить", callback_data=f"gwa:cancel:{gid}")])
+        return text, InlineKeyboardMarkup(rows)
     text = (f"🎉 Розыгрыш №{gid}: +{g['days']} дней, победителей {g['winners']}\n"
             f"{'⏳ объявлен' if g['status'] == 'soon' else '🟢 идёт'} · {when}\n"
             f"Участвуют: {len(g['users'])} · ждут напоминания: {len(g['remind'])}")
@@ -4138,10 +4234,11 @@ async def giveaway_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     status = ""
     if uid in g["users"]:
-        status = "\n\n✅ Вы уже участвуете."
+        status = "\n\n✅ Вы уже крутили." if g.get("kind") == "roulette" else "\n\n✅ Вы уже участвуете."
     elif uid in g["remind"] and g["status"] == "soon":
         status = "\n\n🔔 Напомню, когда начнётся."
-    m = await update.message.reply_text(gw_text(g) + status, reply_markup=gw_client_buttons(gid, g))
+    spun = g.get("kind") == "roulette" and uid in g["users"]
+    m = await update.message.reply_text(gw_text(g) + status, reply_markup=None if spun else gw_client_buttons(gid, g))
     async with lock:  # чтобы в начале и в конце розыгрыша это сообщение тоже обновилось
         state = load_state()
         if gid in state["giveaways"]:
@@ -4215,8 +4312,9 @@ async def gw_finish(gid, cancel=False):
             return None
         g["status"] = "cancelled" if cancel else "done"
         g["end"] = int(time.time())
-        if not cancel:
-            g["won"] = random.sample(g["users"], min(g["winners"], len(g["users"])))
+        if not cancel and g.get("kind") != "roulette":
+            # Криптографический генератор ОС (secrets): результат нельзя ни предсказать, ни повторить.
+            g["won"] = secrets.SystemRandom().sample(g["users"], min(g["winners"], len(g["users"])))
         save_state(state)
     for uid, mid in g.get("msgs", {}).items():  # кнопки в объявлениях больше не нужны
         try:
@@ -4224,6 +4322,13 @@ async def gw_finish(gid, cancel=False):
         except Exception:
             pass
         await asyncio.sleep(0.03)
+    if g.get("kind") == "roulette":
+        prizes = g.get("prizes", {})
+        lines = [f"• {user_name(state, u)} (ID {u}): +{d} дн." for u, d in prizes.items()]
+        if cancel:
+            return "❌ Рулетка отменена. Уже выданные призы остаются."
+        return (f"🏁 Рулетка №{gid} завершена. Крутили: {len(g['users'])}.\nВыиграли:\n" +
+                ("\n".join(lines) if lines else "никто"))
     if cancel:
         for uid in set(g["users"]) | set(g["remind"]):
             try:
