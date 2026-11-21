@@ -54,6 +54,15 @@ fi
 
 grep -qE '000000000000|Фамилия Имя Отчество' "$ENV" && die "в $ENV остались примеры — впишите свои данные"
 
+for port in 80 443; do
+  listeners="$(ss -H -ltnp "sport = :$port")" || die "не удалось проверить TCP-порт $port"
+  conflicts="$(printf '%s\n' "$listeners" | awk 'NF && !/\("nginx",pid=/')"
+  if [[ -n "$conflicts" ]]; then
+    printf '%s\n' "$conflicts" >&2
+    die "TCP-порт $port уже занят"
+  fi
+done
+
 echo "==> Собираю сайт"
 mkdir -p "$WWW"
 python3 - "$ENV" site "$WWW" <<'PYEOF'

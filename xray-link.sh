@@ -46,6 +46,14 @@ server)
   [[ -f /etc/most/bot.env ]] || die "это не основной сервер MOST (нет /etc/most/bot.env)"
   AWG_PORT="$(awk -F' *= *' '$1=="ListenPort"{print $2; exit}' /etc/amnezia/amneziawg/awg0.conf)"
   R_PORT="$(awk -F' *= *' '$1=="ListenPort"{print $2; exit}' /etc/amnezia/amneziawg/wgr0.conf 2>/dev/null || true)"
+  for port in 443; do
+    listeners="$(ss -H -ltnp "sport = :$port")" || die "не удалось проверить TCP-порт $port"
+    conflicts="$(printf '%s\n' "$listeners" | awk 'NF && !/\("xray",pid=/')"
+    if [[ -n "$conflicts" ]]; then
+      printf '%s\n' "$conflicts" >&2
+      die "TCP-порт $port уже занят"
+    fi
+  done
   NL_IP="$(curl -4 -fsS --max-time 10 https://api.ipify.org)"
   install_xray
 

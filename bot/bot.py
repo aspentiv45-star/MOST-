@@ -25,12 +25,14 @@ import re
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import time
 import traceback
 import zipfile
 import zlib
+from contextlib import closing, contextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -62,6 +64,7 @@ CONF = os.environ.get("AWG_CONF", f"/etc/amnezia/amneziawg/{IFACE}.conf")
 ROUTER_IFACE = os.environ.get("ROUTER_IFACE", "wgr0")
 ROUTER_CONF = os.environ.get("ROUTER_CONF", f"/etc/amnezia/amneziawg/{ROUTER_IFACE}.conf")
 STATE_FILE = os.environ.get("STATE_FILE", "/var/lib/most/state.json")
+STATE_DB = os.environ.get("STATE_DB", os.path.splitext(STATE_FILE)[0] + ".sqlite3")
 ENDPOINT_HOST = os.environ["ENDPOINT_HOST"]
 RELAY_HOST = os.environ.get("RELAY_HOST", "")
 # Порт входа в Москве для «🛡 Обхода белых списков»; пусто — тот же, что у AmneziaWG основного сервера.
@@ -417,12 +420,36 @@ def news_message(ts, text):
 
 # ---------- состояние ----------
 
+@contextmanager
+def state_db():
+    os.makedirs(os.path.dirname(os.path.abspath(STATE_DB)), exist_ok=True)
+    fd = os.open(STATE_DB, os.O_CREAT | os.O_RDWR, 0o600)
+    os.close(fd)
+    with closing(sqlite3.connect(STATE_DB, timeout=10)) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)")
+        row = db.execute("SELECT data FROM state WHERE id = 1").fetchone()
+        if row is None:
+            try:
+                with open(STATE_FILE, encoding="utf-8") as f:
+                    initial = json.load(f)
+            except FileNotFoundError:
+                initial = {}
+            save_state_in_db(db, initial)
+        yield db
+
+
 def load_state():
-    try:
-        with open(STATE_FILE) as f:
-            state = json.load(f)
-    except FileNotFoundError:
-        state = {}
+    with state_db() as db:
+        return load_state_from_db(db)
+
+
+def load_state_from_db(db):
+    row = db.execute("SELECT data FROM state WHERE id = 1").fetchone()
+    return normalize_state(json.loads(row[0]))
+
+
+def normalize_state(state):
     state.setdefault("users", {})
     state.setdefault("peers", {})
     state.setdefault("payments", {})
@@ -460,13 +487,16 @@ def load_state():
     return state
 
 
+def save_state_in_db(db, state):
+    db.execute(
+        "INSERT INTO state (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+        (json.dumps(state, ensure_ascii=False),),
+    )
+
+
 def save_state(state):
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(STATE_FILE))
-    with os.fdopen(fd, "w") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, STATE_FILE)
+    with state_db() as db:
+        save_state_in_db(db, state)
 
 
 def get_user(state, user):
@@ -1887,15 +1917,16 @@ async def ck_create(uid, amount, pay_type, then):
 async def ck_credit(num):
     """Платёж num оплачен: зачислить на баланс один раз, затем оплатить «then», если было."""
     async with lock:
-        state = load_state()
-        p = state["ckassa"].get(num)
-        if not p or p["status"] != "wait":
-            return
-        p["status"] = "done"
-        p["paid"] = time.time()
-        u = state["users"].setdefault(p["user"], {"name": p["user"]})
-        u["balance"] = u.get("balance", 0) + p["amount"]
-        save_state(state)
+        with state_db() as db:
+            state = load_state_from_db(db)
+            p = state["ckassa"].get(num)
+            if not p or p["status"] != "wait":
+                return
+            p["status"] = "done"
+            p["paid"] = time.time()
+            u = state["users"].setdefault(p["user"], {"name": p["user"]})
+            u["balance"] = u.get("balance", 0) + p["amount"]
+            save_state_in_db(db, state)
     uid = int(p["user"])
     try:
         await USER_BOT.send_message(uid, f"💰 Оплата получена, баланс пополнен на {p['amount']} ₽. "
@@ -5569,7 +5600,7 @@ def make_backup():
     без них при переезде на новый сервер у всех клиентов пришлось бы менять конфиги). Токенов ботов нет."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(STATE_FILE, "state.json")
+        z.writestr("state.json", json.dumps(load_state(), indent=2, ensure_ascii=False))
         for path in (PAY_FILE, CONF, ROUTER_CONF, os.path.join(os.path.dirname(CONF), "awg1.conf")):
             if path and os.path.exists(path):
                 z.write(path, os.path.basename(path))
@@ -5699,17 +5730,19 @@ async def admin_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def restore_backup(data):
     """Заменяет базу бота базой из бэкапа (прежняя — копией state.json.before-restore-…) и применяет к серверу."""
     with zipfile.ZipFile(io.BytesIO(data)) as z:
-        new = z.read("state.json")
+        state = normalize_state(json.loads(z.read("state.json")))
     async with lock:
         old_state = load_state()
-        if os.path.exists(STATE_FILE):
-            shutil.copy2(STATE_FILE, f"{STATE_FILE}.before-restore-{int(time.time())}")
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(STATE_FILE))
-        with os.fdopen(fd, "wb") as f:
-            f.write(new)
-        os.replace(tmp, STATE_FILE)
-        state = load_state()
+        backup_dir = os.path.dirname(os.path.abspath(STATE_DB))
+        fd, _ = tempfile.mkstemp(prefix="state.json.before-restore-", dir=backup_dir)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(old_state, f, indent=2, ensure_ascii=False)
         apply_or_rollback(state, old_state)
+        try:
+            save_state(state)
+        except Exception:
+            apply_or_rollback(old_state, state)
+            raise
     return state
 
 

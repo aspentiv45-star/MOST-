@@ -97,7 +97,7 @@ if [[ -f "$ENV_FILE" ]]; then
   [[ -n "$ACCESS" ]] || ACCESS="$(old ACCESS)"
   SPLIT="$(old SPLIT_RU)"
 fi
-PRICE="${PRICE:-100}"
+PRICE="${PRICE:-150}"
 ROUTER_PRICE="${ROUTER_PRICE:-500}"
 TRIAL="${TRIAL:-3}"
 DAYS="${DAYS:-30}"

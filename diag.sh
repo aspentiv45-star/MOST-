@@ -88,6 +88,24 @@ echo "ядер: $(nproc) · нагрузка: $(cut -d' ' -f1-3 /proc/loadavg) �
 echo "процессор: $(awk -F: '/model name/{print $2; exit}' /proc/cpuinfo | xargs)"
 echo "softirq (сеть) по ядрам, %: $(top -bn1 | awk '/%Cpu/{for(i=1;i<=NF;i++) if($i ~ /si/) print $(i-1)}' | head -1)"
 
+h "Порты и перенаправления"
+if command -v awg >/dev/null; then
+  for iface in awg0 awg1 wgr0; do
+    port="$(awg show "$iface" listen-port 2>/dev/null)" || continue
+    printf '%s: %s/udp\n' "$iface" "$port"
+  done
+fi
+if command -v ss >/dev/null; then
+  ss -H -lntup || echo "Не удалось прочитать слушающие сокеты"
+fi
+if command -v iptables >/dev/null; then
+  if nat_rules="$(iptables -t nat -S PREROUTING 2>/dev/null)"; then
+    printf '%s\n' "$nat_rules" | awk '/ -j (DNAT|REDIRECT)( |$)/ {print}'
+  else
+    echo "Не удалось прочитать перенаправления IPv4"
+  fi
+fi
+
 h "Настройки сети"
 for k in net.core.rmem_max net.core.wmem_max net.core.netdev_max_backlog net.ipv4.tcp_congestion_control net.core.default_qdisc; do
   printf '%s = %s\n' "${k##*.}" "$(sysctl -n $k 2>/dev/null)"
