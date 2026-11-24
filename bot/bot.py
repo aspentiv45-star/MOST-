@@ -1259,11 +1259,7 @@ def download_buttons(pub, *, netherlands=False):
     ])
 
 
-def download_screen(pub, peer, heading=""):
-    heading = heading or f"📥 {title(peer)}"
-    if not germany_configured() or peer.get("kind") in ROUTER_KINDS:
-        return f"{heading}\n\nНа каком устройстве подключаете?", download_buttons(pub)
-
+def country_options(pub, peer):
     nl_rate, de_rate = GERMANY_SYNC[3] if germany_available() else (None, None)
     germany_ready = germany_available() and GERMANY_SYNC[2].get(pub) == peer["ip"]
     rates = (nl_rate, de_rate if germany_ready else None)
@@ -1273,23 +1269,29 @@ def download_screen(pub, peer, heading=""):
         measurement = f"{rate:g} Мбит/с" if rate is not None else "нет замера"
         lines.append(f"{country} · {measurement}")
     if not germany_ready:
-        lines[1] = "🇩🇪 Германия · подключение временно недоступно"
+        status = "временно недоступна" if germany_configured() else "ещё не подключена"
+        lines[1] = f"🇩🇪 Германия · {status}"
     if None not in rates and rates[0] != rates[1]:
         recommended = countries[0] if rates[0] < rates[1] else countries[1]
         lines.append(f"Рекомендуем: {recommended} — сейчас меньше трафика.")
     elif None not in rates:
         lines.append("По текущему замеру нагрузка одинаковая.")
 
-    text = "\n".join([
-        heading, "", "Одна подписка · две страны. Выберите страну для подключения.",
-        "", "Текущий трафик VPN (приём + передача)", *lines,
-    ])
-    markup = InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton(countries[0], callback_data=f"dl:nl:{pub}")],
         [InlineKeyboardButton(countries[1], callback_data=f"dl:de:{pub}")],
-        [InlineKeyboardButton("⬅️ К конфигу", callback_data=f"cfg:{pub}")],
-    ])
-    return text, markup
+    ]
+    return "\n".join(["Текущий трафик VPN (приём + передача)", *lines]), rows
+
+
+def download_screen(pub, peer, heading=""):
+    heading = heading or f"📥 {title(peer)}"
+    if peer.get("kind") in ROUTER_KINDS:
+        return f"{heading}\n\nНа каком устройстве подключаете?", download_buttons(pub)
+
+    summary, rows = country_options(pub, peer)
+    rows.append([InlineKeyboardButton("⬅️ К конфигу", callback_data=f"cfg:{pub}")])
+    return f"{heading}\n\nОдна подписка · две страны. Выберите страну для подключения.\n\n{summary}", InlineKeyboardMarkup(rows)
 
 
 def back_button(pub):
@@ -2431,11 +2433,15 @@ async def submit_payment(user, target, data, comment, reply_to, months=1, amount
 
 def config_card(state, pub, p, back=True):
     """Экран одного конфига: что он такое и все действия с ним."""
-    row = [InlineKeyboardButton("⬇️ Скачать", callback_data=f"get:{pub}")]
+    summary = ""
+    if peer_active(p) and p.get("kind") not in ROUTER_KINDS:
+        summary, rows = country_options(pub, p)
+    else:
+        rows = [[InlineKeyboardButton("⬇️ Скачать", callback_data=f"get:{pub}")]]
     if not is_admin(p["user"]):
-        row.append(InlineKeyboardButton(f"🔄 Продлить — {price_for(state, pub)} ₽", callback_data=f"renew:{pub}"))
-    rows = [row, [InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}"),
-                  InlineKeyboardButton("✏️ Название", callback_data=f"ren:{pub}")]]
+        rows.append([InlineKeyboardButton(f"🔄 Продлить — {price_for(state, pub)} ₽", callback_data=f"renew:{pub}")])
+    rows.append([InlineKeyboardButton("🏓 Пинг", callback_data=f"png:{pub}"),
+                 InlineKeyboardButton("✏️ Название", callback_data=f"ren:{pub}")])
     if p.get("kind") not in ROUTER_KINDS and os.environ.get("OP_PROFILES", "0") == "1":
         rows.append([InlineKeyboardButton(f"📶 Оператор: {OPERATORS.get(p.get('op'), 'не выбран')}",
                                           callback_data=f"opc:{pub}")])
@@ -2449,7 +2455,10 @@ def config_card(state, pub, p, back=True):
         rows.append([InlineKeyboardButton("⬅️ Все конфиги", callback_data="cfgl:")])
     icon = "📡" if p.get("kind") in ROUTER_KINDS else "📱"
     device = f"\n{OS_NAMES[p['os']]}" if p.get("os") in OS_NAMES else ""
-    return f"{icon} {title(p)} — {peer_status(p)}{device}", InlineKeyboardMarkup(rows)
+    text = f"{icon} {title(p)} — {peer_status(p)}{device}"
+    if summary:
+        text += f"\n\n{summary}"
+    return text, InlineKeyboardMarkup(rows)
 
 
 def config_list(state, uid):
@@ -2579,7 +2588,9 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if how == "de":
             if (not germany_available() or GERMANY_SYNC[2].get(pub) != peer["ip"]
                     or peer.get("kind") in ROUTER_KINDS):
-                await show_card(query, pub, "Германия пока недоступна. Попробуйте ещё раз чуть позже.")
+                message = ("Германия пока недоступна. Попробуйте ещё раз чуть позже."
+                           if germany_configured() else "Германия ещё не подключена к боту.")
+                await show_card(query, pub, message)
                 return
             text = germany_config(peer, GERMANY_SYNC[1])
             await USER_BOT.send_document(query.message.chat_id, document=io.BytesIO(text.encode()),
