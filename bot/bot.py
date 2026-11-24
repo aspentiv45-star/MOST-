@@ -1232,6 +1232,18 @@ async def germany_loop():
         await asyncio.sleep(15)
 
 
+def germany_download_problem(pub, peer):
+    if peer.get("kind") in ROUTER_KINDS:
+        return "Германия доступна для конфигов телефона и компьютера."
+    if not germany_configured():
+        return "Германия ещё не подключена к боту. Обратитесь в поддержку."
+    if not germany_available():
+        return "Нет свежей связи с немецким сервером. Повторите скачивание через минуту."
+    if GERMANY_SYNC[2].get(pub) != peer["ip"]:
+        return "Сервер ещё не подтвердил этот конфиг. Повторите скачивание через минуту."
+    return ""
+
+
 def germany_config(peer, params):
     lines = [
         "[Interface]",
@@ -2566,7 +2578,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if until and action not in ("close", "kdone"):
         await query.answer(blocked_text(until), show_alert=True)
         return
-    if action not in ("gwj", "gwr", "gws", "ckp", "ckc"):  # там ответ — всплывающим окном
+    german_file = action == "dl" and arg.startswith("defile:")
+    if not german_file and action not in ("gwj", "gwr", "gws", "ckp", "ckc"):  # там ответ — всплывающим окном
         await query.answer()
 
     if action == "close":
@@ -2580,22 +2593,38 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         how, _, pub = arg.partition(":")
         peer = load_state()["peers"].get(pub)
         if not peer or peer["user"] != str(uid):
+            if german_file:
+                await query.answer("Конфиг не найден.", show_alert=True)
+                return
             await query.edit_message_text("Конфиг не найден.")
             return
         if not peer_active(peer):
+            if german_file:
+                await query.answer("Срок конфига закончился.", show_alert=True)
+                return
             await query.edit_message_text(f"{title(peer)}: срок закончился, сначала продлите его.")
             return
-        if how == "de":
-            if (not germany_available() or GERMANY_SYNC[2].get(pub) != peer["ip"]
-                    or peer.get("kind") in ROUTER_KINDS):
-                message = ("Германия пока недоступна. Попробуйте ещё раз чуть позже."
-                           if germany_configured() else "Германия ещё не подключена к боту.")
-                await show_card(query, pub, message)
+        if how in ("de", "defile"):
+            problem = germany_download_problem(pub, peer)
+            if how == "de":
+                await query.edit_message_text(
+                    "🇩🇪 Германия\n\n" + (problem or "Скачайте файл и импортируйте его в AmneziaWG."),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📄 Скачать .conf", callback_data=f"dl:defile:{pub}")],
+                        [InlineKeyboardButton("⬅️ К конфигу", callback_data=f"cfg:{pub}")],
+                    ]))
+                return
+            if problem:
+                await query.answer(problem, show_alert=True)
                 return
             text = germany_config(peer, GERMANY_SYNC[1])
-            await USER_BOT.send_document(query.message.chat_id, document=io.BytesIO(text.encode()),
-                                         filename=f"{file_base(peer)[:12]}-de.conf",
-                                         caption="🇩🇪 Германия. Импортируйте как отдельный туннель в AmneziaWG.")
+            await query.answer("Отправляю файл…")
+            try:
+                await USER_BOT.send_document(query.message.chat_id, document=io.BytesIO(text.encode()),
+                                             filename=f"{file_base(peer)[:12]}-de.conf",
+                                             caption="🇩🇪 Германия. Импортируйте файл в AmneziaWG.")
+            except NetworkError:
+                await query.message.reply_text("Telegram не подтвердил отправку. Если файла нет в чате, нажмите «Скачать .conf» ещё раз.")
         elif how == "nl":
             await query.edit_message_text("🇳🇱 Нидерланды. На каком устройстве подключаете?",
                                           reply_markup=download_buttons(pub, netherlands=True))
