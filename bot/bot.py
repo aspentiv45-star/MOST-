@@ -746,29 +746,33 @@ def ads_blocked(peer):
             and peer.get("kind") not in ROUTER_KINDS)
 
 
-def client_conf(peer, params, host, port=None):
+def client_conf(peer, params, host, port=None, *, germany=False):
     allowed = (router_allowed_ips(host) if peer.get("kind") in ROUTER_KINDS else
                (FULL_TUNNEL if SMART_FULL else smart_allowed_ips()) if mode_of(peer) == "smart" else
                smart_allowed_ips(game_only=True) if mode_of(peer) == "game" else
                PCGAME_NETS[0] if mode_of(peer) == "pcgame" and PCGAME_NETS[0] else allowed_ips())
     # DNS с блокировкой — на VPN-сервере, запросы к нему должны идти через VPN. В списках сетей
     # («только заблокированное», игровой ПК, раздельный туннель) локальные адреса 10.x вырезаны — добавляем.
-    if ads_blocked(peer) and "0.0.0.0/0" not in allowed:
+    if germany and mode_of(peer) == "full":
+        allowed = FULL_TUNNEL
+    use_adblock = not germany and ads_blocked(peer)
+    if use_adblock and "0.0.0.0/0" not in allowed:
         allowed += f",{ADBLOCK_DNS}/32"
     lines = [
         "[Interface]",
         f"PrivateKey = {peer['priv']}",
         f"Address = {peer['ip']}/32",
-        f"DNS = {ADBLOCK_DNS if ads_blocked(peer) else CLIENT_DNS}",
+        f"DNS = {ADBLOCK_DNS if use_adblock else CLIENT_DNS}",
         "MTU = 1280",
     ]
     if CLIENT_PORT and peer.get("kind") not in ROUTER_KINDS and RELAY_HOST and host == RELAY_HOST:
         lines.append(f"ListenPort = {CLIENT_PORT}")
     lines += [f"{k} = {v}" for k, v in obfs_params(peer, params).items()]
+    public_key = params["PublicKey"] if germany else run(["awg", "pubkey"], params["PrivateKey"] + "\n")
     lines += [
         "",
         "[Peer]",
-        f"PublicKey = {run(['awg', 'pubkey'], params['PrivateKey'] + chr(10))}",
+        f"PublicKey = {public_key}",
         f"Endpoint = {host}:{port or params['ListenPort']}",
         f"AllowedIPs = {allowed}",
         "PersistentKeepalive = 25",
@@ -1143,9 +1147,11 @@ def qr_png(text):
     return png
 
 
-def peer_variants(peer):
+def peer_variants(peer, germany_params=None):
     """Файлы конфига: имя, адрес и порт подключения."""
     # Имя файла становится именем туннеля; на iOS оно не длиннее 15 символов.
+    if germany_params is not None:
+        return [(f"{file_base(peer)[:12]}-de.conf", GERMANY_HOST, germany_params["ListenPort"])]
     if mode_of(peer) in DIRECT_MODES and peer.get("kind") not in ROUTER_KINDS:
         # Игровой режим — напрямую на основной сервер, минуя вход в России.
         return [(f"{file_base(peer)}.conf", ENDPOINT_HOST, SMART_PORT if mode_of(peer) == "smart" else GAME_PORT)]
@@ -1244,30 +1250,13 @@ def germany_download_problem(pub, peer):
     return ""
 
 
-def germany_config(peer, params):
-    lines = [
-        "[Interface]",
-        f"PrivateKey = {peer['priv']}",
-        f"Address = {peer['ip']}/32",
-        f"DNS = {CLIENT_DNS}",
-        "MTU = 1280",
-        *[f"{key} = {params[key]}" for key in OBFS_KEYS if key in params],
-        "",
-        "[Peer]",
-        f"PublicKey = {params['PublicKey']}",
-        f"Endpoint = {GERMANY_HOST}:{params['ListenPort']}",
-        f"AllowedIPs = {FULL_TUNNEL}",
-        "PersistentKeepalive = 25",
-    ]
-    return "\n".join(lines) + "\n"
-
-
-def download_buttons(pub, *, netherlands=False):
+def download_buttons(pub, *, netherlands=False, germany=False):
+    action = "dd" if germany else "dl"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🍏 iPhone / 💻 Windows, Mac", callback_data=f"dl:ios:{pub}")],
-        [InlineKeyboardButton("🤖 Android", callback_data=f"dl:and:{pub}")],
-        [InlineKeyboardButton("📦 Все режимы сразу", callback_data=f"dl:allm:{pub}")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data=f"dl:back:{pub}" if netherlands else f"cfg:{pub}")],
+        [InlineKeyboardButton("🍏 iPhone / 💻 Windows, Mac", callback_data=f"{action}:ios:{pub}")],
+        [InlineKeyboardButton("🤖 Android", callback_data=f"{action}:and:{pub}")],
+        [InlineKeyboardButton("📦 Все режимы сразу", callback_data=f"{action}:allm:{pub}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"dl:back:{pub}" if netherlands or germany else f"cfg:{pub}")],
     ])
 
 
@@ -1336,12 +1325,13 @@ async def show_download(query, pub, note=""):
     await query.edit_message_text(text, reply_markup=buttons)
 
 
-def android_buttons(pub):
+def android_buttons(pub, germany=False):
+    action = "dd" if germany else "dl"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔑 Ключ (рекомендуется)", callback_data=f"dl:key:{pub}")],
-        [InlineKeyboardButton("📄 Файл", callback_data=f"dl:file:{pub}"),
-         InlineKeyboardButton("🔳 QR-код", callback_data=f"dl:qr:{pub}")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data=f"dl:back:{pub}")],
+        [InlineKeyboardButton("🔑 Ключ (рекомендуется)", callback_data=f"{action}:key:{pub}")],
+        [InlineKeyboardButton("📄 Файл", callback_data=f"{action}:file:{pub}"),
+         InlineKeyboardButton("🔳 QR-код", callback_data=f"{action}:qr:{pub}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"dl:de:{pub}" if germany else f"dl:back:{pub}")],
     ])
 
 
@@ -1410,12 +1400,13 @@ ALL_MODES = {"smart": "osn", "full": "obhod", "game": "game"}
 ALL_MODES_PC = {"smart": "osn", "full": "obhod", "pcgame": "game"}
 
 
-def all_modes_buttons(pub):
+def all_modes_buttons(pub, germany=False):
+    action = "dd" if germany else "dl"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔑 Ключи (AmneziaVPN)", callback_data=f"dl:amk:{pub}")],
-        [InlineKeyboardButton("🔳 QR-коды", callback_data=f"dl:amq:{pub}"),
-         InlineKeyboardButton("📄 Файлы", callback_data=f"dl:amf:{pub}")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data=f"dl:back:{pub}")],
+        [InlineKeyboardButton("🔑 Ключи (AmneziaVPN)", callback_data=f"{action}:amk:{pub}")],
+        [InlineKeyboardButton("🔳 QR-коды", callback_data=f"{action}:amq:{pub}"),
+         InlineKeyboardButton("📄 Файлы", callback_data=f"{action}:amf:{pub}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"dl:de:{pub}" if germany else f"dl:back:{pub}")],
     ])
 
 
@@ -1426,30 +1417,37 @@ ALL_MODES_HINT = {
 }
 
 
-async def deliver_all_modes(chat_id, peer, fmt="amf"):
+async def deliver_all_modes(chat_id, peer, fmt="amf", germany_params=None):
     """По конфигу на каждый режим — ключами, QR-кодами или файлами (fmt: amk, amq, amf)."""
-    params = server_params(peer_iface(peer)[1])
+    germany = germany_params is not None
+    params = germany_params if germany else server_params(peer_iface(peer)[1])
     base = file_base(peer)
     ids = []
     for mode, suffix in (ALL_MODES_PC if peer.get("os") == "pc" else ALL_MODES).items():
         mp = dict(peer, mode=mode)
-        _, host, port = peer_variants(mp)[0]
+        _, host, port = peer_variants(mp, germany_params)[0]
+        label = MODES[mode]
+        if germany:
+            if mode == "full":
+                suffix, label = "full", "Весь трафик"
+            suffix = f"de-{suffix}"
+            label = f"🇩🇪 {label}"
         name = f"{base[:14 - len(suffix)]}-{suffix}"  # имя туннеля на iOS — до 15 символов
-        text = client_conf(mp, params, host, port)
+        text = client_conf(mp, params, host, port, germany=germany)
         if fmt == "amk":
             key = vpn_key(mp, params, host, port or params["ListenPort"], text)
             if len(key) < 4000:  # больше не влезает в одно сообщение Telegram
-                msg = await USER_BOT.send_message(chat_id, f"{MODES[mode]}\n<code>{key}</code>", parse_mode="HTML")
+                msg = await USER_BOT.send_message(chat_id, f"{label}\n<code>{key}</code>", parse_mode="HTML")
             else:
                 msg = await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()),
                                                    filename=f"{name}.conf",
-                                                   caption=f"{MODES[mode]}: ключ слишком длинный — вот файл.")
+                                                   caption=f"{label}: ключ слишком длинный — вот файл.")
         elif fmt == "amq":
             png = qr_png(text)
             if png:
-                msg = await USER_BOT.send_photo(chat_id, photo=png, caption=MODES[mode])
+                msg = await USER_BOT.send_photo(chat_id, photo=png, caption=label)
             else:
-                msg = await USER_BOT.send_message(chat_id, f"{MODES[mode]}: слишком длинный для QR-кода — "
+                msg = await USER_BOT.send_message(chat_id, f"{label}: слишком длинный для QR-кода — "
                                                            "возьмите ключ или файл.")
         else:
             msg = await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()),
@@ -1523,15 +1521,17 @@ async def send_guide_video(chat_id, which, auto=False):
     return True
 
 
-async def deliver_peer(chat_id, peer, how):
+async def deliver_peer(chat_id, peer, how, germany_params=None):
     """how: file — файл; qr — QR-код; key — ключ для AmneziaVPN; ios — файл и QR; all — всё (роутеры)."""
     if how in ALL_MODES_HINT and peer.get("kind") not in ROUTER_KINDS:
-        await deliver_all_modes(chat_id, peer, how)
+        await deliver_all_modes(chat_id, peer, how, germany_params)
         return
-    await remember_smart_snapshot(peer)
-    params = server_params(peer_iface(peer)[1])
-    for filename, host, port in peer_variants(peer):
-        text = client_conf(peer, params, host, port)
+    germany = germany_params is not None
+    if not germany:
+        await remember_smart_snapshot(peer)
+    params = germany_params if germany else server_params(peer_iface(peer)[1])
+    for filename, host, port in peer_variants(peer, germany_params):
+        text = client_conf(peer, params, host, port, germany=germany)
         file_msg = None
         if how in ("file", "ios", "all"):
             file_msg = await USER_BOT.send_document(chat_id, document=io.BytesIO(text.encode()), filename=filename,
@@ -2578,7 +2578,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if until and action not in ("close", "kdone"):
         await query.answer(blocked_text(until), show_alert=True)
         return
-    german_file = action == "dl" and arg.startswith("defile:")
+    german_file = action == "dd" or (action == "dl" and arg.startswith("defile:"))
     if not german_file and action not in ("gwj", "gwr", "gws", "ckp", "ckc"):  # там ответ — всплывающим окном
         await query.answer()
 
@@ -2589,8 +2589,9 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_reply_markup(None)  # старше 48 часов — хотя бы убрать кнопки
         return
 
-    if action == "dl":
+    if action in ("dl", "dd"):
         how, _, pub = arg.partition(":")
+        germany = action == "dd" or how in ("de", "defile")
         peer = load_state()["peers"].get(pub)
         if not peer or peer["user"] != str(uid):
             if german_file:
@@ -2604,46 +2605,43 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 return
             await query.edit_message_text(f"{title(peer)}: срок закончился, сначала продлите его.")
             return
-        if how in ("de", "defile"):
+        germany_params = None
+        if germany:
             problem = germany_download_problem(pub, peer)
             if how == "de":
-                await query.edit_message_text(
-                    "🇩🇪 Германия\n\n" + (problem or "Скачайте файл и импортируйте его в AmneziaWG."),
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📄 Скачать .conf", callback_data=f"dl:defile:{pub}")],
-                        [InlineKeyboardButton("⬅️ К конфигу", callback_data=f"cfg:{pub}")],
-                    ]))
+                text = problem or "На каком устройстве подключаете?"
+                await query.edit_message_text(f"🇩🇪 Германия. {text}", reply_markup=download_buttons(pub, germany=True))
                 return
             if problem:
                 await query.answer(problem, show_alert=True)
                 return
-            text = germany_config(peer, GERMANY_SYNC[1])
-            await query.answer("Отправляю файл…")
-            try:
-                await USER_BOT.send_document(query.message.chat_id, document=io.BytesIO(text.encode()),
-                                             filename=f"{file_base(peer)[:12]}-de.conf",
-                                             caption="🇩🇪 Германия. Импортируйте файл в AmneziaWG.")
-            except NetworkError:
-                await query.message.reply_text("Telegram не подтвердил отправку. Если файла нет в чате, нажмите «Скачать .conf» ещё раз.")
-        elif how == "nl":
+            germany_params = GERMANY_SYNC[1]
+            await query.answer()
+            if how == "defile":  # Кнопка из старого сообщения с полным туннелем.
+                how = "file"
+                peer = dict(peer, mode="full")
+        if how == "nl":
             await query.edit_message_text("🇳🇱 Нидерланды. На каком устройстве подключаете?",
                                           reply_markup=download_buttons(pub, netherlands=True))
         elif how == "and":
             await query.edit_message_text(f"🤖 {title(peer)}: как добавить?\n"
                                           "🔑 Ключ — для AmneziaVPN, проще всего.\n"
                                           "📄 Файл — для AmneziaWG.",
-                                          reply_markup=android_buttons(pub))
+                                          reply_markup=android_buttons(pub, germany=germany))
             await maybe_video(query.message.chat_id, peer, "android")
         elif how == "allm":
             await query.edit_message_text(f"📦 {title(peer)}: все режимы сразу. Как прислать?",
-                                          reply_markup=all_modes_buttons(pub))
+                                          reply_markup=all_modes_buttons(pub, germany=germany))
         elif how == "back":
             text, buttons = download_screen(pub, peer)
             await query.edit_message_text(text, reply_markup=buttons)
         elif how in ("ios", "key", "file", "qr", "amk", "amq", "amf"):
-            # Сначала экран конфига (с пометкой), потом файлы под ним.
+            try:
+                await deliver_peer(query.message.chat_id, peer, how, germany_params)
+            except NetworkError:
+                await query.message.reply_text("Telegram не подтвердил отправку. Если сообщение не пришло, повторите скачивание.")
+                return
             await show_card(query, pub, "✅ Отправил ниже 👇")
-            await deliver_peer(query.message.chat_id, peer, how)
             if how == "ios" and peer.get("os") != "pc":
                 await maybe_video(query.message.chat_id, peer, "ios")
         return
