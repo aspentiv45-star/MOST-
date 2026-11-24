@@ -66,6 +66,10 @@ ROUTER_CONF = os.environ.get("ROUTER_CONF", f"/etc/amnezia/amneziawg/{ROUTER_IFA
 STATE_FILE = os.environ.get("STATE_FILE", "/var/lib/most/state.json")
 STATE_DB = os.environ.get("STATE_DB", os.path.splitext(STATE_FILE)[0] + ".sqlite3")
 ENDPOINT_HOST = os.environ["ENDPOINT_HOST"]
+GERMANY_HOST = "185.21.8.78"
+GERMANY_IDENTITY = "/etc/most/germany.key"
+GERMANY_HOST_KEYS = "/etc/most/germany.known_hosts"
+GERMANY_SYNC = None
 RELAY_HOST = os.environ.get("RELAY_HOST", "")
 # Порт входа в Москве для «🛡 Обхода белых списков»; пусто — тот же, что у AmneziaWG основного сервера.
 # Новый порт на входе: relay.sh --to IP:50967=8054,8055=8054,50968 (старый оставить для старых файлов).
@@ -1159,12 +1163,70 @@ def peer_pub(peer):
     return next((k for k, p in load_state()["peers"].items() if p.get("priv") == peer.get("priv")), None)
 
 
-def download_buttons(pub):
+def germany_available():
+    return GERMANY_SYNC is not None and time.monotonic() - GERMANY_SYNC[0] < 40
+
+
+def sync_germany(peers):
+    result = subprocess.run(
+        ["ssh", "-F", "/dev/null", "-T", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+         "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=yes",
+         "-o", f"UserKnownHostsFile={GERMANY_HOST_KEYS}", "-i", GERMANY_IDENTITY,
+         f"root@{GERMANY_HOST}"],
+        input=json.dumps(peers), text=True, capture_output=True, check=True, timeout=15,
+    )
+    params = json.loads(result.stdout)
+    if not params.get("PublicKey") or not 0 < int(params["ListenPort"]) <= 65535:
+        raise ValueError("Invalid Germany server parameters")
+    return params
+
+
+async def germany_loop():
+    global GERMANY_SYNC
+    while True:
+        try:
+            state = load_state()
+            peers = {pub: p["ip"] for pub, p in state["peers"].items()
+                     if p.get("kind") not in ROUTER_KINDS and peer_active(p)
+                     and not blocked_until(state, p["user"])}
+            params = await asyncio.to_thread(sync_germany, peers)
+            GERMANY_SYNC = (time.monotonic(), params, peers)
+        except Exception:
+            GERMANY_SYNC = None
+            log.exception("не удалось синхронизировать сервер в Германии")
+        await asyncio.sleep(15)
+
+
+def germany_config(peer, params):
+    lines = [
+        "[Interface]",
+        f"PrivateKey = {peer['priv']}",
+        f"Address = {peer['ip']}/32",
+        f"DNS = {CLIENT_DNS}",
+        "MTU = 1280",
+        *[f"{key} = {params[key]}" for key in OBFS_KEYS if key in params],
+        "",
+        "[Peer]",
+        f"PublicKey = {params['PublicKey']}",
+        f"Endpoint = {GERMANY_HOST}:{params['ListenPort']}",
+        f"AllowedIPs = {FULL_TUNNEL}",
+        "PersistentKeepalive = 25",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def download_buttons(pub, *, netherlands=False):
+    if germany_available() and pub in GERMANY_SYNC[2] and not netherlands:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🇳🇱 Нидерланды", callback_data=f"dl:nl:{pub}")],
+            [InlineKeyboardButton("🇩🇪 Германия · файл", callback_data=f"dl:de:{pub}")],
+            [InlineKeyboardButton("⬅️ К конфигу", callback_data=f"cfg:{pub}")],
+        ])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🍏 iPhone / 💻 Windows, Mac", callback_data=f"dl:ios:{pub}")],
         [InlineKeyboardButton("🤖 Android", callback_data=f"dl:and:{pub}")],
         [InlineKeyboardButton("📦 Все режимы сразу", callback_data=f"dl:allm:{pub}")],
-        [InlineKeyboardButton("⬅️ К конфигу", callback_data=f"cfg:{pub}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"dl:back:{pub}" if netherlands else f"cfg:{pub}")],
     ])
 
 
@@ -1195,7 +1257,7 @@ async def show_download(query, pub, note=""):
         await show_card(query, pub, f"{note}\nСрок закончился — продлите, и конфиг заработает с новыми настройками.")
         return
     await query.edit_message_text(f"{note}\n\n📥 Скачайте новый файл и замените им старый туннель. "
-                                  "На каком устройстве?", reply_markup=download_buttons(pub))
+                                  "Выберите вариант подключения.", reply_markup=download_buttons(pub))
 
 
 def android_buttons(pub):
@@ -1213,7 +1275,7 @@ async def send_peer(chat_id, peer):
     if peer.get("kind") in ROUTER_KINDS or not pub:
         await deliver_peer(chat_id, peer, "all")
         return
-    await USER_BOT.send_message(chat_id, f"📥 {title(peer)}: на каком устройстве подключаете?",
+    await USER_BOT.send_message(chat_id, f"📥 {title(peer)}: выберите вариант подключения.",
                                 reply_markup=download_buttons(pub))
     await maybe_video(chat_id, peer)
 
@@ -2452,7 +2514,19 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not peer_active(peer):
             await query.edit_message_text(f"{title(peer)}: срок закончился, сначала продлите его.")
             return
-        if how == "and":
+        if how == "de":
+            if (not germany_available() or GERMANY_SYNC[2].get(pub) != peer["ip"]
+                    or peer.get("kind") in ROUTER_KINDS):
+                await show_card(query, pub, "Германия пока недоступна. Попробуйте ещё раз чуть позже.")
+                return
+            text = germany_config(peer, GERMANY_SYNC[1])
+            await USER_BOT.send_document(query.message.chat_id, document=io.BytesIO(text.encode()),
+                                         filename=f"{file_base(peer)[:12]}-de.conf",
+                                         caption="🇩🇪 Германия. Импортируйте как отдельный туннель в AmneziaWG.")
+        elif how == "nl":
+            await query.edit_message_text("🇳🇱 Нидерланды. На каком устройстве подключаете?",
+                                          reply_markup=download_buttons(pub, netherlands=True))
+        elif how == "and":
             await query.edit_message_text(f"🤖 {title(peer)}: как добавить?\n"
                                           "🔑 Ключ — для AmneziaVPN, проще всего.\n"
                                           "📄 Файл — для AmneziaWG.",
@@ -2462,7 +2536,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"📦 {title(peer)}: все режимы сразу. Как прислать?",
                                           reply_markup=all_modes_buttons(pub))
         elif how == "back":
-            await query.edit_message_text(f"📥 {title(peer)}: на каком устройстве подключаете?",
+            await query.edit_message_text(f"📥 {title(peer)}: выберите вариант подключения.",
                                           reply_markup=download_buttons(pub))
         elif how in ("ios", "key", "file", "qr", "amk", "amq", "amf"):
             # Сначала экран конфига (с пометкой), потом файлы под ним.
@@ -2950,7 +3024,7 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not peer_active(peer):
             await show_card(query, arg, "Срок закончился — сначала продлите.")
             return
-        await query.edit_message_text(f"📥 {title(peer)}: на каком устройстве подключаете?",
+        await query.edit_message_text(f"📥 {title(peer)}: выберите вариант подключения.",
                                       reply_markup=download_buttons(arg))
         await maybe_video(query.message.chat_id, peer)
     elif action == "del":
@@ -6126,6 +6200,8 @@ async def amain():
                  asyncio.create_task(tunnel_loop()), asyncio.create_task(giveaway_loop()),
                  asyncio.create_task(waiting_loop()), asyncio.create_task(backup_loop()),
                  asyncio.create_task(ckassa_loop())]
+        if os.path.isfile(GERMANY_IDENTITY) and os.path.isfile(GERMANY_HOST_KEYS):
+            tasks.append(asyncio.create_task(germany_loop()))
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
