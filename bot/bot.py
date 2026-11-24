@@ -1163,6 +1163,35 @@ def peer_pub(peer):
     return next((k for k, p in load_state()["peers"].items() if p.get("priv") == peer.get("priv")), None)
 
 
+def germany_configured():
+    return os.path.isfile(GERMANY_IDENTITY) and os.path.isfile(GERMANY_HOST_KEYS)
+
+
+def local_vpn_traffic():
+    try:
+        values = []
+        for counter in ("rx_bytes", "tx_bytes"):
+            with open(f"/sys/class/net/{IFACE}/statistics/{counter}", encoding="ascii") as source:
+                values.append(int(source.read()))
+        return time.monotonic(), sum(values)
+    except (OSError, ValueError):
+        return None
+
+
+def traffic_rate(previous, current):
+    """Traffic in Mbit/s between two samples from the same server."""
+    if not previous or not current:
+        return None
+    try:
+        elapsed = current[0] - previous[0]
+        transferred = current[1] - previous[1]
+        if 0 < elapsed <= 40 and transferred >= 0:
+            return round(transferred * 8 / elapsed / 1_000_000, 1)
+    except (TypeError, IndexError, KeyError):
+        pass
+    return None
+
+
 def germany_available():
     return GERMANY_SYNC is not None and time.monotonic() - GERMANY_SYNC[0] < 40
 
@@ -1183,6 +1212,7 @@ def sync_germany(peers):
 
 async def germany_loop():
     global GERMANY_SYNC
+    previous_nl = previous_de = None
     while True:
         try:
             state = load_state()
@@ -1190,8 +1220,13 @@ async def germany_loop():
                      if p.get("kind") not in ROUTER_KINDS and peer_active(p)
                      and not blocked_until(state, p["user"])}
             params = await asyncio.to_thread(sync_germany, peers)
-            GERMANY_SYNC = (time.monotonic(), params, peers)
+            current_nl = await asyncio.to_thread(local_vpn_traffic)
+            current_de = params.get("TrafficSample")
+            rates = traffic_rate(previous_nl, current_nl), traffic_rate(previous_de, current_de)
+            previous_nl, previous_de = current_nl, current_de
+            GERMANY_SYNC = (time.monotonic(), params, peers, rates)
         except Exception:
+            previous_nl = previous_de = None
             GERMANY_SYNC = None
             log.exception("не удалось синхронизировать сервер в Германии")
         await asyncio.sleep(15)
@@ -1216,18 +1251,45 @@ def germany_config(peer, params):
 
 
 def download_buttons(pub, *, netherlands=False):
-    if germany_available() and pub in GERMANY_SYNC[2] and not netherlands:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🇳🇱 Нидерланды", callback_data=f"dl:nl:{pub}")],
-            [InlineKeyboardButton("🇩🇪 Германия · файл", callback_data=f"dl:de:{pub}")],
-            [InlineKeyboardButton("⬅️ К конфигу", callback_data=f"cfg:{pub}")],
-        ])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🍏 iPhone / 💻 Windows, Mac", callback_data=f"dl:ios:{pub}")],
         [InlineKeyboardButton("🤖 Android", callback_data=f"dl:and:{pub}")],
         [InlineKeyboardButton("📦 Все режимы сразу", callback_data=f"dl:allm:{pub}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data=f"dl:back:{pub}" if netherlands else f"cfg:{pub}")],
     ])
+
+
+def download_screen(pub, peer, heading=""):
+    heading = heading or f"📥 {title(peer)}"
+    if not germany_configured() or peer.get("kind") in ROUTER_KINDS:
+        return f"{heading}\n\nНа каком устройстве подключаете?", download_buttons(pub)
+
+    nl_rate, de_rate = GERMANY_SYNC[3] if germany_available() else (None, None)
+    germany_ready = germany_available() and GERMANY_SYNC[2].get(pub) == peer["ip"]
+    rates = (nl_rate, de_rate if germany_ready else None)
+    countries = ("🇳🇱 Нидерланды", "🇩🇪 Германия")
+    lines = []
+    for country, rate in zip(countries, rates):
+        measurement = f"{rate:g} Мбит/с" if rate is not None else "нет замера"
+        lines.append(f"{country} · {measurement}")
+    if not germany_ready:
+        lines[1] = "🇩🇪 Германия · подключение временно недоступно"
+    if None not in rates and rates[0] != rates[1]:
+        recommended = countries[0] if rates[0] < rates[1] else countries[1]
+        lines.append(f"Рекомендуем: {recommended} — сейчас меньше трафика.")
+    elif None not in rates:
+        lines.append("По текущему замеру нагрузка одинаковая.")
+
+    text = "\n".join([
+        heading, "", "Одна подписка · две страны. Выберите страну для подключения.",
+        "", "Текущий трафик VPN (приём + передача)", *lines,
+    ])
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton(countries[0], callback_data=f"dl:nl:{pub}")],
+        [InlineKeyboardButton(countries[1], callback_data=f"dl:de:{pub}")],
+        [InlineKeyboardButton("⬅️ К конфигу", callback_data=f"cfg:{pub}")],
+    ])
+    return text, markup
 
 
 def back_button(pub):
@@ -1256,8 +1318,8 @@ async def show_download(query, pub, note=""):
     if not peer_active(p):
         await show_card(query, pub, f"{note}\nСрок закончился — продлите, и конфиг заработает с новыми настройками.")
         return
-    await query.edit_message_text(f"{note}\n\n📥 Скачайте новый файл и замените им старый туннель. "
-                                  "Выберите вариант подключения.", reply_markup=download_buttons(pub))
+    text, buttons = download_screen(pub, p, note)
+    await query.edit_message_text(text, reply_markup=buttons)
 
 
 def android_buttons(pub):
@@ -1275,8 +1337,8 @@ async def send_peer(chat_id, peer):
     if peer.get("kind") in ROUTER_KINDS or not pub:
         await deliver_peer(chat_id, peer, "all")
         return
-    await USER_BOT.send_message(chat_id, f"📥 {title(peer)}: выберите вариант подключения.",
-                                reply_markup=download_buttons(pub))
+    text, buttons = download_screen(pub, peer)
+    await USER_BOT.send_message(chat_id, text, reply_markup=buttons)
     await maybe_video(chat_id, peer)
 
 
@@ -2536,8 +2598,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"📦 {title(peer)}: все режимы сразу. Как прислать?",
                                           reply_markup=all_modes_buttons(pub))
         elif how == "back":
-            await query.edit_message_text(f"📥 {title(peer)}: выберите вариант подключения.",
-                                          reply_markup=download_buttons(pub))
+            text, buttons = download_screen(pub, peer)
+            await query.edit_message_text(text, reply_markup=buttons)
         elif how in ("ios", "key", "file", "qr", "amk", "amq", "amf"):
             # Сначала экран конфига (с пометкой), потом файлы под ним.
             await show_card(query, pub, "✅ Отправил ниже 👇")
@@ -2660,8 +2722,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if pub in state["peers"]:
                 state["peers"][pub]["mode"] = mode
                 save_state(state)
-        await query.edit_message_text(f"✅ {title(mine[pub])}: режим «{MODES[mode]}». На каком устройстве подключаете?",
-                                      reply_markup=download_buttons(pub))
+        text, buttons = download_screen(pub, mine[pub], f"✅ {title(mine[pub])}: режим «{MODES[mode]}».")
+        await query.edit_message_text(text, reply_markup=buttons)
         return
 
     if action == "kdone":
@@ -3024,8 +3086,8 @@ async def on_user_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not peer_active(peer):
             await show_card(query, arg, "Срок закончился — сначала продлите.")
             return
-        await query.edit_message_text(f"📥 {title(peer)}: выберите вариант подключения.",
-                                      reply_markup=download_buttons(arg))
+        text, buttons = download_screen(arg, peer)
+        await query.edit_message_text(text, reply_markup=buttons)
         await maybe_video(query.message.chat_id, peer)
     elif action == "del":
         await query.edit_message_text(
@@ -6200,7 +6262,7 @@ async def amain():
                  asyncio.create_task(tunnel_loop()), asyncio.create_task(giveaway_loop()),
                  asyncio.create_task(waiting_loop()), asyncio.create_task(backup_loop()),
                  asyncio.create_task(ckassa_loop())]
-        if os.path.isfile(GERMANY_IDENTITY) and os.path.isfile(GERMANY_HOST_KEYS):
+        if germany_configured():
             tasks.append(asyncio.create_task(germany_loop()))
 
         stop = asyncio.Event()

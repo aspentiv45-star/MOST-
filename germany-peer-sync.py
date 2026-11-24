@@ -60,6 +60,12 @@ def describe():
         if key.strip() in OBFS | {"ListenPort"}:
             params[key.strip()] = value.strip()
     params["PublicKey"] = command("awg", "show", INTERFACE, "public-key")
+    stats = Path("/sys/class/net") / INTERFACE / "statistics"
+    try:
+        total = sum(int((stats / counter).read_text()) for counter in ("rx_bytes", "tx_bytes"))
+        params["TrafficSample"] = [time.monotonic(), total]
+    except (OSError, ValueError):
+        pass
     return params
 
 
