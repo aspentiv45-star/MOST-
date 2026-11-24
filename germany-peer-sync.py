@@ -60,6 +60,14 @@ def describe():
         if key.strip() in OBFS | {"ListenPort"}:
             params[key.strip()] = value.strip()
     params["PublicKey"] = command("awg", "show", INTERFACE, "public-key")
+    # Бот использует ListenPort в клиентском Endpoint. Публикуем внешний
+    # порт только при наличии нашего правила до фактического порта сервера.
+    rule = ["iptables", "-w", "2", "-t", "nat", "-C", "PREROUTING",
+            "-m", "addrtype", "--dst-type", "LOCAL", "-p", "udp", "--dport", "8054",
+            "-m", "comment", "--comment", "most-germany-altport", "-j", "REDIRECT",
+            "--to-ports", params["ListenPort"]]
+    if subprocess.run(rule, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        params["ListenPort"] = "8054"
     stats = Path("/sys/class/net") / INTERFACE / "statistics"
     try:
         total = sum(int((stats / counter).read_text()) for counter in ("rx_bytes", "tx_bytes"))
